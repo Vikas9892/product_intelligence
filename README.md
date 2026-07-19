@@ -65,7 +65,12 @@ application entrypoint — there is intentionally no `app.main:app` yet.
 - **Milestone 2 — Configuration Management**: typed, validated settings
   (`app/core/{constants,paths,settings,config}.py`) grouped by concern,
   loaded from `.env`, with production-safety validation and a cached
-  singleton. 19 unit tests, 99% coverage on `app/core`.
+  singleton.
+- **Milestone 3 — Logging**: centralized logging (`app/core/logging.py`)
+  — level read from settings, one console handler, a consistent
+  formatter, and `get_logger(name)` for any module to use.
+
+28 unit tests, 99% coverage on `app/core`.
 
 No API endpoints, database models, or AI code exist yet by design — see
 [`backend/README.md`](backend/README.md) for the full rationale.

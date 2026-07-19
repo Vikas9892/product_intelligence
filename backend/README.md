@@ -1,8 +1,9 @@
 # Backend — Multi-Modal Product Intelligence Engine
 
 FastAPI backend service. This document covers **Milestone 1 (Backend
-Skeleton)** and **Milestone 2 (Configuration Management)**: project
-structure, dependency management, tooling, and typed/validated settings.
+Skeleton)**, **Milestone 2 (Configuration Management)**, and **Milestone 3
+(Logging)**: project structure, dependency management, tooling,
+typed/validated settings, and centralized logging.
 No API endpoints, database models, or AI/business logic exist yet — that is
 intentional. See [Why no code yet?](#why-no-code-yet) below.
 
@@ -25,7 +26,8 @@ backend/
 │   │   ├── constants.py  # Fixed, non-configurable values (enums, prefixes, insecure-default marker)
 │   │   ├── paths.py      # Centralized filesystem paths (backend root, storage, uploads, logs)
 │   │   ├── settings.py   # Typed/validated settings schema (BaseModel groups + BaseSettings root)
-│   │   └── config.py     # Singleton accessor: `from app.core.config import settings`
+│   │   ├── config.py     # Singleton accessor: `from app.core.config import settings`
+│   │   └── logging.py    # Centralized logging: `from app.core.logging import get_logger`
 │   ├── services/        # Business logic, orchestration between repositories/external calls
 │   ├── repositories/    # Data access layer (DB, vector store, cache) behind an interface
 │   ├── models/           # ORM / persistence models
@@ -88,11 +90,13 @@ of relying on someone remembering to run `black` before committing.
 | `app/core/paths.py` | The one place that knows where the backend root actually is (`Path(__file__).resolve().parents[2]`) and derives `storage/`, `storage/uploads/`, and `logs/` from it. Exposes `ensure_runtime_directories()` to create them — not called on import, so importing config stays side-effect-free and tests stay hermetic. |
 | `app/core/settings.py` | The configuration *schema*: six `BaseModel` groups (`ApplicationSettings`, `DatabaseSettings`, `AIModelSettings`, `StorageSettings`, `SecuritySettings`, `LoggingSettings`) composed into one `Settings(BaseSettings)` root, with field-level and cross-field validation. No side effects — every class is directly constructible in a unit test. |
 | `app/core/config.py` | The composition root: caches one `Settings()` instance via `@lru_cache` and exposes it as both `get_settings()` (for later FastAPI `Depends()` use) and the module-level `settings` singleton every other module should import. |
+| `app/core/logging.py` | Configures the stdlib root logger (level from `settings.logging.level`, one console handler, a `timestamp \| level \| logger name \| message` formatter) and exposes `get_logger(name)` so any module gets a working, consistently formatted logger with zero setup. |
 | `tests/__init__.py`, `tests/core/__init__.py` | Makes `tests/` and `tests/core/` packages so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
 | `tests/test_environment.py` | A single sanity test (Python version check) proving the pytest + coverage pipeline actually runs. Real application tests start in Milestone 8. |
 | `tests/core/test_paths.py` | Verifies path relationships (`UPLOAD_DIR` under `STORAGE_DIR`, etc.) and that `ensure_runtime_directories()` creates the right directories, using `monkeypatch` + `tmp_path` so it never touches the real filesystem. |
 | `tests/core/test_settings.py` | Covers defaults, field validation (port range, minimum secret-key length, `SecretStr` not leaking into `repr()`), env-var overrides via nested `__` delimiters, and every production-safety rule in `Settings._validate_production_safety`. |
 | `tests/core/test_config.py` | Confirms `get_settings()` returns the same cached object across calls, that `cache_clear()` forces a fresh one, and that the module-level `settings` singleton is a real `Settings` instance. |
+| `tests/core/test_logging.py` | Covers level resolution (explicit override vs. `settings.logging.level`), the idempotent/`force` handler-installation behavior, the console formatter's exact output, and an end-to-end check that `get_logger(...).info(...)` really reaches stdout formatted correctly. An autouse fixture snapshots/restores the real root logger around every test so nothing here leaks into other tests. |
 | `scripts/.gitkeep`, `docs/.gitkeep` | Empty-directory placeholders — git does not track empty directories, so these keep the scaffold intact until real content lands. |
 
 ## Milestone 2 — configuration design decisions
@@ -158,6 +162,64 @@ tests to ignore the real `.env` file) or that a `dict` passed for a nested
 `plugins = ["pydantic.mypy"]` to `[tool.mypy]` teaches mypy pydantic's
 actual runtime semantics, so `mypy .` stays clean under `strict = true`
 without resorting to `# type: ignore` comments anywhere in the test suite.
+
+## Milestone 3 — logging design decisions
+
+**Why configure the root logger instead of a package-specific one?**
+Every logger created anywhere in the process (`logging.getLogger(__name__)`
+in any module, plus third-party libraries) propagates up to the root
+logger by default. Configuring the root once means every logger in the
+app — current and future — is consistently formatted without each module
+having to configure itself.
+
+**Why `get_logger(name)` instead of just documenting "use
+`logging.getLogger(__name__)`"?** Both produce the same logger object —
+`get_logger` is a thin wrapper — but it guarantees `configure_logging()`
+has run first. Without it, a module that logs before anything has called
+`configure_logging()` explicitly would emit unformatted messages via
+Python's default handler-less root logger behavior. `get_logger` makes
+"just works" the only outcome.
+
+**Why is `configure_logging()` idempotent instead of always
+reconfiguring?** It's called implicitly by *every* `get_logger()` call
+(so the first one configures logging without any module needing to know
+that). If it reconfigured every time, importing ten modules would mean
+ten redundant handler rebuilds, and — if it appended instead of replaced —
+duplicate handlers producing every log line multiple times. The
+`_configured` guard makes repeat calls free; `force=True` exists for
+callers (mainly tests, and later Milestone 4's app startup after settings
+might have changed) that genuinely need to rebuild it.
+
+**Why accept an explicit `level` override instead of only ever reading
+`settings.logging.level`?** Reading from settings is the real production
+path and the default when `level` is omitted. The override exists so unit
+tests can exercise "what if the level were DEBUG" without mutating the
+shared `settings` singleton (which would leak into other tests) — a pure
+parameter is easier to reason about than temporarily monkeypatching global
+config.
+
+**Why is `_build_handlers()` a separate function that just returns a
+list?** It's the one seam a file handler needs later: add
+`_build_file_handler()` and append it to the list `_build_handlers()`
+returns. `configure_logging()`, `get_logger()`, and every call site stay
+untouched — satisfying "extend to file handlers without changing calling
+code" without speculatively building file-handling (rotation, path from
+`paths.LOG_DIR`, etc.) before anything needs it.
+
+**Why is the module named `app/core/logging.py`, shadowing the stdlib
+module name?** Python 3 imports are absolute by default, so `import
+logging` inside this file unambiguously resolves to the stdlib module
+(`sys.modules['logging']`), not itself (`sys.modules['app.core.logging']`)
+— there's no actual collision. This is the same naming convention already
+used for `app/core/config.py` and is common in production FastAPI
+codebases; the alternative (`logging_config.py`) was considered but
+rejected as more to type for no real disambiguation benefit.
+
+**Why isn't `settings.logging.json_logs` wired up yet?** It's reserved
+from Milestone 2 for structured/JSON logging, which this milestone
+intentionally doesn't implement — the requirement was one consistent
+console formatter. Adding a conditional JSON formatter now would be
+building for a need that doesn't exist yet.
 
 ## Setup instructions
 
@@ -268,4 +330,26 @@ cd ..
 # 6. Version control
 git add -A
 git commit -m "feat: add configuration management (Milestone 2)"
+```
+
+**Milestone 3 (Logging)** added, from the repo root:
+
+```bash
+# 1. Logging module
+#    backend/app/core/logging.py — hand-written
+
+# 2. Tests
+#    backend/tests/core/test_logging.py — hand-written
+
+# 3. Verify
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+
+# 4. Version control
+git add -A
+git commit -m "feat: add centralized logging (Milestone 3)"
 ```

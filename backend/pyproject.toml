@@ -75,6 +75,7 @@ include = '\.pyi?$'
 # MyPy — static type checking
 # ----------------------------------------------------------------------------
 [tool.mypy]
+plugins = ["pydantic.mypy"]
 python_version = "3.12"
 mypy_path = "."
 explicit_package_bases = true

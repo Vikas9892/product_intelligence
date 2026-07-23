@@ -39,6 +39,11 @@ API_V1_PREFIX = "/api/v1"
 # --- Application identity ---
 DEFAULT_APP_NAME = "product-intelligence-backend"
 DEFAULT_APP_VERSION = "0.1.0"
+DEFAULT_APP_DESCRIPTION = (
+    "Multi-Modal Product Intelligence Engine — backend API. "
+    "Ingests product text and images, then exposes search and AI-assisted "
+    "metadata over HTTP."
+)
 
 # --- Security ---
 # An obviously-fake fallback so local dev works with zero config. Settings

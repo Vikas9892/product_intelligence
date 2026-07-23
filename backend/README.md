@@ -1,9 +1,10 @@
 # Backend — Multi-Modal Product Intelligence Engine
 
 FastAPI backend service. This document covers **Milestone 1 (Backend
-Skeleton)**, **Milestone 2 (Configuration Management)**, and **Milestone 3
-(Logging)**: project structure, dependency management, tooling,
-typed/validated settings, and centralized logging.
+Skeleton)**, **Milestone 2 (Configuration Management)**, **Milestone 3
+(Logging)**, and **Milestone 4 (FastAPI Application Factory)**: project
+structure, dependency management, tooling, typed/validated settings,
+centralized logging, and the app factory + lifespan wiring.
 No API endpoints, database models, or AI/business logic exist yet — that is
 intentional. See [Why no code yet?](#why-no-code-yet) below.
 
@@ -21,22 +22,25 @@ on every machine and in CI, before a single line of business logic exists.
 ```
 backend/
 ├── app/
-│   ├── api/            # HTTP route definitions (FastAPI routers) — empty until Milestone 4/5
-│   ├── core/            # App-wide concerns: settings (this milestone), logging, security, startup/shutdown
-│   │   ├── constants.py  # Fixed, non-configurable values (enums, prefixes, insecure-default marker)
-│   │   ├── paths.py      # Centralized filesystem paths (backend root, storage, uploads, logs)
-│   │   ├── settings.py   # Typed/validated settings schema (BaseModel groups + BaseSettings root)
-│   │   ├── config.py     # Singleton accessor: `from app.core.config import settings`
-│   │   └── logging.py    # Centralized logging: `from app.core.logging import get_logger`
-│   ├── services/        # Business logic, orchestration between repositories/external calls
-│   ├── repositories/    # Data access layer (DB, vector store, cache) behind an interface
-│   ├── models/           # ORM / persistence models
-│   ├── schemas/          # Pydantic request/response schemas (API contracts)
-│   ├── workers/          # Background jobs / async task consumers
-│   ├── middleware/       # ASGI middleware (request logging, correlation IDs, etc.)
-│   ├── dependencies/     # FastAPI dependency-injection providers
-│   └── utils/            # Small stateless helpers shared across layers
-├── tests/                # pytest test suite, mirrors the app/ package layout
+│   ├── main.py            # ASGI entrypoint: `app = create_app()`, what uvicorn serves
+│   ├── application.py     # `create_app()` factory: builds and configures the FastAPI instance
+│   ├── lifespan.py        # Startup/shutdown logic wired via FastAPI's lifespan API
+│   ├── api/                # HTTP route definitions (FastAPI routers) — empty until Milestone 5
+│   ├── core/               # App-wide concerns: settings, logging, security, startup/shutdown
+│   │   ├── constants.py    # Fixed, non-configurable values (enums, prefixes, insecure-default marker)
+│   │   ├── paths.py        # Centralized filesystem paths (backend root, storage, uploads, logs)
+│   │   ├── settings.py     # Typed/validated settings schema (BaseModel groups + BaseSettings root)
+│   │   ├── config.py       # Singleton accessor: `from app.core.config import settings`
+│   │   └── logging.py      # Centralized logging: `from app.core.logging import get_logger`
+│   ├── services/          # Business logic, orchestration between repositories/external calls
+│   ├── repositories/      # Data access layer (DB, vector store, cache) behind an interface
+│   ├── models/             # ORM / persistence models
+│   ├── schemas/            # Pydantic request/response schemas (API contracts)
+│   ├── workers/            # Background jobs / async task consumers
+│   ├── middleware/         # ASGI middleware (request logging, correlation IDs, etc.) — empty until later
+│   ├── dependencies/       # FastAPI dependency-injection providers
+│   └── utils/              # Small stateless helpers shared across layers
+├── tests/                  # pytest test suite, mirrors the app/ package layout
 ├── scripts/              # One-off / maintenance scripts (not part of the importable app)
 ├── docs/                 # Design notes, ADRs, phase write-ups
 ├── pyproject.toml        # Single source of truth: dependencies + tool config
@@ -91,12 +95,18 @@ of relying on someone remembering to run `black` before committing.
 | `app/core/settings.py` | The configuration *schema*: six `BaseModel` groups (`ApplicationSettings`, `DatabaseSettings`, `AIModelSettings`, `StorageSettings`, `SecuritySettings`, `LoggingSettings`) composed into one `Settings(BaseSettings)` root, with field-level and cross-field validation. No side effects — every class is directly constructible in a unit test. |
 | `app/core/config.py` | The composition root: caches one `Settings()` instance via `@lru_cache` and exposes it as both `get_settings()` (for later FastAPI `Depends()` use) and the module-level `settings` singleton every other module should import. |
 | `app/core/logging.py` | Configures the stdlib root logger (level from `settings.logging.level`, one console handler, a `timestamp \| level \| logger name \| message` formatter) and exposes `get_logger(name)` so any module gets a working, consistently formatted logger with zero setup. |
+| `app/lifespan.py` | `lifespan(app)`: an `@asynccontextmanager` passed to `FastAPI(lifespan=...)`. Before `yield` (startup) it logs that the app is starting and calls `paths.ensure_runtime_directories()`; after `yield` (shutdown) it logs that the app is stopping. No database/AI connections yet — reserved for later milestones. |
+| `app/application.py` | `create_app() -> FastAPI`: the only place `FastAPI(...)` is instantiated. Sets `title`/`description`/`version` from `settings.application` + `constants.DEFAULT_APP_DESCRIPTION`, wires in `lifespan`, then calls the private `_register_routers(app)` seam (currently empty) before returning the instance. |
+| `app/main.py` | ASGI entrypoint: `app = create_app()`. This is the `app.main:app` target `uvicorn`/`make run` serve — one line of logic, everything real lives in `create_app()`. |
 | `tests/__init__.py`, `tests/core/__init__.py` | Makes `tests/` and `tests/core/` packages so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
 | `tests/test_environment.py` | A single sanity test (Python version check) proving the pytest + coverage pipeline actually runs. Real application tests start in Milestone 8. |
 | `tests/core/test_paths.py` | Verifies path relationships (`UPLOAD_DIR` under `STORAGE_DIR`, etc.) and that `ensure_runtime_directories()` creates the right directories, using `monkeypatch` + `tmp_path` so it never touches the real filesystem. |
 | `tests/core/test_settings.py` | Covers defaults, field validation (port range, minimum secret-key length, `SecretStr` not leaking into `repr()`), env-var overrides via nested `__` delimiters, and every production-safety rule in `Settings._validate_production_safety`. |
 | `tests/core/test_config.py` | Confirms `get_settings()` returns the same cached object across calls, that `cache_clear()` forces a fresh one, and that the module-level `settings` singleton is a real `Settings` instance. |
 | `tests/core/test_logging.py` | Covers level resolution (explicit override vs. `settings.logging.level`), the idempotent/`force` handler-installation behavior, the console formatter's exact output, and an end-to-end check that `get_logger(...).info(...)` really reaches stdout formatted correctly. An autouse fixture snapshots/restores the real root logger around every test so nothing here leaks into other tests. |
+| `tests/test_lifespan.py` | Enters/exits `lifespan(app)` as an async context manager directly (no HTTP server needed) and asserts, via `caplog`, that the startup message logs before `yield` and the shutdown message logs after; asserts `paths.ensure_runtime_directories` is called exactly once on startup via `monkeypatch`. |
+| `tests/test_application.py` | Confirms `create_app()` returns a `FastAPI` instance with `title`/`version`/`description` sourced from settings/constants, that each call returns an independent instance (no shared global), that no business routes are registered yet (only FastAPI's built-in docs/openapi routes), and — via `TestClient` as a context manager — that the app's startup/shutdown lifespan runs without raising. |
+| `tests/test_main.py` | Confirms `app.main.app` is a real `FastAPI` instance with the expected title, proving the module-level `app = create_app()` entrypoint actually works end-to-end. |
 | `scripts/.gitkeep`, `docs/.gitkeep` | Empty-directory placeholders — git does not track empty directories, so these keep the scaffold intact until real content lands. |
 
 ## Milestone 2 — configuration design decisions
@@ -221,6 +231,77 @@ intentionally doesn't implement — the requirement was one consistent
 console formatter. Adding a conditional JSON formatter now would be
 building for a need that doesn't exist yet.
 
+## Milestone 4 — application factory design decisions
+
+**Why a `create_app()` factory instead of a module-level `app =
+FastAPI()`?** A module-level `app` is a single shared, mutable object —
+every test that imports it gets the *same* instance, so one test's state
+(or a route registered by mistake) can leak into another. A factory
+function returns a brand-new instance on every call, so
+`tests/test_application.py` can build as many independent apps as it needs,
+and later milestones can build differently-configured apps (e.g. for
+integration tests) without any special-casing.
+
+**Why three files (`main.py`, `application.py`, `lifespan.py`) instead of
+one?** Each has a single reason to change. `lifespan.py` only changes when
+startup/shutdown behavior changes (adding a DB pool in a later milestone).
+`application.py` only changes when app *construction* changes (metadata,
+routers, eventually middleware/exception handlers). `main.py` never
+changes at all — it's permanently `app = create_app()` — so it can be
+uvicorn's stable entrypoint (`uvicorn app.main:app`) while everything
+behind it evolves freely.
+
+**Why FastAPI's `lifespan` parameter instead of the deprecated
+`@app.on_event("startup")` / `@app.on_event("shutdown")` decorators?** The
+decorator-based events API is deprecated in modern FastAPI/Starlette and
+splits one logical "app lifetime" concern into two disconnected callbacks
+with no shared state between them. `lifespan` is a single
+`@asynccontextmanager`: everything before `yield` is startup, everything
+after is shutdown, and they can share local variables (e.g. a database
+engine created at startup and closed at shutdown) — a shape later
+milestones' resource setup/teardown will need anyway.
+
+**Why does `lifespan` call `paths.ensure_runtime_directories()` instead of
+it running on import?** `app/core/paths.py` deliberately left this
+uncalled (see Milestone 2 above) specifically so it would run exactly
+once, at real application startup — this milestone is that startup. Tests
+that only import `app.core.config`/`app.core.paths` still touch no real
+filesystem; only actually starting the app (via `create_app()` + its
+lifespan, or `TestClient`) creates `storage/`, `storage/uploads/`, and
+`logs/`.
+
+**Why log via `app.core.logging.get_logger`, not `print()`?** The whole
+point of Milestone 3 was one consistently formatted logger everywhere in
+the app; startup/shutdown are exactly the kind of operational events
+(when did the process come up, when did it go down, with what version and
+in what environment) that belong in that same stream, not bypassing it.
+
+**Why is `_register_routers()` a separate function that currently does
+nothing?** Same seam pattern as `logging._build_handlers()` in Milestone
+3: one obvious place, agreed now, for `app.include_router(...)` calls to
+land in Milestone 5+, so adding the first real route is a one-line change
+inside an existing function instead of restructuring `create_app()`.
+Building an actual router registry/aggregator before any router exists
+would be speculative — this is the minimum seam that keeps the two
+concerns (app construction vs. route wiring) separate.
+
+**Why does `create_app()` set `description` from a new
+`constants.DEFAULT_APP_DESCRIPTION` instead of `settings.application`?**
+`title` and `version` are legitimately things an operator might reasonably
+override per-deployment (hence they live in `Settings`, with constants
+only as their default). The API description is prose the *code* owns, not
+something a deployment should be able to change via an env var — so it
+belongs in `constants.py` alongside the other fixed, non-configurable
+values, not the settings schema.
+
+**Why does the app start successfully with zero routes?** Proving the
+factory + lifespan work correctly *before* any business route exists means
+a bug here can't hide behind a passing route test — `TestClient(app)` in
+`tests/test_application.py` exercises the full startup/shutdown cycle
+against an app that only has FastAPI's own built-in `/docs`, `/redoc`, and
+`/openapi.json`, isolating "does the app boot" from "does a specific
+endpoint work" (the latter starts in Milestone 5).
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -242,7 +323,7 @@ Or from the repo root via the Makefile: `make install`.
 | `make format` | `ruff format .` + `black .` — auto-format code |
 | `make typecheck` | `mypy .` — strict static type checking |
 | `make test` | `pytest` — runs the suite with coverage (`--cov=app`) |
-| `make run` | Starts `uvicorn app.main:app --reload` — **not available until Milestone 4** adds `app/main.py` |
+| `make run` | Starts `uvicorn app.main:app --reload` — the app boots with no business routes yet (only `/docs`, `/redoc`, `/openapi.json`) |
 | `make clean` | Removes `.venv`, caches, and build artifacts |
 
 Every one of these also runs directly with `uv run <tool>` from inside
@@ -352,4 +433,28 @@ cd ..
 # 4. Version control
 git add -A
 git commit -m "feat: add centralized logging (Milestone 3)"
+```
+
+**Milestone 4 (FastAPI Application Factory)** added, from the repo root:
+
+```bash
+# 1. Application factory, lifespan, and entrypoint
+#    backend/app/{lifespan,application,main}.py — hand-written
+#    backend/app/core/constants.py — added DEFAULT_APP_DESCRIPTION
+
+# 2. Tests
+#    backend/tests/{test_lifespan,test_application,test_main}.py — hand-written
+
+# 3. Verify
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+uv run uvicorn app.main:app --reload   # manual smoke test: confirms it boots
+cd ..
+
+# 4. Version control
+git add -A
+git commit -m "feat: add FastAPI application factory (Milestone 4)"
 ```

@@ -26,7 +26,7 @@ from app.core import constants, paths
 
 
 class ApplicationSettings(BaseModel):
-    """Core app identity and HTTP server settings."""
+    """Core app identity, HTTP server, and edge-middleware settings."""
 
     name: str = constants.DEFAULT_APP_NAME
     version: str = constants.DEFAULT_APP_VERSION
@@ -35,6 +35,16 @@ class ApplicationSettings(BaseModel):
     host: str = "0.0.0.0"
     port: int = Field(default=8000, ge=1, le=65535)
     api_prefix: str = constants.API_V1_PREFIX
+
+    #: `Host` headers the app will answer for (TrustedHostMiddleware).
+    #: `["*"]` (accept any Host) is a fine local-dev default but is
+    #: rejected in production — see `Settings._validate_production_safety`.
+    trusted_hosts: list[str] = Field(default_factory=lambda: ["*"])
+
+    #: Origins allowed to make cross-origin browser requests (CORSMiddleware).
+    #: Empty by default — no cross-origin access until a deployment opts in
+    #: by listing its actual frontend origin(s).
+    cors_allowed_origins: list[str] = Field(default_factory=list)
 
 
 class DatabaseSettings(BaseModel):
@@ -135,5 +145,11 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "database.url must not be SQLite in production "
                     "(DATABASE__URL) — SQLite is a local/dev/test-only store."
+                )
+            if self.application.trusted_hosts == ["*"]:
+                raise ValueError(
+                    "application.trusted_hosts must not be the wildcard default in "
+                    "production (APPLICATION__TRUSTED_HOSTS) — accepting any Host "
+                    "header allows Host-header injection attacks."
                 )
         return self

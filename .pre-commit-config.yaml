@@ -27,15 +27,24 @@ repos:
       - id: black
         files: ^backend/
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v2.3.0
+  # A local hook (not the mirrors-mypy repo) runs mypy through the
+  # project's own `uv` environment instead of an isolated pre-commit venv.
+  # mypy needs `app`'s real installed location (an editable install of the
+  # backend package) plus every runtime/dev dependency (fastapi, pytest,
+  # httpx, ...) to resolve imports correctly — mirroring that in
+  # `additional_dependencies` by hand drifts out of sync with
+  # `pyproject.toml` over time (exactly what happened here: it was missing
+  # `fastapi` from the moment Milestone 4 introduced it). `--directory
+  # backend` runs mypy with the same working directory `make typecheck`/CI
+  # use, which `mypy_path = "."` in `backend/pyproject.toml` assumes.
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - pydantic>=2.13.4
-          - pydantic-settings>=2.14.2
-        args: ["--config-file=backend/pyproject.toml"]
-        files: ^backend/
+        name: mypy (backend)
+        entry: uv run --directory backend mypy .
+        language: system
+        pass_filenames: false
+        files: ^backend/.*\.py$
 
 default_language_version:
   python: python3.12

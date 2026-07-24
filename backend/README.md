@@ -1,12 +1,17 @@
 # Backend — Multi-Modal Product Intelligence Engine
 
-FastAPI backend service. This document covers **Milestone 1 (Backend
-Skeleton)**, **Milestone 2 (Configuration Management)**, **Milestone 3
-(Logging)**, and **Milestone 4 (FastAPI Application Factory)**: project
-structure, dependency management, tooling, typed/validated settings,
-centralized logging, and the app factory + lifespan wiring.
-No API endpoints, database models, or AI/business logic exist yet — that is
-intentional. See [Why no code yet?](#why-no-code-yet) below.
+FastAPI backend service. This document covers all of **Phase 1**:
+**Milestone 1 (Backend Skeleton)**, **Milestone 2 (Configuration
+Management)**, **Milestone 3 (Logging)**, **Milestone 4 (FastAPI
+Application Factory)**, **Milestone 5 (Health & System Endpoints)**,
+**Milestone 6 (Global Exception Handling)**, **Milestone 7 (Middleware)**,
+and **Milestone 8 (Testing & CI Foundation)** — project structure,
+dependency management, tooling, typed/validated settings, centralized
+logging, the app factory + lifespan wiring, the first API routes, a
+consistent error-response contract, cross-cutting request middleware, and
+continuous integration.
+No database models or AI/business logic exist yet — that is intentional.
+See [Why no code yet?](#why-no-code-yet) below.
 
 ## Project overview
 
@@ -25,19 +30,30 @@ backend/
 │   ├── main.py            # ASGI entrypoint: `app = create_app()`, what uvicorn serves
 │   ├── application.py     # `create_app()` factory: builds and configures the FastAPI instance
 │   ├── lifespan.py        # Startup/shutdown logic wired via FastAPI's lifespan API
-│   ├── api/                # HTTP route definitions (FastAPI routers) — empty until Milestone 5
+│   ├── api/                # HTTP route definitions (FastAPI routers)
+│   │   └── health.py       # GET /health, /ready, /version — unversioned system endpoints
 │   ├── core/               # App-wide concerns: settings, logging, security, startup/shutdown
 │   │   ├── constants.py    # Fixed, non-configurable values (enums, prefixes, insecure-default marker)
 │   │   ├── paths.py        # Centralized filesystem paths (backend root, storage, uploads, logs)
 │   │   ├── settings.py     # Typed/validated settings schema (BaseModel groups + BaseSettings root)
 │   │   ├── config.py       # Singleton accessor: `from app.core.config import settings`
 │   │   └── logging.py      # Centralized logging: `from app.core.logging import get_logger`
+│   ├── exceptions/         # Domain exception hierarchy + global exception handlers
+│   │   ├── base.py          # `AppException` — the base every domain exception subclasses
+│   │   ├── errors.py        # Concrete exceptions: ValidationException, ResourceNotFoundException, ...
+│   │   └── handlers.py       # Registers handlers converting every error path to one JSON envelope
+│   ├── middleware/         # Cross-cutting ASGI middleware, applied to every request/response
+│   │   ├── request_id.py    # Assigns/propagates a request/correlation ID
+│   │   ├── timing.py         # Measures request duration
+│   │   ├── logging.py        # Logs request start/completion (uses the ID + duration above)
+│   │   └── security_headers.py # Stamps baseline security response headers
 │   ├── services/          # Business logic, orchestration between repositories/external calls
 │   ├── repositories/      # Data access layer (DB, vector store, cache) behind an interface
 │   ├── models/             # ORM / persistence models
 │   ├── schemas/            # Pydantic request/response schemas (API contracts)
+│   │   ├── health.py        # Response models for /health, /ready, /version
+│   │   └── errors.py        # The `{"success", "error": {...}}` envelope every error returns
 │   ├── workers/            # Background jobs / async task consumers
-│   ├── middleware/         # ASGI middleware (request logging, correlation IDs, etc.) — empty until later
 │   ├── dependencies/       # FastAPI dependency-injection providers
 │   └── utils/              # Small stateless helpers shared across layers
 ├── tests/                  # pytest test suite, mirrors the app/ package layout
@@ -49,6 +65,8 @@ backend/
 ├── .python-version       # Pins the interpreter uv provisions (3.12)
 ├── .gitignore             # Backend-specific ignore rules
 └── .env.example           # Template for local environment variables
+
+.github/workflows/ci.yml   # Repo-root: GitHub Actions — ruff, black --check, mypy, pytest
 ```
 
 Each layer under `app/` has a single responsibility so that later
@@ -78,6 +96,7 @@ of relying on someone remembering to run `black` before committing.
 | `.gitignore` | Repo-wide ignore rules (venvs, caches, `.env`, OS files); also reserves entries for a future `frontend/`. |
 | `Makefile` | One-word entrypoints (`make install/run/lint/format/typecheck/test/clean`) that wrap the underlying `uv` commands. |
 | `README.md` | Project overview and phase roadmap. |
+| `.github/workflows/ci.yml` | GitHub Actions workflow (Milestone 8): on every push/PR to `main`, installs `uv`, then runs `ruff check`, `black --check`, `mypy`, and `pytest` against `backend/` — the same four commands `make lint/format/typecheck/test` run locally, so "passes locally" and "passes in CI" mean the same thing. |
 
 **Inside `backend/`:**
 
@@ -96,17 +115,35 @@ of relying on someone remembering to run `black` before committing.
 | `app/core/config.py` | The composition root: caches one `Settings()` instance via `@lru_cache` and exposes it as both `get_settings()` (for later FastAPI `Depends()` use) and the module-level `settings` singleton every other module should import. |
 | `app/core/logging.py` | Configures the stdlib root logger (level from `settings.logging.level`, one console handler, a `timestamp \| level \| logger name \| message` formatter) and exposes `get_logger(name)` so any module gets a working, consistently formatted logger with zero setup. |
 | `app/lifespan.py` | `lifespan(app)`: an `@asynccontextmanager` passed to `FastAPI(lifespan=...)`. Before `yield` (startup) it logs that the app is starting and calls `paths.ensure_runtime_directories()`; after `yield` (shutdown) it logs that the app is stopping. No database/AI connections yet — reserved for later milestones. |
-| `app/application.py` | `create_app() -> FastAPI`: the only place `FastAPI(...)` is instantiated. Sets `title`/`description`/`version` from `settings.application` + `constants.DEFAULT_APP_DESCRIPTION`, wires in `lifespan`, then calls the private `_register_routers(app)` seam (currently empty) before returning the instance. |
+| `app/application.py` | `create_app() -> FastAPI`: the only place `FastAPI(...)` is instantiated. Sets `title`/`description`/`version` from `settings.application` + `constants.DEFAULT_APP_DESCRIPTION`, wires in `lifespan`, then calls three private seams in order — `_register_middleware`, `_register_exception_handlers`, `_register_routers` — before returning the instance. |
 | `app/main.py` | ASGI entrypoint: `app = create_app()`. This is the `app.main:app` target `uvicorn`/`make run` serve — one line of logic, everything real lives in `create_app()`. |
-| `tests/__init__.py`, `tests/core/__init__.py` | Makes `tests/` and `tests/core/` packages so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
-| `tests/test_environment.py` | A single sanity test (Python version check) proving the pytest + coverage pipeline actually runs. Real application tests start in Milestone 8. |
+| `app/api/health.py` | `GET /health`, `/ready`, `/version` (Milestone 5). Deliberately unversioned (not under `/api/v1`) — see the Milestone 5 section below for why. Logs each call at `DEBUG` via `get_logger`. |
+| `app/schemas/health.py` | Response models for the three endpoints above: `HealthResponse`, `ReadinessResponse` (with a `checks: dict[str, bool]` shape ready for real dependency checks later), `VersionResponse`. |
+| `app/schemas/errors.py` | `ErrorResponse`/`ErrorDetail` (Milestone 6): the single `{"success": false, "error": {"code", "message", "details"}}` shape every error response uses. |
+| `app/exceptions/base.py` | `AppException` (Milestone 6): the base class every domain exception subclasses. Carries a `status_code` (transport), a stable `code` (API contract), and a human `message` — see the Milestone 6 section for why those are kept separate instead of just using `HTTPException`. |
+| `app/exceptions/errors.py` | Concrete, domain-agnostic exceptions: `ValidationException` (422), `ResourceNotFoundException` (404), `ConflictException` (409). |
+| `app/exceptions/handlers.py` | `register_exception_handlers(app)`: registers one handler each for `AppException`, `RequestValidationError`, `StarletteHTTPException`, and `Exception` (the catch-all for real bugs), so every error path returns the same JSON envelope. |
+| `app/middleware/request_id.py` | `RequestIDMiddleware` (Milestone 7): reuses an inbound `X-Request-ID` header or generates a UUID4, stores it on `request.state.request_id`, echoes it back as a response header. |
+| `app/middleware/timing.py` | `TimingMiddleware`: measures handling duration with `time.perf_counter`, stores it on `request.state.duration_ms`, echoes it as `X-Response-Time-Ms`. |
+| `app/middleware/logging.py` | `RequestLoggingMiddleware`: logs one line when a request starts, one when it finishes — both tagged with the request ID, the completion line also with status code and duration. |
+| `app/middleware/security_headers.py` | `SecurityHeadersMiddleware`: stamps a baseline set of OWASP-recommended security response headers (`X-Content-Type-Options`, `X-Frame-Options`, etc.) via `setdefault`, so a route that already set one of these wins. |
+| `tests/__init__.py`, `tests/core/__init__.py`, `tests/api/__init__.py`, `tests/middleware/__init__.py`, `tests/exceptions/__init__.py` | Makes each test directory a package so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
+| `tests/conftest.py` | Shared fixtures (Milestone 8): `app` (a fresh `create_app()` instance per test) and `client` (a `TestClient` bound to it, entered as a context manager so the lifespan actually runs). Only fixtures genuinely needed by multiple modules live here. |
+| `tests/test_environment.py` | A single sanity test (Python version check) proving the pytest + coverage pipeline actually runs. |
 | `tests/core/test_paths.py` | Verifies path relationships (`UPLOAD_DIR` under `STORAGE_DIR`, etc.) and that `ensure_runtime_directories()` creates the right directories, using `monkeypatch` + `tmp_path` so it never touches the real filesystem. |
-| `tests/core/test_settings.py` | Covers defaults, field validation (port range, minimum secret-key length, `SecretStr` not leaking into `repr()`), env-var overrides via nested `__` delimiters, and every production-safety rule in `Settings._validate_production_safety`. |
+| `tests/core/test_settings.py` | Covers defaults, field validation (port range, minimum secret-key length, `SecretStr` not leaking into `repr()`), env-var overrides via nested `__` delimiters, every production-safety rule in `Settings._validate_production_safety` (including the Milestone 7 `trusted_hosts` rule), and the new `cors_allowed_origins`/`trusted_hosts` defaults. |
 | `tests/core/test_config.py` | Confirms `get_settings()` returns the same cached object across calls, that `cache_clear()` forces a fresh one, and that the module-level `settings` singleton is a real `Settings` instance. |
 | `tests/core/test_logging.py` | Covers level resolution (explicit override vs. `settings.logging.level`), the idempotent/`force` handler-installation behavior, the console formatter's exact output, and an end-to-end check that `get_logger(...).info(...)` really reaches stdout formatted correctly. An autouse fixture snapshots/restores the real root logger around every test so nothing here leaks into other tests. |
 | `tests/test_lifespan.py` | Enters/exits `lifespan(app)` as an async context manager directly (no HTTP server needed) and asserts, via `caplog`, that the startup message logs before `yield` and the shutdown message logs after; asserts `paths.ensure_runtime_directories` is called exactly once on startup via `monkeypatch`. |
-| `tests/test_application.py` | Confirms `create_app()` returns a `FastAPI` instance with `title`/`version`/`description` sourced from settings/constants, that each call returns an independent instance (no shared global), that no business routes are registered yet (only FastAPI's built-in docs/openapi routes), and — via `TestClient` as a context manager — that the app's startup/shutdown lifespan runs without raising. |
+| `tests/test_application.py` | Confirms `create_app()`'s metadata, that the system routes (and nothing else) are registered, that all middleware are registered in the exact documented order, that a handler is registered for every error path, and — via `TestClient` and settings monkeypatches — the actual runtime behavior of the CORS and TrustedHost middleware (allowed vs. rejected origin/host). |
 | `tests/test_main.py` | Confirms `app.main.app` is a real `FastAPI` instance with the expected title, proving the module-level `app = create_app()` entrypoint actually works end-to-end. |
+| `tests/api/test_health.py` | Hits `/health`, `/ready`, `/version` through the shared `client` fixture and asserts the exact JSON body each returns. |
+| `tests/middleware/test_request_id.py` | Builds a minimal app with only `RequestIDMiddleware` registered; asserts a UUID4 is generated when no ID is supplied, and that a caller-supplied `X-Request-ID` is echoed back unchanged. |
+| `tests/middleware/test_timing.py` | Builds a minimal app with only `TimingMiddleware`; asserts the `X-Response-Time-Ms` header reflects at least the handler's simulated delay, and that `request.state.duration_ms` isn't visible from inside the handler (it's only set after the handler returns). |
+| `tests/middleware/test_logging.py` | Builds minimal apps with different combinations of `RequestIDMiddleware`/`TimingMiddleware` present; asserts the logged lines fall back to `-`/`?ms` placeholders when those aren't registered, and carry the real ID/duration when they are. |
+| `tests/middleware/test_security_headers.py` | Asserts the full baseline header set is present, and that `setdefault` means a header the route already set (e.g. a custom `X-Frame-Options`) is not overwritten. |
+| `tests/exceptions/test_base.py`, `test_errors.py` | Unit tests for `AppException` and its concrete subclasses' defaults/overrides — no HTTP involved. |
+| `tests/exceptions/test_handlers.py` | Integration tests: a throwaway FastAPI app with `register_exception_handlers` applied and routes that deliberately raise each error type, asserting the exact JSON envelope for domain exceptions, `RequestValidationError`, plain `HTTPException`, and unhandled exceptions (and that the latter never leaks the real exception message). |
 | `scripts/.gitkeep`, `docs/.gitkeep` | Empty-directory placeholders — git does not track empty directories, so these keep the scaffold intact until real content lands. |
 
 ## Milestone 2 — configuration design decisions
@@ -302,6 +339,301 @@ against an app that only has FastAPI's own built-in `/docs`, `/redoc`, and
 `/openapi.json`, isolating "does the app boot" from "does a specific
 endpoint work" (the latter starts in Milestone 5).
 
+## Milestone 5 — health & system endpoints design decisions
+
+**Why are `/health`, `/ready`, and `/version` two separate concepts
+(liveness vs. readiness) instead of one endpoint?** Kubernetes (and any
+similar orchestrator/load balancer) asks two different questions that
+demand different answers. *Liveness* ("is this process still running and
+able to respond at all?") controls whether the orchestrator **restarts**
+the container — it must never depend on anything that can be transiently
+unavailable, or a temporary database blip causes needless restart churn
+that doesn't fix the database. *Readiness* ("can this instance serve
+traffic **right now**?") controls whether the orchestrator **routes**
+traffic to it — a process can be alive but not ready (still warming up, a
+dependency briefly down), and should keep running without receiving
+requests in that state. Collapsing both into one endpoint would force a
+single response to answer two questions with different consequences.
+
+**Why is `ReadinessResponse.checks` an empty dict right now instead of a
+single boolean?** No dependencies (database, vector store, cache) exist
+yet to check — Milestone 8's scope explicitly excludes them. Shaping the
+field as `dict[str, bool]` now means later milestones add entries
+(`{"database": True}`) without changing the response's *shape*, so
+existing API consumers don't have to handle a schema change just because
+a new dependency got added.
+
+**Why are these three routes mounted at `/health`/`/ready`/`/version`
+directly, not under `settings.application.api_prefix` (`/api/v1`)?**
+Infrastructure that calls them — the Kubernetes kubelet, a load balancer's
+health check, an uptime monitor — is configured once with a fixed path and
+is not part of "the API" a versioned contract applies to; it should never
+need reconfiguring just because the business API moved from `/api/v1` to
+`/api/v2`. Business routers added in later milestones *do* go under the
+prefix.
+
+**Why is `/version` useful?** It answers "what's actually running right
+now" from outside the process: confirming a deploy actually rolled out
+(compare the returned `version` to what was just shipped), tagging
+monitoring dashboards/metrics by version, and giving support/bug reports a
+reliable "what version were you on" answer without needing shell access to
+the host.
+
+## Milestone 6 — global exception handling design decisions
+
+**Why not just raise `HTTPException` everywhere?** `HTTPException` only
+carries a status code and a free-text `detail` string — there's no place
+for a *stable, machine-readable* identifier a client can safely branch on
+across releases. Every call site ends up inventing its own `detail`
+wording, and two totally different failures (a missing product vs. a
+missing user) can legitimately share the same status code (404), so a
+client can't distinguish them without string-matching wording that's
+allowed to change. `AppException` fixes this by carrying both a
+`status_code` (the transport-layer concern) *and* a `code` (the API
+contract — e.g. `"resource_not_found"`, stable across releases)
+independently.
+
+**Why a base `AppException` class instead of one exception per case
+inline?** A shared base means `app/exceptions/handlers.py` catches *one*
+type once and correctly handles every present and future subclass — a new
+domain exception (e.g. a future `InsufficientStockException`) needs zero
+changes to the handler, only a new class in `errors.py` that sets
+`status_code`/`code`/`message`.
+
+**Why register a handler for `Exception` itself, not just for
+`AppException`?** Domain code raising `AppException` is the "expected
+failure" path; a raw `Exception` (a real bug — a `None` where a value was
+assumed, a third-party call that raised something unanticipated) is not.
+Without a catch-all, an unhandled bug would fall through to Starlette's
+default plain-text 500 page instead of the same JSON envelope every other
+error uses — breaking the "one consistent shape" contract exactly when a
+client needs it most (a real outage). Registering a handler for `Exception`
+specifically routes it into Starlette's `ServerErrorMiddleware` (its
+outermost middleware — see `_register_middleware`'s docstring), so it also
+catches exceptions raised by other middleware, not just inside a route.
+
+**Why does the unhandled-exception handler log the real exception
+(`logger.exception`, with traceback) but respond with a generic
+"An unexpected error occurred."?** These serve different audiences. An
+operator debugging an incident needs the real traceback — that's what
+`logger.exception` is for. An API *client* receiving the raw exception
+message (a stack frame, a database connection string fragment, an
+internal file path) is an information-disclosure risk, not a debugging
+aid — attackers routinely fingerprint backends this way. Keeping the log
+detailed and the response generic serves both needs without trading one
+off against the other.
+
+**Why is `RequestValidationError` (FastAPI's own request-schema
+validation) handled separately from `ValidationException`?** They catch
+different failure classes. `RequestValidationError` fires when a request
+doesn't match its Pydantic schema at all (missing/mistyped fields) —
+FastAPI raises this itself, before a route body even runs.
+`ValidationException` is for business-rule validation a schema alone can't
+express (e.g. "end_date must be after start_date"), raised explicitly by
+route/service code. Both return the same 422 + `"validation_error"`
+envelope to the client — the distinction is about *where the check lives*,
+not what the client sees.
+
+**Why derive the `code` for a plain `HTTPException` from
+`http.HTTPStatus(status_code).phrase` instead of a hand-written
+status-to-code mapping?** Every standard HTTP status already has a
+canonical reason phrase (`404` → "Not Found") that stdlib's `http` module
+already knows — deriving `"not_found"` from it means every status code
+gets a sensible, consistent `code` for free, with no mapping table to keep
+in sync as new routes introduce new status codes.
+
+## Milestone 7 — middleware design decisions
+
+**Why middleware instead of repeating this logic in every route?**
+Request ID generation, timing, logging, and security headers apply
+identically to *every* request regardless of what the route does —
+implementing them per-route would mean remembering to add the same
+boilerplate to every new endpoint forever, with every route free to get it
+slightly wrong. Middleware wraps the entire request/response cycle once,
+so the guarantee ("every response has a request ID, a timing header, and
+security headers") holds structurally instead of by convention.
+
+**Middleware execution order — how does it actually work?** Starlette's
+`add_middleware()` *prepends* to an internal list, and the final ASGI
+stack wraps the router in that list's order — the practical effect is
+**the last `add_middleware()` call becomes the outermost layer** (first to
+see the request, last to see the response). `app/application.py`'s
+`_register_middleware()` calls `add_middleware()` innermost-first so the
+resulting runtime order, outermost to innermost, is:
+
+```
+TrustedHost -> CORS -> GZip -> SecurityHeaders
+    -> RequestID -> RequestLogging -> Timing -> (routing)
+```
+
+- **TrustedHost** outermost: reject a forged/invalid `Host` header as
+  cheaply as possible, before any other work happens.
+- **CORS** next: must wrap every response — including error responses
+  built by the exception handlers — so preflight requests and error
+  responses both get correct CORS headers.
+- **GZip** next: compresses whatever the inner stack produced, so it must
+  be outer relative to anything that sets response headers/body content.
+- **SecurityHeaders**: same reasoning — must see every response, success
+  or error, to stamp its headers on it.
+- **RequestID** must be outer of **RequestLogging**: the ID has to exist
+  on `request.state` before the logging middleware's "request started"
+  line is written.
+- **RequestLogging** must be outer of **Timing**: a middleware's
+  post-`call_next` code only runs after everything inner to it has fully
+  finished — so logging can only read the duration `Timing` computed if
+  timing is inner of logging.
+- **Timing** innermost (of the custom stack): its measurement should
+  reflect actual request handling, not the overhead of the outer layers.
+
+**Why does middleware still run around exception-handler-built responses?**
+Starlette always places `ExceptionMiddleware` directly around the router —
+innermost of all user middleware. When a route raises and a handler builds
+a response, that response still flows back out through every middleware
+above it (headers get added, the request gets logged) exactly as if the
+route had returned normally. This is also why `_register_exception_handlers`
+is called *after* `_register_middleware` in `create_app()` conceptually
+lines up: middleware wraps around routing+error-handling as one unit.
+
+**What are request/correlation IDs, and why generate one per request?**
+A request ID uniquely tags one request through logs; a *correlation* ID is
+the same concept propagated across service boundaries so one logical
+operation can be traced end-to-end through multiple services. This
+codebase treats them as the same value: `RequestIDMiddleware` reuses an
+inbound `X-Request-ID` header when a caller (or upstream service) already
+set one, generating a fresh UUID4 only when none was supplied — so a
+request that hopped through an API gateway or another internal service
+keeps one consistent ID the whole way, and every log line for it (across
+every service, if they all adopt the same header) can be grepped together.
+
+**Why `time.perf_counter()` for timing instead of `time.time()`?**
+`time.perf_counter()` is a monotonic clock meant specifically for
+measuring elapsed intervals; `time.time()` reflects wall-clock time and
+can jump backwards or forwards under NTP adjustments, which could produce
+a wrong — even negative — duration for the exact same request.
+
+**Why `BaseHTTPMiddleware` for the four custom middlewares instead of raw
+ASGI middleware?** `BaseHTTPMiddleware` (Starlette's `Request`/`Response`-
+based middleware base) is dramatically simpler to write and test —
+`dispatch(request, call_next)` reads like a function, not an ASGI protocol
+implementation — at the cost of some known limitations around streaming
+responses and background tasks that don't apply here (nothing in this app
+streams a response body or schedules a `BackgroundTask` yet). Raw ASGI
+middleware (like Starlette's own `GZipMiddleware`/`CORSMiddleware`/
+`TrustedHostMiddleware`, used as-is rather than reimplemented) is the
+right tool when those limitations *do* matter — which is part of why
+those three are used directly from Starlette rather than hand-rolled.
+
+**Why is CORS opt-in (`cors_allowed_origins` defaults to `[]`) but
+`trusted_hosts` opt-out (defaults to `["*"]`, accept-any)?** They fail in
+opposite directions. An empty CORS allow-list is the *safe* default — no
+browser can make a cross-origin request against the API until a
+deployment explicitly lists its frontend's origin, so getting it wrong by
+omission just means "CORS doesn't work yet," not a vulnerability. A
+wildcard `trusted_hosts` is convenient for local dev (any `Host` header is
+accepted) but is a real Host-header-injection exposure in production — so
+`Settings._validate_production_safety` (Milestone 2's pattern, extended
+here) raises at startup if `trusted_hosts` is still `["*"]` when
+`environment=production`, the same "fail loud at boot, don't run
+insecurely" principle as the existing secret-key/debug/SQLite checks.
+
+**Why a security-headers *middleware* instead of e.g. relying on a reverse
+proxy to add them?** Not every deployment of this service is guaranteed to
+sit behind a proxy that adds them, and defense-in-depth means the app
+shouldn't depend on infrastructure it doesn't control for a baseline that's
+this cheap to guarantee itself. It's deliberately a *baseline* only — a
+tuned `Content-Security-Policy` needs to know what a later milestone
+actually serves (e.g. any CDN assets the Swagger UI docs pull in) — so CSP
+is not set here.
+
+## Milestone 8 — testing & CI design decisions
+
+**Why `tests/conftest.py` now, when Milestones 1–4 didn't need one?**
+Milestones 1–4's tests each needed different, narrow fixtures (a
+root-logger snapshot/restore, `tmp_path`/`monkeypatch` for paths) that
+didn't repeat across files. Starting with Milestones 5–7, most test
+modules need the *same* thing — a fresh app instance and a `TestClient`
+bound to it — so factoring `app`/`client` into `conftest.py` avoids that
+setup being copy-pasted into every test file that needs it, while
+fixtures still narrow enough for one file (like the logging tests'
+root-logger fixture) stay local to that file.
+
+**Why does the `client` fixture use `TestClient` as a context manager
+instead of just `TestClient(app)`?** Only entering `TestClient` as a
+context manager (`with TestClient(app) as client:`) actually triggers the
+app's lifespan — startup before the first request, shutdown after the
+block exits — the same as a real deployment. Constructing `TestClient(app)`
+without the `with` skips the lifespan entirely, silently leaving something
+like a database connection pool (in a later milestone) never opened.
+
+**Why does testing the global exception handlers require a *separate*,
+throwaway FastAPI app (`tests/exceptions/test_handlers.py`) instead of
+using the real app or the shared `client` fixture?** The real app has no
+routes that deliberately fail, and adding test-only "raise this exception"
+routes to it would leak test scaffolding into production code. Building a
+minimal app with just `register_exception_handlers()` applied plus a
+handful of intentionally-failing routes exercises the *real*
+FastAPI/Starlette exception-dispatch machinery end-to-end — which a plain
+unit test calling a handler function directly with a hand-built `Request`
+object could not — without polluting `app/application.py`.
+
+**Why does that same test file need `TestClient(..., raise_server_exceptions=False)`?**
+A subtle Starlette behavior: `ServerErrorMiddleware` sends the registered
+handler's response *and then re-raises the original exception* so
+debuggers/test runners can still see the real traceback. `TestClient`
+re-raises that into the test itself by default (`raise_server_exceptions=True`),
+so a test asserting on the 500 response's *body* would instead see a
+Python exception propagate out of `client.get(...)`. Passing
+`raise_server_exceptions=False` disables that re-raise so the response can
+actually be asserted on — a common gotcha when first testing a catch-all
+exception handler.
+
+**Why does each custom middleware get its own isolated test file
+(`tests/middleware/test_*.py`) building a minimal app with *only that
+middleware* registered, rather than testing them all through the real
+app?** Testing `RequestIDMiddleware` in isolation means a failure there
+can only mean "request ID logic is broken" — not "something in the seven-
+middleware stack interacted badly." `tests/test_application.py` then
+separately covers the *integration* concern (are all seven registered, in
+the right order, and do the two settings-driven ones — CORS,
+TrustedHost — behave correctly with real settings values) — each layer is
+tested at the altitude where a failure is most informative.
+
+**Why assert the exact middleware order via
+`[m.cls for m in app.user_middleware]` in a test, instead of only testing
+observable behavior (headers, logs)?** Some ordering mistakes (e.g.
+swapping `RequestLoggingMiddleware` and `TimingMiddleware`) wouldn't
+necessarily *crash* anything — the duration would just silently read as
+the `"?ms"` placeholder forever, a bug that's easy to miss in a manual
+smoke test. Asserting the registered class order directly turns "did
+someone reorder `_register_middleware()`'s calls by accident" into an
+immediate, obvious test failure instead of a subtle production log defect.
+
+**Why GitHub Actions instead of another CI provider?** The repository
+already lives on GitHub — Actions requires no new account, billing
+relationship, or webhook configuration to get CI running, and its
+workflow YAML lives in the repo itself (`.github/workflows/ci.yml`),
+versioned alongside the code it tests.
+
+**Why does `ci.yml` run the exact same four commands
+(`ruff check`, `black --check`, `mypy`, `pytest`) as `make lint/format/
+typecheck/test` instead of its own bespoke CI-only checks?** So "it passes
+locally" and "it passes in CI" mean the same thing — a contributor running
+`make test` before pushing gets the same signal CI will give, with no
+CI-only check that can surprise them after a push. `--locked` on `uv sync`
+is the one deliberate CI-specific addition: it fails fast if `uv.lock` is
+out of sync with `pyproject.toml`, instead of CI silently re-resolving and
+masking a forgotten `uv lock`.
+
+**Why automate linting/type-checking/testing in CI at all, given
+pre-commit already runs `ruff`/`black`/`mypy` locally?** Pre-commit hooks
+are opt-in per developer machine (`pre-commit install` has to have been
+run) and can be bypassed (`git commit --no-verify`) or simply not
+installed yet on a fresh clone. CI is the one check that runs
+unconditionally on every push/PR regardless of what's configured locally,
+so it's the actual guarantee "main never has code that fails lint/
+type-check/tests" — pre-commit is the fast local feedback loop, CI is the
+enforcement backstop.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -323,14 +655,30 @@ Or from the repo root via the Makefile: `make install`.
 | `make format` | `ruff format .` + `black .` — auto-format code |
 | `make typecheck` | `mypy .` — strict static type checking |
 | `make test` | `pytest` — runs the suite with coverage (`--cov=app`) |
-| `make run` | Starts `uvicorn app.main:app --reload` — the app boots with no business routes yet (only `/docs`, `/redoc`, `/openapi.json`) |
+| `make run` | Starts `uvicorn app.main:app --reload` — serves `/health`, `/ready`, `/version` (Milestone 5) |
 | `make clean` | Removes `.venv`, caches, and build artifacts |
 
 Every one of these also runs directly with `uv run <tool>` from inside
 `backend/` (e.g. `uv run ruff check .`) if you'd rather not use `make`.
 Pre-commit runs `ruff`, `black`, and `mypy` automatically on every commit
 that touches `backend/`, so CI failures should be rare by the time a commit
-lands.
+lands. The mypy hook is a `repo: local` hook (`.pre-commit-config.yaml`)
+that shells out to `uv run --directory backend mypy .` — the exact same
+command, working directory, and dependency environment as `make
+typecheck`/CI — rather than the more common `mirrors-mypy` hook, which runs
+mypy in its own isolated environment and needs every dependency mypy
+touches hand-listed in `additional_dependencies`, silently drifting out of
+sync with `pyproject.toml` over time.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request to `main`:
+installs `uv`, provisions Python from `backend/.python-version`, runs
+`uv sync --locked` (fails if `uv.lock` doesn't match `pyproject.toml`), then
+`ruff check .`, `black --check .`, `mypy .`, and `pytest` — the same four
+commands `make lint/format/typecheck/test` run locally. See the Milestone 8
+section below for why CI mirrors the local commands exactly, and why it
+exists at all alongside pre-commit.
 
 ## How this project was created from scratch
 
@@ -457,4 +805,127 @@ cd ..
 # 4. Version control
 git add -A
 git commit -m "feat: add FastAPI application factory (Milestone 4)"
+```
+
+**Milestone 5 (Health & System Endpoints)** added, from the repo root:
+
+```bash
+# 1. Response schemas + router
+#    backend/app/schemas/health.py, backend/app/api/health.py — hand-written
+#    backend/app/application.py — _register_routers() now includes health_router
+
+# 2. Tests
+mkdir -p backend/tests/api
+touch backend/tests/api/__init__.py
+#    backend/tests/api/test_health.py — hand-written
+
+# 3. Verify
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+
+# 4. Version control
+git add -A
+git commit -m "feat: add health, readiness, and version endpoints (Milestone 5)"
+```
+
+**Milestone 6 (Global Exception Handling)** added, from the repo root:
+
+```bash
+# 1. Error envelope schema, exception hierarchy, and handlers
+mkdir -p backend/app/exceptions
+touch backend/app/exceptions/__init__.py
+#    backend/app/schemas/errors.py — hand-written
+#    backend/app/exceptions/{base,errors,handlers}.py — hand-written
+#    backend/app/application.py — register_exception_handlers(app) wired in
+
+# 2. Tests
+mkdir -p backend/tests/exceptions
+touch backend/tests/exceptions/__init__.py
+#    backend/tests/exceptions/{test_base,test_errors,test_handlers}.py — hand-written
+
+# 3. Verify
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+
+# 4. Version control
+git add -A
+git commit -m "feat: add global exception handling (Milestone 6)"
+```
+
+**Milestone 7 (Middleware)** added, from the repo root:
+
+```bash
+# 1. Custom middleware + settings for the two settings-driven edge middlewares
+#    backend/app/middleware/{request_id,timing,logging,security_headers}.py — hand-written
+#    backend/app/core/settings.py — added ApplicationSettings.trusted_hosts,
+#    .cors_allowed_origins, and a production-safety rule rejecting a wildcard
+#    trusted_hosts in production
+#    backend/.env.example — documented the two new variables
+#    backend/app/application.py — _register_middleware() wires CORS, GZip,
+#    TrustedHost (Starlette built-ins) plus the four custom middlewares above,
+#    in the order documented in that function's docstring
+
+# 2. Tests
+mkdir -p backend/tests/middleware
+touch backend/tests/middleware/__init__.py
+#    backend/tests/middleware/test_{request_id,timing,logging,security_headers}.py — hand-written
+#    backend/tests/test_application.py — extended with middleware-order,
+#    exception-handler-registration, CORS, and TrustedHost coverage
+#    backend/tests/core/test_settings.py — extended for the new settings fields
+
+# 3. Verify
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+uv run uvicorn app.main:app --reload   # manual smoke test: confirmed headers + log lines
+cd ..
+
+# 4. Version control
+git add -A
+git commit -m "feat: add cross-cutting request middleware (Milestone 7)"
+```
+
+**Milestone 8 (Testing & CI Foundation)** added, from the repo root:
+
+```bash
+# 1. Shared test fixtures
+#    backend/tests/conftest.py — hand-written (app + client fixtures)
+
+# 2. GitHub Actions CI
+mkdir -p .github/workflows
+#    .github/workflows/ci.yml — hand-written: ruff, black --check, mypy, pytest
+
+# 3. Fixed a pre-existing bug surfaced while wiring up CI: the mypy
+#    pre-commit hook (mirrors-mypy) had been silently broken since
+#    Milestone 4 introduced FastAPI imports — its isolated environment's
+#    additional_dependencies never included fastapi/pytest/httpx, and even
+#    after adding them, running mypy from the repo root (rather than from
+#    backend/) broke `mypy_path = "."` resolution of the `app` package.
+#    Replaced it with a `repo: local` hook that runs
+#    `uv run --directory backend mypy .` — the project's own dependency
+#    environment, the same working directory `make typecheck`/CI use.
+#    .pre-commit-config.yaml — hand-edited
+
+# 4. Verify
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+uv run --project backend pre-commit run --all-files -c .pre-commit-config.yaml
+
+# 5. Version control
+git add -A
+git commit -m "feat: add testing fixtures and CI foundation (Milestone 8)"
 ```

@@ -13,6 +13,8 @@ class TestApplicationSettings:
         assert settings.environment is Environment.LOCAL
         assert settings.debug is True
         assert settings.port == 8000
+        assert settings.trusted_hosts == ["*"]
+        assert settings.cors_allowed_origins == []
 
     def test_rejects_out_of_range_port(self) -> None:
         with pytest.raises(ValidationError):
@@ -77,10 +79,23 @@ class TestSettingsComposition:
                 security={"secret_key": "a-properly-long-production-secret-key"},
             )
 
+    def test_production_rejects_wildcard_trusted_hosts(self) -> None:
+        with pytest.raises(ValidationError, match="trusted_hosts must not be the wildcard"):
+            Settings(
+                _env_file=None,
+                application={"environment": "production", "debug": False},
+                database={"url": "postgresql://user:pass@host/db"},
+                security={"secret_key": "a-properly-long-production-secret-key"},
+            )
+
     def test_production_accepts_a_fully_overridden_config(self) -> None:
         settings = Settings(
             _env_file=None,
-            application={"environment": "production", "debug": False},
+            application={
+                "environment": "production",
+                "debug": False,
+                "trusted_hosts": ["api.example.com"],
+            },
             database={"url": "postgresql://user:pass@host/db"},
             security={"secret_key": "a-properly-long-production-secret-key"},
         )

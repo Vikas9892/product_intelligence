@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least-privilege default: this workflow only reads the repo (checkout) and
+# never pushes, comments, or otherwise writes back to it.
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  backend:
+    name: Lint, format check, type-check, test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Set up Python (from backend/.python-version)
+        run: uv python install
+
+      # --locked: fail instead of silently updating uv.lock. If dependencies
+      # drift from the committed lock file, that's a bug in the PR, not
+      # something CI should paper over.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Format check (black)
+        run: uv run black --check .
+
+      - name: Type-check (mypy)
+        run: uv run mypy .
+
+      - name: Test (pytest, with coverage)
+        run: uv run pytest

@@ -32,6 +32,7 @@ reviewable milestone rather than a single monolithic drop.
 ```
 .
 ├── backend/                # FastAPI service — see backend/README.md
+├── .github/workflows/ci.yml # GitHub Actions: ruff, black --check, mypy, pytest
 ├── .pre-commit-config.yaml # Repo-wide git hooks (ruff, black, mypy, hygiene)
 ├── .editorconfig           # Repo-wide editor formatting rules
 ├── Makefile                # make install / run / lint / format / test / clean
@@ -54,10 +55,12 @@ make typecheck # mypy
 make test      # pytest with coverage
 ```
 
-`make run` will start the API server once Milestone 4 (FastAPI App) adds an
-application entrypoint — there is intentionally no `app.main:app` yet.
+`make run` starts `uvicorn app.main:app --reload`, serving `/health`,
+`/ready`, and `/version` (Milestone 5) — no business endpoints yet.
 
 ## Status
+
+Phase 1 (Backend Foundation) is complete:
 
 - **Milestone 1 — Backend Skeleton**: project structure, dependency
   management (`uv`), linting/formatting/type-checking, testing, and
@@ -69,8 +72,28 @@ application entrypoint — there is intentionally no `app.main:app` yet.
 - **Milestone 3 — Logging**: centralized logging (`app/core/logging.py`)
   — level read from settings, one console handler, a consistent
   formatter, and `get_logger(name)` for any module to use.
+- **Milestone 4 — FastAPI Application Factory**: `create_app()`
+  (`app/application.py`) + a `lifespan` (`app/lifespan.py`) that logs
+  startup/shutdown and provisions runtime directories; `app/main.py` is
+  the ASGI entrypoint.
+- **Milestone 5 — Health & System Endpoints**: `GET /health`, `/ready`,
+  `/version` (`app/api/health.py`), deliberately unversioned and outside
+  `settings.application.api_prefix`.
+- **Milestone 6 — Global Exception Handling**: an `AppException` hierarchy
+  (`app/exceptions/`) and global handlers so every error — domain-raised,
+  request-validation, plain `HTTPException`, or an unhandled bug — returns
+  the same `{"success", "error": {"code", "message", "details"}}` envelope.
+- **Milestone 7 — Middleware**: request ID/correlation, timing, request
+  logging, security headers (`app/middleware/`), plus CORS, GZip, and
+  TrustedHost, registered in a deliberately documented order
+  (`app/application.py::_register_middleware`).
+- **Milestone 8 — Testing & CI Foundation**: shared pytest fixtures
+  (`tests/conftest.py`) and a GitHub Actions workflow
+  (`.github/workflows/ci.yml`) running ruff, black --check, mypy, and
+  pytest on every push/PR to `main`.
 
-28 unit tests, 99% coverage on `app/core`.
+75 unit tests, 99% coverage on `app/`.
 
-No API endpoints, database models, or AI code exist yet by design — see
-[`backend/README.md`](backend/README.md) for the full rationale.
+No database models or AI code exist yet by design — see
+[`backend/README.md`](backend/README.md) for the full rationale and every
+design decision behind the milestones above.

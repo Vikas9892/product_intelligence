@@ -59,6 +59,7 @@ backend/
 │   ├── dependencies/       # FastAPI dependency-injection providers
 │   │   └── upload.py        # `get_upload_service()` — Phase 2A's first real dependency provider
 │   └── utils/              # Small stateless helpers shared across layers
+│       └── metadata.py      # FileMetadata + parse_file_metadata() — Phase 2B "Parse Metadata" stage
 ├── tests/                  # pytest test suite, mirrors the app/ package layout
 ├── scripts/              # One-off / maintenance scripts (not part of the importable app)
 ├── docs/                 # Design notes, ADRs, phase write-ups
@@ -133,9 +134,10 @@ of relying on someone remembering to run `black` before committing.
 | `app/schemas/product.py` | Phase 2A schemas: `ProductCreate` (name/description/category/price, bound from individual `Form(...)` fields), `ProductImage` (metadata about one stored file), `UploadResponse` (the upload endpoint's actual response), and `ProductResponse` — reserved ahead of need for once a database exists, the same way Phase 1's `AIModelSettings` was reserved. |
 | `app/services/upload_service.py` | Phase 2A: `UploadService` — validates an uploaded file's filename/extension, declared MIME type, and size (streaming to disk in bounded chunks, never buffering more than one chunk past the limit), and stores accepted files under a generated (never client-supplied) filename. All limits default to `settings.storage.*`/`constants.SUPPORTED_IMAGE_MIME_TYPES` but are constructor-overridable for tests. |
 | `app/services/checksum_service.py` | Phase 2B: `ChecksumService.compute_sha256(path)` — streams an already-stored file from disk in 1 MiB chunks and returns its SHA-256 hex digest. Standalone (operates on any file path, not coupled to the upload stream) so later phases (duplicate detection, caching, integrity checks) reuse it instead of reimplementing hashing. Raises `ChecksumException` if the file can't be read. |
+| `app/utils/metadata.py` | Phase 2B: `FileMetadata` (transport-agnostic file metadata: filename, extension, MIME type, size, SHA-256 checksum, upload timestamp) and `parse_file_metadata(image, checksum_sha256=...)`, the adapter from Phase 2A's `ProductImage` + a computed checksum into this internal object. |
 | `app/dependencies/upload.py` | `get_upload_service()`: a cached-singleton dependency provider for `UploadService`, mirroring `app.core.config.get_settings`'s pattern — Phase 2A's first real use of the `app/dependencies/` package reserved since Milestone 1. |
 | `app/api/products.py` | `POST /products/upload` (mounted under `/api/v1` — a real, versioned business endpoint, unlike `health.py`'s system routes). Accepts product metadata as individual `Form(...)` fields plus a `File()` upload, delegates validation/storage entirely to `UploadService`, returns an `UploadResponse`. See the Phase 2A section below for why the fields are individual `Form(...)` params rather than a single `Annotated[ProductCreate, Form()]`. |
-| `tests/__init__.py`, `tests/core/__init__.py`, `tests/api/__init__.py`, `tests/middleware/__init__.py`, `tests/exceptions/__init__.py`, `tests/schemas/__init__.py`, `tests/services/__init__.py`, `tests/dependencies/__init__.py` | Makes each test directory a package so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
+| `tests/__init__.py`, `tests/core/__init__.py`, `tests/api/__init__.py`, `tests/middleware/__init__.py`, `tests/exceptions/__init__.py`, `tests/schemas/__init__.py`, `tests/services/__init__.py`, `tests/dependencies/__init__.py`, `tests/utils/__init__.py` | Makes each test directory a package so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
 | `tests/conftest.py` | Shared fixtures (Milestone 8): `app` (a fresh `create_app()` instance per test) and `client` (a `TestClient` bound to it, entered as a context manager so the lifespan actually runs). Only fixtures genuinely needed by multiple modules live here. |
 | `tests/test_environment.py` | A single sanity test (Python version check) proving the pytest + coverage pipeline actually runs. |
 | `tests/core/test_paths.py` | Verifies path relationships (`UPLOAD_DIR` under `STORAGE_DIR`, etc.) and that `ensure_runtime_directories()` creates the right directories, using `monkeypatch` + `tmp_path` so it never touches the real filesystem. |
@@ -156,6 +158,7 @@ of relying on someone remembering to run `black` before committing.
 | `tests/services/test_upload_service.py` | Unit tests for `UploadService` against a fake `UploadFile` and a `tmp_path` upload directory: successful storage (content matches, filename is generated, extension preserved/lowercased), every validation rejection (missing filename, disallowed extension/MIME type, oversized file), and that a rejected/oversized upload leaves no partial file behind. |
 | `tests/dependencies/test_upload.py` | Confirms `get_upload_service()` returns a cached singleton and that `cache_clear()` forces a fresh instance — the same contract `tests/core/test_config.py` verifies for `get_settings()`. |
 | `tests/services/test_checksum_service.py` | Confirms the digest matches `hashlib.sha256` directly for both a small file and one spanning multiple 1 MiB chunk reads, that identical content hashes identically and different content differs, and that a missing file raises `ChecksumException`. |
+| `tests/utils/test_metadata.py` | Confirms `FileMetadata` rejects a malformed/uppercase checksum, and that `parse_file_metadata` correctly lowercases the derived extension while carrying every other `ProductImage` field through unchanged. |
 | `tests/api/test_products.py` | Integration tests against the *real* `create_app()` app, with `get_upload_service` overridden (`app.dependency_overrides`) to redirect storage to `tmp_path`: a successful upload's response shape and on-disk file content, every validation failure's status code and error envelope (missing name, disallowed extension/MIME type, negative price), and the oversized-file 413 case. |
 | `scripts/.gitkeep`, `docs/.gitkeep` | Empty-directory placeholders — git does not track empty directories, so these keep the scaffold intact until real content lands. |
 
@@ -764,7 +767,7 @@ that accepts uploads needs it added explicitly (`uv add python-multipart`).
 ## Phase 2B — Product Processing & Metadata Normalization design decisions
 
 *(This section grows milestone by milestone as Phase 2B lands — currently
-covers the Checksum Service milestone.)*
+covers the Checksum Service and File Metadata milestones.)*
 
 **Why does `ChecksumService` re-read the file from disk instead of
 computing the checksum inline while `UploadService` streams it to disk in
@@ -789,6 +792,34 @@ not a client input problem. Wrapping it in a typed `AppException` gives
 it a 500 status, a stable `code` ("checksum_error"), and a message that
 doesn't leak a raw filesystem path/errno straight to an API response,
 the same reasoning `UploadService`'s existing exceptions already follow.
+
+**Why does `FileMetadata` live in `app/utils/metadata.py`, separate from
+both `ProductImage` (`app/schemas/product.py`) and the future `Product`
+domain model (`app/models/product.py`)?** Each represents the same
+underlying file at a different layer. `ProductImage` is what
+`UploadService` knows the instant a file is saved — filename, stored
+name, MIME type, size, timestamp — and is also an HTTP response shape.
+`FileMetadata` is the richer, purely internal picture once Phase 2B's
+processing has run (adds the derived `extension` and the checksum,
+neither of which `UploadService` computes). It's deliberately not
+folded into `ProductImage` itself, because `ProductImage` is Phase 2A's
+already-stable API contract — extending it would mean every consumer of
+`UploadResponse` (today, just the one route) has to reason about
+checksum-computation timing; keeping it a separate internal type means
+`ProductImage` never needs to change as Phase 2B's processing logic
+evolves.
+
+**Why does `parse_file_metadata` take a `ProductImage` plus a separately
+computed `checksum_sha256`, instead of computing the checksum itself?**
+Single responsibility: this function's job is *shaping* metadata already
+known into the internal representation, not deciding *how* a checksum
+gets computed (that's `ChecksumService`'s job, and it needs the file's
+on-disk path, which `ProductImage` deliberately doesn't expose — see
+Phase 2A's rationale for keeping server filesystem paths out of API-
+facing schemas). Composing the two in `ProductService` (next milestone)
+keeps each piece independently testable: `parse_file_metadata`'s tests
+never need a real file on disk, and `ChecksumService`'s tests never need
+a `ProductImage`.
 
 ## Setup instructions
 

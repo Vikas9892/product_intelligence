@@ -23,6 +23,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.health import router as health_router
+from app.api.products import router as products_router
 from app.core import constants
 from app.core.config import settings
 from app.exceptions.handlers import register_exception_handlers
@@ -52,13 +53,15 @@ def create_app() -> FastAPI:
 def _register_routers(app: FastAPI) -> None:
     """Attach API routers to `app`.
 
-    Only `health_router` exists so far (`/health`, `/ready`, `/version` —
-    deliberately unversioned, see `app/api/health.py`). Later milestones'
-    versioned business routers are added here as additional
-    `app.include_router(..., prefix=settings.application.api_prefix)`
-    calls, without touching application construction/metadata above.
+    `health_router` (`/health`, `/ready`, `/version`) is deliberately
+    unversioned — see `app/api/health.py`. `products_router` is a real,
+    versioned business router, so it's mounted under
+    `settings.application.api_prefix` (`/api/v1`), giving
+    `/api/v1/products/upload`. Further business routers are added here the
+    same way, without touching application construction/metadata above.
     """
     app.include_router(health_router)
+    app.include_router(products_router, prefix=settings.application.api_prefix)
 
 
 def _register_exception_handlers(app: FastAPI) -> None:

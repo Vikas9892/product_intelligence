@@ -50,3 +50,25 @@ class ConflictException(AppException):
     status_code = 409
     code = "conflict"
     message = "The request conflicts with the current state of the resource."
+
+
+class UnsupportedMediaTypeException(AppException):
+    """An uploaded file's extension or declared MIME type is not accepted.
+
+    Distinct from `ValidationException` (422): this is specifically a
+    415 "the payload itself is the wrong kind of thing", not "the request
+    shape was wrong" — a client can tell the two apart by status code
+    alone, without parsing `code`.
+    """
+
+    status_code = 415
+    code = "unsupported_media_type"
+    message = "The uploaded file's type is not supported."
+
+
+class FileTooLargeException(AppException):
+    """An uploaded file exceeds the configured maximum size."""
+
+    status_code = 413
+    code = "file_too_large"
+    message = "The uploaded file exceeds the maximum allowed size."

@@ -13,8 +13,8 @@ reviewable milestone rather than a single monolithic drop.
 | Phase | Focus |
 |------:|-------|
 | 0  | Planning |
-| **1**  | **Backend skeleton (this milestone)** |
-| 2  | Product ingestion |
+| 1  | Backend skeleton (complete) |
+| **2**  | **Product ingestion — 2A (upload pipeline) complete, this milestone** |
 | 3  | Image processing |
 | 4  | Text embeddings |
 | 5  | Image embeddings |
@@ -56,11 +56,12 @@ make test      # pytest with coverage
 ```
 
 `make run` starts `uvicorn app.main:app --reload`, serving `/health`,
-`/ready`, and `/version` (Milestone 5) — no business endpoints yet.
+`/ready`, `/version`, and `POST /api/v1/products/upload` (Phase 2A).
 
 ## Status
 
-Phase 1 (Backend Foundation) is complete:
+Phase 1 (Backend Foundation) is complete, and Phase 2A (Product Upload
+Pipeline) has landed ahead of the rest of Phase 2 (Product Ingestion):
 
 - **Milestone 1 — Backend Skeleton**: project structure, dependency
   management (`uv`), linting/formatting/type-checking, testing, and
@@ -91,9 +92,15 @@ Phase 1 (Backend Foundation) is complete:
   (`tests/conftest.py`) and a GitHub Actions workflow
   (`.github/workflows/ci.yml`) running ruff, black --check, mypy, and
   pytest on every push/PR to `main`.
+- **Phase 2A — Product Upload Pipeline**: `POST /api/v1/products/upload`
+  (`app/api/products.py`) accepts product metadata plus an image file,
+  validates it (extension, MIME type, size) via `UploadService`
+  (`app/services/upload_service.py`), and stores it under the runtime
+  upload directory `app/core/paths.py` established in Phase 1 — no
+  database write yet.
 
-75 unit tests, 99% coverage on `app/`.
+105 unit/integration tests, 99% coverage on `app/`.
 
-No database models or AI code exist yet by design — see
-[`backend/README.md`](backend/README.md) for the full rationale and every
-design decision behind the milestones above.
+No database persistence, image processing, embeddings, or AI/search code
+exists yet by design — see [`backend/README.md`](backend/README.md) for
+the full rationale and every design decision behind the phases above.

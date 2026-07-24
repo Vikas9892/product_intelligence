@@ -1,17 +1,16 @@
 # Backend — Multi-Modal Product Intelligence Engine
 
-FastAPI backend service. This document covers all of **Phase 1**:
-**Milestone 1 (Backend Skeleton)**, **Milestone 2 (Configuration
-Management)**, **Milestone 3 (Logging)**, **Milestone 4 (FastAPI
-Application Factory)**, **Milestone 5 (Health & System Endpoints)**,
-**Milestone 6 (Global Exception Handling)**, **Milestone 7 (Middleware)**,
-and **Milestone 8 (Testing & CI Foundation)** — project structure,
-dependency management, tooling, typed/validated settings, centralized
-logging, the app factory + lifespan wiring, the first API routes, a
-consistent error-response contract, cross-cutting request middleware, and
-continuous integration.
-No database models or AI/business logic exist yet — that is intentional.
-See [Why no code yet?](#why-no-code-yet) below.
+FastAPI backend service. This document covers all of **Phase 1**
+(Milestones 1–8: backend skeleton, configuration, logging, the app
+factory, health endpoints, global exception handling, middleware, and
+testing/CI — see the per-milestone sections below) and **Phase 2A
+(Product Upload Pipeline)**: the first real business endpoint, accepting
+a product image plus metadata, validating it, and storing it.
+No database persistence, image processing, embeddings, or AI/search
+functionality exist yet — that is intentional. See
+[Why no code yet?](#why-no-code-yet) and the
+[Phase 2A section](#phase-2a--product-upload-pipeline-design-decisions)
+below.
 
 ## Project overview
 
@@ -31,7 +30,8 @@ backend/
 │   ├── application.py     # `create_app()` factory: builds and configures the FastAPI instance
 │   ├── lifespan.py        # Startup/shutdown logic wired via FastAPI's lifespan API
 │   ├── api/                # HTTP route definitions (FastAPI routers)
-│   │   └── health.py       # GET /health, /ready, /version — unversioned system endpoints
+│   │   ├── health.py        # GET /health, /ready, /version — unversioned system endpoints
+│   │   └── products.py      # POST /products/upload (mounted under /api/v1) — Phase 2A
 │   ├── core/               # App-wide concerns: settings, logging, security, startup/shutdown
 │   │   ├── constants.py    # Fixed, non-configurable values (enums, prefixes, insecure-default marker)
 │   │   ├── paths.py        # Centralized filesystem paths (backend root, storage, uploads, logs)
@@ -48,13 +48,16 @@ backend/
 │   │   ├── logging.py        # Logs request start/completion (uses the ID + duration above)
 │   │   └── security_headers.py # Stamps baseline security response headers
 │   ├── services/          # Business logic, orchestration between repositories/external calls
+│   │   └── upload_service.py # Phase 2A: validates + durably stores uploaded product images
 │   ├── repositories/      # Data access layer (DB, vector store, cache) behind an interface
 │   ├── models/             # ORM / persistence models
 │   ├── schemas/            # Pydantic request/response schemas (API contracts)
 │   │   ├── health.py        # Response models for /health, /ready, /version
-│   │   └── errors.py        # The `{"success", "error": {...}}` envelope every error returns
+│   │   ├── errors.py        # The `{"success", "error": {...}}` envelope every error returns
+│   │   └── product.py       # ProductCreate, ProductImage, UploadResponse, ProductResponse — Phase 2A
 │   ├── workers/            # Background jobs / async task consumers
 │   ├── dependencies/       # FastAPI dependency-injection providers
+│   │   └── upload.py        # `get_upload_service()` — Phase 2A's first real dependency provider
 │   └── utils/              # Small stateless helpers shared across layers
 ├── tests/                  # pytest test suite, mirrors the app/ package layout
 ├── scripts/              # One-off / maintenance scripts (not part of the importable app)
@@ -121,13 +124,17 @@ of relying on someone remembering to run `black` before committing.
 | `app/schemas/health.py` | Response models for the three endpoints above: `HealthResponse`, `ReadinessResponse` (with a `checks: dict[str, bool]` shape ready for real dependency checks later), `VersionResponse`. |
 | `app/schemas/errors.py` | `ErrorResponse`/`ErrorDetail` (Milestone 6): the single `{"success": false, "error": {"code", "message", "details"}}` shape every error response uses. |
 | `app/exceptions/base.py` | `AppException` (Milestone 6): the base class every domain exception subclasses. Carries a `status_code` (transport), a stable `code` (API contract), and a human `message` — see the Milestone 6 section for why those are kept separate instead of just using `HTTPException`. |
-| `app/exceptions/errors.py` | Concrete, domain-agnostic exceptions: `ValidationException` (422), `ResourceNotFoundException` (404), `ConflictException` (409). |
+| `app/exceptions/errors.py` | Concrete, domain-agnostic exceptions: `ValidationException` (422), `ResourceNotFoundException` (404), `ConflictException` (409), and (Phase 2A) `UnsupportedMediaTypeException` (415) and `FileTooLargeException` (413) for upload validation. |
 | `app/exceptions/handlers.py` | `register_exception_handlers(app)`: registers one handler each for `AppException`, `RequestValidationError`, `StarletteHTTPException`, and `Exception` (the catch-all for real bugs), so every error path returns the same JSON envelope. |
 | `app/middleware/request_id.py` | `RequestIDMiddleware` (Milestone 7): reuses an inbound `X-Request-ID` header or generates a UUID4, stores it on `request.state.request_id`, echoes it back as a response header. |
 | `app/middleware/timing.py` | `TimingMiddleware`: measures handling duration with `time.perf_counter`, stores it on `request.state.duration_ms`, echoes it as `X-Response-Time-Ms`. |
 | `app/middleware/logging.py` | `RequestLoggingMiddleware`: logs one line when a request starts, one when it finishes — both tagged with the request ID, the completion line also with status code and duration. |
 | `app/middleware/security_headers.py` | `SecurityHeadersMiddleware`: stamps a baseline set of OWASP-recommended security response headers (`X-Content-Type-Options`, `X-Frame-Options`, etc.) via `setdefault`, so a route that already set one of these wins. |
-| `tests/__init__.py`, `tests/core/__init__.py`, `tests/api/__init__.py`, `tests/middleware/__init__.py`, `tests/exceptions/__init__.py` | Makes each test directory a package so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
+| `app/schemas/product.py` | Phase 2A schemas: `ProductCreate` (name/description/category/price, bound from individual `Form(...)` fields), `ProductImage` (metadata about one stored file), `UploadResponse` (the upload endpoint's actual response), and `ProductResponse` — reserved ahead of need for once a database exists, the same way Phase 1's `AIModelSettings` was reserved. |
+| `app/services/upload_service.py` | Phase 2A: `UploadService` — validates an uploaded file's filename/extension, declared MIME type, and size (streaming to disk in bounded chunks, never buffering more than one chunk past the limit), and stores accepted files under a generated (never client-supplied) filename. All limits default to `settings.storage.*`/`constants.SUPPORTED_IMAGE_MIME_TYPES` but are constructor-overridable for tests. |
+| `app/dependencies/upload.py` | `get_upload_service()`: a cached-singleton dependency provider for `UploadService`, mirroring `app.core.config.get_settings`'s pattern — Phase 2A's first real use of the `app/dependencies/` package reserved since Milestone 1. |
+| `app/api/products.py` | `POST /products/upload` (mounted under `/api/v1` — a real, versioned business endpoint, unlike `health.py`'s system routes). Accepts product metadata as individual `Form(...)` fields plus a `File()` upload, delegates validation/storage entirely to `UploadService`, returns an `UploadResponse`. See the Phase 2A section below for why the fields are individual `Form(...)` params rather than a single `Annotated[ProductCreate, Form()]`. |
+| `tests/__init__.py`, `tests/core/__init__.py`, `tests/api/__init__.py`, `tests/middleware/__init__.py`, `tests/exceptions/__init__.py`, `tests/schemas/__init__.py`, `tests/services/__init__.py`, `tests/dependencies/__init__.py` | Makes each test directory a package so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
 | `tests/conftest.py` | Shared fixtures (Milestone 8): `app` (a fresh `create_app()` instance per test) and `client` (a `TestClient` bound to it, entered as a context manager so the lifespan actually runs). Only fixtures genuinely needed by multiple modules live here. |
 | `tests/test_environment.py` | A single sanity test (Python version check) proving the pytest + coverage pipeline actually runs. |
 | `tests/core/test_paths.py` | Verifies path relationships (`UPLOAD_DIR` under `STORAGE_DIR`, etc.) and that `ensure_runtime_directories()` creates the right directories, using `monkeypatch` + `tmp_path` so it never touches the real filesystem. |
@@ -135,7 +142,7 @@ of relying on someone remembering to run `black` before committing.
 | `tests/core/test_config.py` | Confirms `get_settings()` returns the same cached object across calls, that `cache_clear()` forces a fresh one, and that the module-level `settings` singleton is a real `Settings` instance. |
 | `tests/core/test_logging.py` | Covers level resolution (explicit override vs. `settings.logging.level`), the idempotent/`force` handler-installation behavior, the console formatter's exact output, and an end-to-end check that `get_logger(...).info(...)` really reaches stdout formatted correctly. An autouse fixture snapshots/restores the real root logger around every test so nothing here leaks into other tests. |
 | `tests/test_lifespan.py` | Enters/exits `lifespan(app)` as an async context manager directly (no HTTP server needed) and asserts, via `caplog`, that the startup message logs before `yield` and the shutdown message logs after; asserts `paths.ensure_runtime_directories` is called exactly once on startup via `monkeypatch`. |
-| `tests/test_application.py` | Confirms `create_app()`'s metadata, that the system routes (and nothing else) are registered, that all middleware are registered in the exact documented order, that a handler is registered for every error path, and — via `TestClient` and settings monkeypatches — the actual runtime behavior of the CORS and TrustedHost middleware (allowed vs. rejected origin/host). |
+| `tests/test_application.py` | Confirms `create_app()`'s metadata, that exactly the expected routes are registered (system routes unprefixed, `products.upload` under `/api/v1`), that all middleware are registered in the exact documented order, that a handler is registered for every error path, and — via `TestClient` and settings monkeypatches — the actual runtime behavior of the CORS and TrustedHost middleware (allowed vs. rejected origin/host). |
 | `tests/test_main.py` | Confirms `app.main.app` is a real `FastAPI` instance with the expected title, proving the module-level `app = create_app()` entrypoint actually works end-to-end. |
 | `tests/api/test_health.py` | Hits `/health`, `/ready`, `/version` through the shared `client` fixture and asserts the exact JSON body each returns. |
 | `tests/middleware/test_request_id.py` | Builds a minimal app with only `RequestIDMiddleware` registered; asserts a UUID4 is generated when no ID is supplied, and that a caller-supplied `X-Request-ID` is echoed back unchanged. |
@@ -144,6 +151,10 @@ of relying on someone remembering to run `black` before committing.
 | `tests/middleware/test_security_headers.py` | Asserts the full baseline header set is present, and that `setdefault` means a header the route already set (e.g. a custom `X-Frame-Options`) is not overwritten. |
 | `tests/exceptions/test_base.py`, `test_errors.py` | Unit tests for `AppException` and its concrete subclasses' defaults/overrides — no HTTP involved. |
 | `tests/exceptions/test_handlers.py` | Integration tests: a throwaway FastAPI app with `register_exception_handlers` applied and routes that deliberately raise each error type, asserting the exact JSON envelope for domain exceptions, `RequestValidationError`, plain `HTTPException`, and unhandled exceptions (and that the latter never leaks the real exception message). |
+| `tests/schemas/test_product.py` | Field validation (empty name, negative price, numeric-string coercion), a `ProductImage`/`UploadResponse` round-trip through `model_dump`/`model_validate`, and a sanity construction of the reserved `ProductResponse`. |
+| `tests/services/test_upload_service.py` | Unit tests for `UploadService` against a fake `UploadFile` and a `tmp_path` upload directory: successful storage (content matches, filename is generated, extension preserved/lowercased), every validation rejection (missing filename, disallowed extension/MIME type, oversized file), and that a rejected/oversized upload leaves no partial file behind. |
+| `tests/dependencies/test_upload.py` | Confirms `get_upload_service()` returns a cached singleton and that `cache_clear()` forces a fresh instance — the same contract `tests/core/test_config.py` verifies for `get_settings()`. |
+| `tests/api/test_products.py` | Integration tests against the *real* `create_app()` app, with `get_upload_service` overridden (`app.dependency_overrides`) to redirect storage to `tmp_path`: a successful upload's response shape and on-disk file content, every validation failure's status code and error envelope (missing name, disallowed extension/MIME type, negative price), and the oversized-file 413 case. |
 | `scripts/.gitkeep`, `docs/.gitkeep` | Empty-directory placeholders — git does not track empty directories, so these keep the scaffold intact until real content lands. |
 
 ## Milestone 2 — configuration design decisions
@@ -634,6 +645,120 @@ so it's the actual guarantee "main never has code that fails lint/
 type-check/tests" — pre-commit is the fast local feedback loop, CI is the
 enforcement backstop.
 
+## Phase 2A — Product Upload Pipeline design decisions
+
+**Why does `POST /products/upload` accept individual `Form(...)` fields
+instead of `Annotated[ProductCreate, Form()]`?** FastAPI's "Form models"
+feature normally spreads a `Form()`-annotated Pydantic model's fields as
+flat top-level form fields — this works fine in isolation (verified
+directly against this FastAPI version). But the moment a *second* body
+parameter is also present — here, the `File()` upload — FastAPI switches
+the whole request body to "embedded" mode, expecting the model nested
+under one key (`{"product": {...}}`) rather than flat fields, which is
+neither how a browser `<form enctype="multipart/form-data">` nor most
+HTTP clients send metadata alongside a file. Accepting `name`,
+`description`, `category`, and `price` as individual `Form(...)`
+parameters (with the same constraints `ProductCreate`'s fields declare)
+keeps the wire format flat; `ProductCreate` is then constructed from the
+validated individual values and remains the canonical schema everywhere
+else (the `UploadResponse.product` field, and later a JSON-based creation
+endpoint once persistence exists). This was discovered empirically while
+building this milestone — worth knowing if a future endpoint combines a
+Pydantic form model with a file upload again.
+
+**Why does `UploadService` exist separately from the route function?**
+`app/api/products.py` stays a thin HTTP adapter — parse the request,
+delegate, shape the response — while all the actual policy (which
+extensions/MIME types are allowed, how big is too big, where files land
+on disk) lives in one unit-testable class with zero FastAPI/Starlette
+dependency in its own logic (it takes a `fastapi.UploadFile`, but nothing
+about its validation/storage behavior requires an HTTP request to exist).
+`tests/services/test_upload_service.py` exercises every validation rule
+directly, faster and more precisely than doing the same through HTTP.
+
+**Why is `UploadService`'s upload directory/size limit/allowed types
+constructor-overridable instead of only ever reading `settings`
+directly?** Same idiom as `app.core.logging.configure_logging`'s explicit
+`level` override (Milestone 3): reading `settings.storage.*` is the real
+production path and the default when a param is omitted, but tests need
+to redirect storage to a `tmp_path` and shrink the size limit without
+monkeypatching the global `settings` singleton (which would leak into
+other tests). The check is `is not None`, not truthiness, for the same
+reason Milestone 3 chose it — so a caller could pass `max_upload_size_mb=0`
+deliberately without it being silently treated as "not provided".
+
+**Why does `app/dependencies/upload.py` matter, when `UploadService()`
+could just be constructed inline in the route?** It's Phase 2A's first
+real use of the `app/dependencies/` package that's been reserved (empty)
+since Milestone 1. `Depends(get_upload_service)` — cached the same way
+`get_settings()` is — means `tests/api/test_products.py` can override
+*just this one dependency*
+(`app.dependency_overrides[get_upload_service] = lambda: UploadService(upload_dir=tmp_path)`)
+on the real `create_app()` app, exercising the real router, real
+middleware, and real exception handlers while never touching the real
+`backend/storage/` directory. Constructing `UploadService()` inline in
+the route would work functionally but would leave no seam for tests to
+substitute a different instance.
+
+**Why validate the file by streaming to disk in chunks, enforcing the
+size limit as it goes, instead of checking `Content-Length` or reading
+the whole file first?** The `Content-Length` header is client-supplied
+and not authoritative — trusting it means a client can lie. Fully
+buffering the file before checking its size defeats the point of a size
+limit (a malicious/broken upload could still exhaust memory before ever
+being rejected). Streaming in 1 MiB chunks and aborting — deleting the
+partial file — the moment the cumulative size exceeds the limit means
+`UploadService` never holds more than one chunk past the configured
+maximum in memory or on disk, regardless of what the client claims or
+sends.
+
+**Why is the declared MIME type (`UploadFile.content_type`) validated but
+not the file's actual bytes?** The `Content-Type` of a multipart part is
+also client-supplied — validating it is a legitimate first line of
+defense (catches accidental/obviously-wrong uploads immediately, cheaply,
+before any disk I/O), but not authoritative against a deliberately
+mislabeled file. Verifying the *actual* bytes are a valid image (e.g. via
+Pillow) is real content-sniffing that belongs to a later image-processing
+phase — explicitly out of scope here (see "Do not implement" at the top
+of this milestone) — not upload validation.
+
+**Why is the stored filename always generated (`uuid4().hex` + extension),
+never the client-supplied `original_filename`?** Using a client-supplied
+filename as an actual disk path is a classic path-traversal vector
+(`../../etc/passwd`-style names) and a collision hazard (two uploads
+named `photo.jpg`). Generating the on-disk name sidesteps both entirely —
+there's no sanitization logic to get subtly wrong, because the untrusted
+value is never used as a path component. The original name is preserved
+in `ProductImage.original_filename` for display purposes only.
+
+**Why do `ProductCreate` and `ProductImage` exist as schemas if there's no
+database yet?** They're the actual request/response contract for `POST
+/products/upload` today — a Pydantic model is needed regardless of
+whether a database exists, since it's what defines the shape of the form
+fields and the JSON response. `ProductResponse` is the one schema that
+*is* purely reserved ahead of need (not used by any route yet), the same
+pattern as Phase 1's `AIModelSettings` — defined now so a later
+persistence phase's routes/tests don't have to invent the contract from
+scratch.
+
+**Why does `backend/.gitignore` now ignore `storage/` entirely?**
+Milestone 1 already established that runtime directories
+(`paths.ensure_runtime_directories()`) are created at startup, not
+source-controlled — but until Phase 2A, nothing ever actually wrote a
+file into `storage/uploads/`, so the gap (an uploaded file could get
+accidentally `git add -A`'d) was latent. Ignoring `storage/` outright
+(no `.gitkeep`, unlike `scripts/`/`docs/`) is correct specifically because
+it's runtime-created and recreated automatically — it should never be
+part of the repository's tracked content.
+
+**Why does `python-multipart` appear as a new runtime dependency?**
+FastAPI's form/file parsing (`Form(...)`, `File(...)`, `UploadFile`) is
+built on top of `python-multipart` for parsing `multipart/form-data`
+request bodies, and FastAPI only raises a runtime error demanding it the
+moment a route actually declares a form/file parameter — it's an optional
+dependency of FastAPI itself, not bundled by default, so any endpoint
+that accepts uploads needs it added explicitly (`uv add python-multipart`).
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -928,4 +1053,54 @@ uv run --project backend pre-commit run --all-files -c .pre-commit-config.yaml
 # 5. Version control
 git add -A
 git commit -m "feat: add testing fixtures and CI foundation (Milestone 8)"
+```
+
+**Phase 2A (Product Upload Pipeline)** added, from the repo root:
+
+```bash
+# 1. New runtime dependency: FastAPI's Form()/File()/UploadFile support
+#    needs python-multipart, an optional dependency not installed by default
+cd backend
+uv add python-multipart
+cd ..
+
+# 2. Constants + exceptions
+#    backend/app/core/constants.py — added SUPPORTED_IMAGE_MIME_TYPES
+#    backend/app/exceptions/errors.py — added UnsupportedMediaTypeException,
+#    FileTooLargeException
+
+# 3. Schemas, service, dependency provider, router
+#    backend/app/schemas/product.py — hand-written
+#    backend/app/services/upload_service.py — hand-written
+#    backend/app/dependencies/upload.py — hand-written
+#    backend/app/api/products.py — hand-written
+#    backend/app/application.py — _register_routers() now includes
+#    products_router, mounted under settings.application.api_prefix
+
+# 4. Never source-control uploaded files
+#    backend/.gitignore — added storage/
+
+# 5. Tests
+mkdir -p backend/tests/schemas backend/tests/services backend/tests/dependencies
+touch backend/tests/schemas/__init__.py backend/tests/services/__init__.py \
+      backend/tests/dependencies/__init__.py
+#    backend/tests/schemas/test_product.py — hand-written
+#    backend/tests/services/test_upload_service.py — hand-written
+#    backend/tests/dependencies/test_upload.py — hand-written
+#    backend/tests/api/test_products.py — hand-written
+#    backend/tests/test_application.py — extended for the new business route
+
+# 6. Verify
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+uv run uvicorn app.main:app --reload   # manual smoke test with curl -F uploads
+cd ..
+uv run --project backend pre-commit run --all-files -c .pre-commit-config.yaml
+
+# 7. Version control
+git add -A
+git commit -m "feat: add product upload pipeline (Phase 2A)"
 ```

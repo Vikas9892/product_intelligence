@@ -53,6 +53,8 @@ INSECURE_DEFAULT_SECRET_KEY = "insecure-dev-secret-key-change-me-1234567890"
 
 # --- Storage ---
 SUPPORTED_IMAGE_EXTENSIONS: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp")
+# .jpg and .jpeg both map to "image/jpeg" — fewer MIME types than extensions.
+SUPPORTED_IMAGE_MIME_TYPES: frozenset[str] = frozenset({"image/jpeg", "image/png", "image/webp"})
 DEFAULT_UPLOAD_MAX_SIZE_MB = 10
 
 # --- Pagination ---

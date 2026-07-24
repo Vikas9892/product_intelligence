@@ -27,6 +27,7 @@ from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.timing import TimingMiddleware
 
 _SYSTEM_ROUTE_PATHS = {"/health", "/ready", "/version"}
+_BUSINESS_ROUTE_PATHS = {f"{settings.application.api_prefix}/products/upload"}
 
 # Expected middleware stack, outermost first — see
 # `app.application._register_middleware` for the full ordering rationale.
@@ -62,7 +63,7 @@ class TestCreateApp:
 
 
 class TestRouterRegistration:
-    def test_registers_exactly_the_system_routes(self) -> None:
+    def test_registers_exactly_the_expected_routes(self) -> None:
         # `app.openapi()["paths"]` is the stable, public surface for "what
         # endpoints did I register" — unlike `app.routes`, it doesn't
         # include FastAPI's own /docs, /redoc, /openapi.json meta-routes,
@@ -72,7 +73,10 @@ class TestRouterRegistration:
 
         registered_paths = set(app.openapi()["paths"].keys())
 
-        assert registered_paths == _SYSTEM_ROUTE_PATHS
+        assert registered_paths == _SYSTEM_ROUTE_PATHS | _BUSINESS_ROUTE_PATHS
+        assert not any(
+            path.startswith(settings.application.api_prefix) for path in _SYSTEM_ROUTE_PATHS
+        )
 
 
 class TestMiddlewareRegistration:

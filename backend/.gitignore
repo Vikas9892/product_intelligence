@@ -9,3 +9,7 @@ __pycache__/
 htmlcov/
 .env
 !.env.example
+
+# Runtime-created (app/core/paths.py::ensure_runtime_directories) — never
+# source-controlled; recreated automatically at app startup if missing.
+storage/

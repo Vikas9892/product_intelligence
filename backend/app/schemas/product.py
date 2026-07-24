@@ -7,6 +7,10 @@ persisted product will have once a later phase adds a database, defined
 now so that phase's routes/tests don't have to invent the contract from
 scratch, the same way Phase 1's `AIModelSettings` was reserved before any
 AI call existed.
+
+Deliberately separate from `app.models.product.Product` (Phase 2B's
+internal domain model) — see that module's docstring and the Phase 2B
+section of `backend/README.md` for why the two aren't the same type.
 """
 
 from datetime import datetime
@@ -49,13 +53,19 @@ class ProductImage(BaseModel):
 class UploadResponse(BaseModel):
     """Response body for `POST /api/v1/products/upload`.
 
-    No database row exists yet (Phase 2A is upload-only, by design — see
-    `backend/README.md`) — this describes exactly what was received and
-    where the file was stored, nothing more.
+    No database row exists yet (Phase 2B processes but does not persist —
+    see `backend/README.md`). `product_id` and `checksum_sha256` come from
+    `app.models.product.Product`, the internal domain object
+    `ProductService` builds; `product` reflects the *normalized* fields
+    (trimmed, cased, sluggified, price-rounded), not the raw submitted
+    values, since that's what was actually processed and would (in a
+    later phase) be persisted.
     """
 
+    product_id: UUID
     product: ProductCreate
     image: ProductImage
+    checksum_sha256: str
 
 
 class ProductResponse(BaseModel):

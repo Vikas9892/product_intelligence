@@ -3,13 +3,18 @@
 FastAPI backend service. This document covers all of **Phase 1**
 (Milestones 1–8: backend skeleton, configuration, logging, the app
 factory, health endpoints, global exception handling, middleware, and
-testing/CI — see the per-milestone sections below) and **Phase 2A
-(Product Upload Pipeline)**: the first real business endpoint, accepting
-a product image plus metadata, validating it, and storing it.
+testing/CI — see the per-milestone sections below), **Phase 2A (Product
+Upload Pipeline)**: the first real business endpoint, accepting a product
+image plus metadata, validating it, and storing it; and **Phase 2B
+(Product Processing & Metadata Normalization)**: turning that stored
+upload into a checksummed, normalized, identified internal `Product`
+domain object.
 No database persistence, image processing, embeddings, or AI/search
 functionality exist yet — that is intentional. See
-[Why no code yet?](#why-no-code-yet) and the
-[Phase 2A section](#phase-2a--product-upload-pipeline-design-decisions)
+[Why no code yet?](#why-no-code-yet), the
+[Phase 2A section](#phase-2a--product-upload-pipeline-design-decisions),
+and the
+[Phase 2B section](#phase-2b--product-processing--metadata-normalization-design-decisions)
 below.
 
 ## Project overview
@@ -31,7 +36,7 @@ backend/
 │   ├── lifespan.py        # Startup/shutdown logic wired via FastAPI's lifespan API
 │   ├── api/                # HTTP route definitions (FastAPI routers)
 │   │   ├── health.py        # GET /health, /ready, /version — unversioned system endpoints
-│   │   └── products.py      # POST /products/upload (mounted under /api/v1) — Phase 2A
+│   │   └── products.py      # POST /products/upload (mounted under /api/v1) — Phase 2A + 2B
 │   ├── core/               # App-wide concerns: settings, logging, security, startup/shutdown
 │   │   ├── constants.py    # Fixed, non-configurable values (enums, prefixes, insecure-default marker)
 │   │   ├── paths.py        # Centralized filesystem paths (backend root, storage, uploads, logs)
@@ -138,7 +143,7 @@ of relying on someone remembering to run `black` before committing.
 | `app/middleware/timing.py` | `TimingMiddleware`: measures handling duration with `time.perf_counter`, stores it on `request.state.duration_ms`, echoes it as `X-Response-Time-Ms`. |
 | `app/middleware/logging.py` | `RequestLoggingMiddleware`: logs one line when a request starts, one when it finishes — both tagged with the request ID, the completion line also with status code and duration. |
 | `app/middleware/security_headers.py` | `SecurityHeadersMiddleware`: stamps a baseline set of OWASP-recommended security response headers (`X-Content-Type-Options`, `X-Frame-Options`, etc.) via `setdefault`, so a route that already set one of these wins. |
-| `app/schemas/product.py` | Phase 2A schemas: `ProductCreate` (name/description/category/price, bound from individual `Form(...)` fields), `ProductImage` (metadata about one stored file), `UploadResponse` (the upload endpoint's actual response), and `ProductResponse` — reserved ahead of need for once a database exists, the same way Phase 1's `AIModelSettings` was reserved. |
+| `app/schemas/product.py` | Phase 2A schemas: `ProductCreate` (name/description/category/price, bound from individual `Form(...)` fields), `ProductImage` (metadata about one stored file), `UploadResponse` (the upload endpoint's actual response — extended in Phase 2B with `product_id` and `checksum_sha256`, both sourced from `Product`), and `ProductResponse` — reserved ahead of need for once a database exists, the same way Phase 1's `AIModelSettings` was reserved. |
 | `app/models/product.py` | Phase 2B: `Product` — the internal domain model `ProductService` builds, deliberately separate from the `app/schemas/product.py` API contracts (see that phase's design decisions below for why). Holds normalized fields, the generated `id`, and a `FileMetadata`; never returned directly by a route. |
 | `app/services/upload_service.py` | Phase 2A: `UploadService` — stores an accepted file under a generated (never client-supplied) filename, streaming it to disk in bounded chunks while enforcing the size limit as it goes (never buffering more than one chunk past the limit). Filename/extension and MIME type validation were extracted to `app/validators/file_validator.py` in Phase 2B — this service now calls into it rather than deciding validation rules itself. All limits default to `settings.storage.*`/`constants.SUPPORTED_IMAGE_MIME_TYPES` but are constructor-overridable for tests. |
 | `app/validators/file_validator.py` | Phase 2B: `validate_filename_and_extension`, `validate_mime_type` — pure functions (no I/O, no service state) extracted out of `UploadService` so validation rules are reusable independent of *how* a file gets stored. Size validation deliberately stays in `UploadService` — it's an inherently streaming, as-you-go check, not a pure function over an already-known value. |
@@ -148,7 +153,7 @@ of relying on someone remembering to run `black` before committing.
 | `app/services/product_service.py` | Phase 2B: `ProductService.process_upload(product, image)` — the orchestrator. Locates the stored file and computes its checksum, parses `FileMetadata`, normalizes `name`/`description`/`category`/`price` (the module-level `_normalize_*` functions), re-validates the normalized result, generates a UUID4, and builds a `Product`. Logs each pipeline stage (never file contents). |
 | `app/dependencies/upload.py` | `get_upload_service()`: a cached-singleton dependency provider for `UploadService`, mirroring `app.core.config.get_settings`'s pattern — Phase 2A's first real use of the `app/dependencies/` package reserved since Milestone 1. |
 | `app/dependencies/product.py` | `get_product_service()`: the same cached-singleton pattern for `ProductService`. `ChecksumService` gets no provider of its own — it's composed internally by `ProductService`, not depended on directly by any route. |
-| `app/api/products.py` | `POST /products/upload` (mounted under `/api/v1` — a real, versioned business endpoint, unlike `health.py`'s system routes). Accepts product metadata as individual `Form(...)` fields plus a `File()` upload, delegates validation/storage entirely to `UploadService`, returns an `UploadResponse`. See the Phase 2A section below for why the fields are individual `Form(...)` params rather than a single `Annotated[ProductCreate, Form()]`. |
+| `app/api/products.py` | `POST /products/upload` (mounted under `/api/v1` — a real, versioned business endpoint, unlike `health.py`'s system routes). Accepts product metadata as individual `Form(...)` fields plus a `File()` upload; calls `UploadService.save_upload` (Phase 2A) then `ProductService.process_upload` (Phase 2B) in sequence, and maps the resulting `Product` onto `UploadResponse`. See the Phase 2A section for why the fields are individual `Form(...)` params rather than a single `Annotated[ProductCreate, Form()]`. |
 | `tests/__init__.py`, `tests/core/__init__.py`, `tests/api/__init__.py`, `tests/middleware/__init__.py`, `tests/exceptions/__init__.py`, `tests/schemas/__init__.py`, `tests/services/__init__.py`, `tests/dependencies/__init__.py`, `tests/utils/__init__.py`, `tests/validators/__init__.py`, `tests/models/__init__.py` | Makes each test directory a package so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
 | `tests/services/test_product_service.py` | Direct unit tests for every `_normalize_*` function (trimming, case, category slugification and separator-collapsing, price rounding), plus `process_upload` end-to-end against `tmp_path`: a full success case (checksum matches `hashlib.sha256` on the real stored content, fields normalized correctly, a fresh UUID4 per call), the whitespace-only-name and negative-price defensive-validation paths (the latter via `ProductCreate.model_construct` to simulate a caller that bypassed schema validation), and a missing stored file raising `ChecksumException`. |
 | `tests/dependencies/test_product.py` | Confirms `get_product_service()` returns a cached singleton and that `cache_clear()` forces a fresh instance — the same contract as `tests/dependencies/test_upload.py`. |
@@ -176,7 +181,7 @@ of relying on someone remembering to run `black` before committing.
 | `tests/validators/test_file_validator.py` | Direct unit tests for both functions: allowed/disallowed extensions and MIME types, extension lowercasing, missing/empty filename, a filename with no extension at all, and a missing MIME type. |
 | `tests/validators/test_product_validator.py` | Confirms `validate_normalized_name` rejects only a blank string, and `validate_price` accepts `None`/zero/positive values but rejects negative ones. |
 | `tests/models/test_product.py` | Confirms `Product` constructs with all fields, accepts `None` for every optional field, and round-trips through `model_dump`/`model_validate`. |
-| `tests/api/test_products.py` | Integration tests against the *real* `create_app()` app, with `get_upload_service` overridden (`app.dependency_overrides`) to redirect storage to `tmp_path`: a successful upload's response shape and on-disk file content, every validation failure's status code and error envelope (missing name, disallowed extension/MIME type, negative price), and the oversized-file 413 case. |
+| `tests/api/test_products.py` | Integration tests against the *real* `create_app()` app, with both `get_upload_service` and `get_product_service` overridden (`app.dependency_overrides`) to redirect storage to the same `tmp_path`: a successful upload's normalized response fields, a valid `product_id`/`checksum_sha256` (verified against `hashlib.sha256` on the actual submitted bytes), on-disk file content, every validation failure's status code and error envelope (missing name, whitespace-only name reaching `ProductService`, disallowed extension/MIME type, negative price), and the oversized-file 413 case. |
 | `scripts/.gitkeep`, `docs/.gitkeep` | Empty-directory placeholders — git does not track empty directories, so these keep the scaffold intact until real content lands. |
 
 ## Milestone 2 — configuration design decisions
@@ -783,9 +788,11 @@ that accepts uploads needs it added explicitly (`uv add python-multipart`).
 
 ## Phase 2B — Product Processing & Metadata Normalization design decisions
 
-*(This section grows milestone by milestone as Phase 2B lands — currently
-covers the Checksum Service, File Metadata, Validators, Product Domain
-Model, and ProductService milestones.)*
+Phase 2B shipped as six milestones, each its own commit — Checksum
+Service, File Metadata, Validators, Product Domain Model, ProductService,
+and finally Router Integration (this section's last entry) — so each
+piece could be verified and reviewed independently rather than landing as
+one large, hard-to-review change.
 
 **Why does `ChecksumService` re-read the file from disk instead of
 computing the checksum inline while `UploadService` streams it to disk in
@@ -980,6 +987,40 @@ normalization/validation). File *contents* are exactly the kind of thing
 that must never appear in a log line — arbitrarily large, potentially
 sensitive, and useless for debugging compared to the filename/checksum/id
 that are actually logged instead.
+
+**Why does `UploadResponse.product` reflect the *normalized* fields
+(what `ProductService` produced) rather than exactly what the client
+submitted?** The response should describe what was actually processed and
+would, in a later phase, be persisted — showing the raw un-normalized
+input back would misrepresent that. A client that submitted `" Nike "`
+and a category of `"Men Tshirts"` sees `"Nike"` and `"men-tshirts"` in the
+response, which is also simply more useful: it's confirmation of the
+canonical form the system will use everywhere else (filtering, search,
+display) going forward.
+
+**Why do `product_id` and `checksum_sha256` land as new top-level fields
+on `UploadResponse`, instead of nesting them inside `ProductImage`?**
+`ProductImage` is Phase 2A's contract for "what `UploadService` knows the
+instant a file is saved" — before a checksum has even been computed.
+Extending it with a field that's only populated by a *different*,
+later-running service would blur what `ProductImage` actually represents
+and could create a confusing window where an `image` object exists with
+the field unset. Adding `product_id`/`checksum_sha256` directly to
+`UploadResponse` instead keeps `ProductImage`'s meaning exactly what it
+was in Phase 2A, while still surfacing both new pieces of information at
+the top level of the one response a client actually receives.
+
+**Why does the router call `upload_service.save_upload` and
+`product_service.process_upload` as two sequential `await`s, instead of
+`ProductService` internally depending on `UploadService`?** This mirrors
+the pipeline the phase's own diagram draws: Upload (Phase 2A, "is this
+file acceptable, where does it live") happens completely, then
+processing (Phase 2B, "now that it's stored, build a product from it")
+begins. Keeping that sequencing visible in the router — rather than
+hidden inside a `ProductService` that internally calls `UploadService` —
+means the route function itself is a readable, linear description of the
+whole pipeline, and each service can be tested (and reasoned about)
+without needing the other to exist.
 
 ## Setup instructions
 
@@ -1325,4 +1366,62 @@ uv run --project backend pre-commit run --all-files -c .pre-commit-config.yaml
 # 7. Version control
 git add -A
 git commit -m "feat: add product upload pipeline (Phase 2A)"
+```
+
+**Phase 2B (Product Processing & Metadata Normalization)** added, from
+the repo root — six milestones, each its own commit:
+
+```bash
+cd backend
+
+# Milestone 1/6 — Checksum Service
+#   app/exceptions/errors.py — added ChecksumException
+#   app/services/checksum_service.py — hand-written
+#   tests/services/test_checksum_service.py — hand-written
+uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest
+cd .. && git add -A && git commit -m "feat: add checksum service (Phase 2B milestone 1/6)" && cd backend
+
+# Milestone 2/6 — File Metadata utility
+#   app/utils/metadata.py — hand-written
+mkdir -p tests/utils && touch tests/utils/__init__.py
+#   tests/utils/test_metadata.py — hand-written
+uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest
+cd .. && git add -A && git commit -m "feat: add file metadata parser (Phase 2B milestone 2/6)" && cd backend
+
+# Milestone 3/6 — Validators
+mkdir -p app/validators tests/validators
+touch app/validators/__init__.py tests/validators/__init__.py
+#   app/validators/{file_validator,product_validator}.py — hand-written
+#   app/services/upload_service.py — refactored to call file_validator
+#   tests/validators/test_{file_validator,product_validator}.py — hand-written
+uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest
+cd .. && git add -A && git commit -m "feat: add reusable validators (Phase 2B milestone 3/6)" && cd backend
+
+# Milestone 4/6 — Product domain model
+#   app/models/product.py — hand-written
+mkdir -p tests/models && touch tests/models/__init__.py
+#   tests/models/test_product.py — hand-written
+uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest
+cd .. && git add -A && git commit -m "feat: add Product domain model (Phase 2B milestone 4/6)" && cd backend
+
+# Milestone 5/6 — ProductService orchestrator
+#   app/services/product_service.py — hand-written
+#   app/dependencies/product.py — hand-written
+#   tests/services/test_product_service.py, tests/dependencies/test_product.py — hand-written
+uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest
+cd .. && git add -A && git commit -m "feat: add ProductService orchestrator (Phase 2B milestone 5/6)" && cd backend
+
+# Milestone 6/6 — Router integration
+#   app/schemas/product.py — UploadResponse gained product_id, checksum_sha256
+#   app/api/products.py — now calls product_service.process_upload after upload_service.save_upload
+#   tests/api/test_products.py — updated for the new response shape + dependency overrides
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+uv run uvicorn app.main:app --reload   # manual smoke test with curl -F uploads
+cd ..
+uv run --project backend pre-commit run --all-files -c .pre-commit-config.yaml
+git add -A
+git commit -m "feat: wire ProductService into the upload endpoint (Phase 2B milestone 6/6)"
 ```

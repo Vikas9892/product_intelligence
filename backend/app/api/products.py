@@ -2,15 +2,22 @@
 
 `POST /products/upload` (mounted under `settings.application.api_prefix`
 by `app/application.py`, so `/api/v1/products/upload`) accepts product
-metadata plus a single image file as `multipart/form-data`, delegates all
-validation and storage to `UploadService`, and returns metadata about what
-was stored. Unlike `app/api/health.py`'s system routes (deliberately
-unversioned), this is a real, versioned business endpoint, so it belongs
-under the prefix — see the Phase 2A section of `backend/README.md`.
+metadata plus a single image file as `multipart/form-data`, and runs it
+through the full Phase 2A + 2B pipeline:
 
-No database write happens here (Phase 2A is upload-only by design) — the
-response describes the accepted upload, not a persisted `Product` row;
-that arrives in a later phase.
+    UploadService.save_upload      -> validate + store the file (Phase 2A)
+    ProductService.process_upload  -> checksum + metadata + normalize +
+                                       validate + generate ID (Phase 2B)
+
+Unlike `app/api/health.py`'s system routes (deliberately unversioned),
+this is a real, versioned business endpoint, so it belongs under the
+prefix — see the Phase 2A section of `backend/README.md`.
+
+No database write happens here (Phase 2B processes but does not persist
+— that arrives in a later phase) — the response describes the fully
+processed, normalized, identified upload, built from `Product`
+(`app/models/product.py`), the internal domain object, deliberately not
+returned directly (see that module's docstring).
 
 **Why individual `Form(...)` parameters instead of
 `Annotated[ProductCreate, Form()]`?** FastAPI's "Form models" feature
@@ -31,8 +38,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 
 from app.core.logging import get_logger
+from app.dependencies.product import get_product_service
 from app.dependencies.upload import get_upload_service
 from app.schemas.product import ProductCreate, UploadResponse
+from app.services.product_service import ProductService
 from app.services.upload_service import UploadService
 
 logger = get_logger(__name__)
@@ -45,41 +54,50 @@ router = APIRouter(prefix="/products", tags=["products"])
     response_model=UploadResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Upload a product image",
-    description="Accepts product metadata and a single image file, validates the "
-    "file (extension, MIME type, size), and stores it. Does not persist "
-    "a product record yet.",
+    description="Accepts product metadata and a single image file, validates and "
+    "stores the file, then processes it (checksum, metadata, "
+    "normalization, ID generation). Does not persist a product record yet.",
 )
 async def upload_product(
     *,
     name: Annotated[str, Form(min_length=1, max_length=200, description="Product name.")],
     file: Annotated[UploadFile, File(description="The product image file.")],
     upload_service: Annotated[UploadService, Depends(get_upload_service)],
+    product_service: Annotated[ProductService, Depends(get_product_service)],
     description: Annotated[str | None, Form(max_length=2000)] = None,
     category: Annotated[str | None, Form(max_length=100)] = None,
     price: Annotated[float | None, Form(ge=0)] = None,
 ) -> UploadResponse:
-    """Validate and store one product image, alongside its product metadata.
+    """Validate/store one product image, then process it into a `Product`.
 
     Missing/invalid form fields, an unsupported file extension/MIME type,
-    and an oversized file are all `UploadService`'s responsibility (it
+    an oversized file, a blank-after-normalization name, or a checksum
+    failure are all handled by `UploadService`/`ProductService` (each
     raises the appropriate `AppException` subclass, converted to the
     standard error envelope by the global handlers) — this route stays a
-    thin adapter: parse the request, delegate, shape the response.
+    thin adapter: parse the request, delegate to both services in order,
+    shape the response.
     """
-    product = ProductCreate(name=name, description=description, category=category, price=price)
+    product_input = ProductCreate(
+        name=name, description=description, category=category, price=price
+    )
     logger.info(
         "Upload request received: product_name=%s, filename=%s",
-        product.name,
+        product_input.name,
         file.filename,
     )
 
     image = await upload_service.save_upload(file)
+    product = await product_service.process_upload(product_input, image)
 
-    logger.info(
-        "Upload stored: product_name=%s, stored_filename=%s, size_bytes=%d",
-        product.name,
-        image.stored_filename,
-        image.size_bytes,
+    return UploadResponse(
+        product_id=product.id,
+        product=ProductCreate(
+            name=product.name,
+            description=product.description,
+            category=product.category,
+            price=product.price,
+        ),
+        image=image,
+        checksum_sha256=product.file_metadata.checksum_sha256,
     )
-
-    return UploadResponse(product=product, image=image)

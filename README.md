@@ -14,7 +14,7 @@ reviewable milestone rather than a single monolithic drop.
 |------:|-------|
 | 0  | Planning |
 | 1  | Backend skeleton (complete) |
-| **2**  | **Product ingestion — 2A (upload pipeline) complete, this milestone** |
+| **2**  | **Product ingestion — 2A (upload pipeline) + 2B (processing/normalization) complete, this milestone** |
 | 3  | Image processing |
 | 4  | Text embeddings |
 | 5  | Image embeddings |
@@ -56,12 +56,13 @@ make test      # pytest with coverage
 ```
 
 `make run` starts `uvicorn app.main:app --reload`, serving `/health`,
-`/ready`, `/version`, and `POST /api/v1/products/upload` (Phase 2A).
+`/ready`, `/version`, and `POST /api/v1/products/upload` (Phase 2A + 2B).
 
 ## Status
 
 Phase 1 (Backend Foundation) is complete, and Phase 2A (Product Upload
-Pipeline) has landed ahead of the rest of Phase 2 (Product Ingestion):
+Pipeline) + 2B (Product Processing & Metadata Normalization) have landed
+ahead of the rest of Phase 2 (Product Ingestion):
 
 - **Milestone 1 — Backend Skeleton**: project structure, dependency
   management (`uv`), linting/formatting/type-checking, testing, and
@@ -98,8 +99,17 @@ Pipeline) has landed ahead of the rest of Phase 2 (Product Ingestion):
   (`app/services/upload_service.py`), and stores it under the runtime
   upload directory `app/core/paths.py` established in Phase 1 — no
   database write yet.
+- **Phase 2B — Product Processing & Metadata Normalization**: six
+  milestones building the pipeline from a stored upload to a processed
+  `Product`: a reusable `ChecksumService` (SHA-256), an internal
+  `FileMetadata` parser, extracted `app/validators/` (file + product),
+  the internal `Product` domain model (`app/models/product.py`,
+  deliberately separate from the API schemas), and `ProductService`
+  (`app/services/product_service.py`) orchestrating checksum + metadata +
+  normalization + validation + UUID4 generation — now wired into the
+  upload endpoint. Still no database write.
 
-105 unit/integration tests, 99% coverage on `app/`.
+157 unit/integration tests, 99% coverage on `app/`.
 
 No database persistence, image processing, embeddings, or AI/search code
 exists yet by design — see [`backend/README.md`](backend/README.md) for

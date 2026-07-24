@@ -49,6 +49,7 @@ class TestProductImage:
 class TestUploadResponse:
     def test_round_trips_through_model_dump_and_validate(self) -> None:
         response = UploadResponse(
+            product_id=uuid4(),
             product=ProductCreate(name="Widget"),
             image=ProductImage(
                 original_filename="a.jpg",
@@ -57,6 +58,7 @@ class TestUploadResponse:
                 size_bytes=1024,
                 uploaded_at=datetime.now(UTC),
             ),
+            checksum_sha256="a" * 64,
         )
 
         dumped = response.model_dump(mode="json")

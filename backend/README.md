@@ -49,7 +49,8 @@ backend/
 │   │   └── security_headers.py # Stamps baseline security response headers
 │   ├── services/          # Business logic, orchestration between repositories/external calls
 │   │   ├── upload_service.py # Phase 2A: stores uploaded product images (validation now delegated)
-│   │   └── checksum_service.py # Phase 2B: SHA-256 of an already-stored file
+│   │   ├── checksum_service.py # Phase 2B: SHA-256 of an already-stored file
+│   │   └── product_service.py # Phase 2B: orchestrates metadata/checksum/normalization/ID -> Product
 │   ├── validators/         # Reusable, pure validation functions — no I/O, no service state
 │   │   ├── file_validator.py # Filename/extension + declared MIME type checks
 │   │   └── product_validator.py # Post-normalization product-field invariant checks
@@ -62,7 +63,8 @@ backend/
 │   │   └── product.py       # ProductCreate, ProductImage, UploadResponse, ProductResponse — Phase 2A
 │   ├── workers/            # Background jobs / async task consumers
 │   ├── dependencies/       # FastAPI dependency-injection providers
-│   │   └── upload.py        # `get_upload_service()` — Phase 2A's first real dependency provider
+│   │   ├── upload.py        # `get_upload_service()` — Phase 2A's first real dependency provider
+│   │   └── product.py       # `get_product_service()` — Phase 2B
 │   └── utils/              # Small stateless helpers shared across layers
 │       └── metadata.py      # FileMetadata + parse_file_metadata() — Phase 2B "Parse Metadata" stage
 ├── tests/                  # pytest test suite, mirrors the app/ package layout
@@ -143,9 +145,13 @@ of relying on someone remembering to run `black` before committing.
 | `app/validators/product_validator.py` | Phase 2B: `validate_normalized_name`, `validate_price` — re-check domain invariants *after* normalization that `ProductCreate`'s schema-level validation can't express (e.g. a name that's all whitespace passes `min_length=1` before trimming but is invalid after) or that should hold regardless of which caller builds a `Product`, not just the HTTP route. |
 | `app/services/checksum_service.py` | Phase 2B: `ChecksumService.compute_sha256(path)` — streams an already-stored file from disk in 1 MiB chunks and returns its SHA-256 hex digest. Standalone (operates on any file path, not coupled to the upload stream) so later phases (duplicate detection, caching, integrity checks) reuse it instead of reimplementing hashing. Raises `ChecksumException` if the file can't be read. |
 | `app/utils/metadata.py` | Phase 2B: `FileMetadata` (transport-agnostic file metadata: filename, extension, MIME type, size, SHA-256 checksum, upload timestamp) and `parse_file_metadata(image, checksum_sha256=...)`, the adapter from Phase 2A's `ProductImage` + a computed checksum into this internal object. |
+| `app/services/product_service.py` | Phase 2B: `ProductService.process_upload(product, image)` — the orchestrator. Locates the stored file and computes its checksum, parses `FileMetadata`, normalizes `name`/`description`/`category`/`price` (the module-level `_normalize_*` functions), re-validates the normalized result, generates a UUID4, and builds a `Product`. Logs each pipeline stage (never file contents). |
 | `app/dependencies/upload.py` | `get_upload_service()`: a cached-singleton dependency provider for `UploadService`, mirroring `app.core.config.get_settings`'s pattern — Phase 2A's first real use of the `app/dependencies/` package reserved since Milestone 1. |
+| `app/dependencies/product.py` | `get_product_service()`: the same cached-singleton pattern for `ProductService`. `ChecksumService` gets no provider of its own — it's composed internally by `ProductService`, not depended on directly by any route. |
 | `app/api/products.py` | `POST /products/upload` (mounted under `/api/v1` — a real, versioned business endpoint, unlike `health.py`'s system routes). Accepts product metadata as individual `Form(...)` fields plus a `File()` upload, delegates validation/storage entirely to `UploadService`, returns an `UploadResponse`. See the Phase 2A section below for why the fields are individual `Form(...)` params rather than a single `Annotated[ProductCreate, Form()]`. |
 | `tests/__init__.py`, `tests/core/__init__.py`, `tests/api/__init__.py`, `tests/middleware/__init__.py`, `tests/exceptions/__init__.py`, `tests/schemas/__init__.py`, `tests/services/__init__.py`, `tests/dependencies/__init__.py`, `tests/utils/__init__.py`, `tests/validators/__init__.py`, `tests/models/__init__.py` | Makes each test directory a package so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
+| `tests/services/test_product_service.py` | Direct unit tests for every `_normalize_*` function (trimming, case, category slugification and separator-collapsing, price rounding), plus `process_upload` end-to-end against `tmp_path`: a full success case (checksum matches `hashlib.sha256` on the real stored content, fields normalized correctly, a fresh UUID4 per call), the whitespace-only-name and negative-price defensive-validation paths (the latter via `ProductCreate.model_construct` to simulate a caller that bypassed schema validation), and a missing stored file raising `ChecksumException`. |
+| `tests/dependencies/test_product.py` | Confirms `get_product_service()` returns a cached singleton and that `cache_clear()` forces a fresh instance — the same contract as `tests/dependencies/test_upload.py`. |
 | `tests/conftest.py` | Shared fixtures (Milestone 8): `app` (a fresh `create_app()` instance per test) and `client` (a `TestClient` bound to it, entered as a context manager so the lifespan actually runs). Only fixtures genuinely needed by multiple modules live here. |
 | `tests/test_environment.py` | A single sanity test (Python version check) proving the pytest + coverage pipeline actually runs. |
 | `tests/core/test_paths.py` | Verifies path relationships (`UPLOAD_DIR` under `STORAGE_DIR`, etc.) and that `ensure_runtime_directories()` creates the right directories, using `monkeypatch` + `tmp_path` so it never touches the real filesystem. |
@@ -778,8 +784,8 @@ that accepts uploads needs it added explicitly (`uv add python-multipart`).
 ## Phase 2B — Product Processing & Metadata Normalization design decisions
 
 *(This section grows milestone by milestone as Phase 2B lands — currently
-covers the Checksum Service, File Metadata, Validators, and Product
-Domain Model milestones.)*
+covers the Checksum Service, File Metadata, Validators, Product Domain
+Model, and ProductService milestones.)*
 
 **Why does `ChecksumService` re-read the file from disk instead of
 computing the checksum inline while `UploadService` streams it to disk in
@@ -910,6 +916,70 @@ nothing new enforced; a domain model built exclusively by one trusted,
 internal factory (`ProductService`) is allowed to trust its constructor
 was called correctly, the same way a class's private helper methods
 don't re-validate arguments the public method already checked.
+
+**Why do the `_normalize_*` functions live as module-level, underscore-
+prefixed functions in `product_service.py` rather than their own file or
+a `Normalizer` class?** The phase's own prescribed folder structure lists
+no dedicated normalizer module — normalization is treated as part of
+`ProductService`'s orchestration, not an independent, swappable component
+the way validation (used by multiple services) or checksumming
+(genuinely reusable across features) are. Module-level functions
+(matching the existing precedent of `app/exceptions/handlers.py`'s
+`_error_code_for_status` and `app/core/logging.py`'s
+`_build_handlers`/`_console_formatter`) are directly unit-testable without
+needing a class instance, while staying private to the module that's
+their only caller — the right amount of structure for logic that doesn't
+need to be reused or substituted independently.
+
+**Why does `_normalize_name` only trim whitespace (no case change), while
+`_normalize_category` both lowercases *and* slugifies?** They represent
+genuinely different kinds of data. A product name is a proper
+noun/brand — `"Nike"` and `"nike"` are the same brand but a route that
+silently lowercased "Nike" to "nike" would be presenting the brand
+incorrectly back to the user; only whitespace is unambiguously
+insignificant there. A category, by contrast, exists purely to group and
+filter products consistently — `"Men Tshirts"`, `"men tshirts"`, and
+`"MEN-TSHIRTS"` should all collapse to the identical `"men-tshirts"` slug
+so that filtering/grouping by category actually works, which requires
+both case-folding and structural normalization (spaces/punctuation ->
+hyphens), not just whitespace trimming.
+
+**Why is price normalized with `round(price, 2)` rather than a `Decimal`
+type?** `ProductCreate.price` is already a `float` (chosen in Phase 2A to
+keep form-field coercion simple — form data arrives as strings, and
+pydantic's lax mode coerces `"19.99"` to `float` without extra
+configuration). Introducing `Decimal` now, only for the rounding step,
+would mean converting `float` -> `Decimal` -> back to `float` (since
+`Product.price` and the API response are still `float`) for no actual
+precision benefit — floating-point imprecision matters when *repeatedly
+accumulating* money (e.g. summing many prices), not for rounding one
+value for display. A real ledger/accounting feature in a later phase
+would be the appropriate place to introduce `Decimal` end-to-end, not
+here.
+
+**Why does `ProductService.process_upload` take an already-built
+`ProductImage` (from `UploadService`) instead of the raw `UploadFile`
+itself?** It keeps the two services' responsibilities cleanly separated
+along the line the pipeline diagram itself draws: `UploadService` owns
+*"is this file acceptable, and where does it live"* (Phase 2A);
+`ProductService` owns *"now that it's stored, process it into a
+product"* (Phase 2B). Passing `UploadFile` into `ProductService` would
+require it to also know about streaming/validation/storage — exactly the
+concerns Phase 2A already solved and tested. The router
+(`app/api/products.py`, next milestone) is what actually sequences the
+two calls.
+
+**Why does the logging follow exactly this sequence — "Upload processing
+started" -> "Checksum generated" -> "Normalization complete" -> "Product
+processed" — and never include file contents?** This directly mirrors
+the four checkpoints the phase asked for, giving an operator reading logs
+a clear, ordered trace of exactly how far a given upload got if something
+fails partway through (e.g. logs ending after "Checksum generated" but
+before "Normalization complete" immediately localizes a bug to
+normalization/validation). File *contents* are exactly the kind of thing
+that must never appear in a log line — arbitrarily large, potentially
+sensitive, and useless for debugging compared to the filename/checksum/id
+that are actually logged instead.
 
 ## Setup instructions
 

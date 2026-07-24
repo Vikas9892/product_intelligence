@@ -1208,6 +1208,125 @@ support later is a small, isolated addition (one new allowed extension/
 MIME type/PIL format, plus the new dependency) whenever it's actually
 needed.
 
+## Phase 4 — Image Embedding Pipeline design decisions
+
+This is the first phase that actually calls an AI model. Five pieces
+landed, in dependency order: AI settings + a new exception type,
+`BaseEmbeddingService` (the abstraction `ProductService` depends on),
+`ModelManager` (lazy-loads and caches CLIP checkpoints), `CLIPEmbeddingService`
+(the concrete implementation), the `ImageEmbedding` domain model, and
+finally wiring it all into `ProductService`/the router/response schema —
+the same "build the interface and its dependencies before the thing that
+composes them" order Phase 3 used.
+
+**Why extend `AIModelSettings` instead of creating the phase-suggested
+`app/config/ai.py`?** `AIModelSettings` already existed from Phase 1,
+explicitly reserved for "AI provider and model configuration" with
+`openai_api_key`/`embedding_model`/`llm_model` fields for a future
+OpenAI-based *text* embedding/LLM phase — no calls to them were made yet.
+Adding a second, differently-named config module for image-model settings
+would fragment AI configuration across two places for no benefit; the
+phase's own "follow the architecture from previous phases" instruction is
+better served by using the seam Phase 1 already built than by following
+the suggested folder layout literally. `clip_model_name`/`embedding_device`/
+`embedding_batch_size` are kept as distinctly-named fields rather than
+reusing `embedding_model`, since a CLIP checkpoint name and an OpenAI
+text-embedding model name are unrelated settings that happen to share the
+word "embedding."
+
+**Why does `ModelManager` have no `get_model_manager()` cached-singleton
+factory, unlike `get_settings()`/`get_upload_service()`/`get_product_service()`?**
+A `ModelManager` only ever needs to exist once because `CLIPEmbeddingService`
+(its only caller) is itself constructed exactly once, as part of the
+already-cached `get_product_service()` singleton. Being constructed once,
+transitively, is exactly the same "loaded once, reused forever" guarantee
+a dedicated cache would provide — a second caching layer on top would be
+redundant and would need to be kept in sync with the first for no reason.
+
+**Why is `ModelManager.get_model` thread-safe (double-checked locking)
+when nothing else in this codebase needs explicit locking?** Every other
+service here is stateless per-request or only ever mutates request-scoped
+data. `ModelManager` is different: it holds process-wide mutable state (a
+dict of loaded models) that concurrent requests genuinely race over on
+first use. Without locking, two concurrent requests for the same
+not-yet-loaded model could both pass the "is it cached?" check, both
+trigger a real (expensive) load, and both end up needlessly holding a
+duplicate copy of the model in memory. The lock is only acquired on a
+cache miss — an already-loaded model is returned with no locking
+overhead at all.
+
+**Why does `CLIPEmbeddingService._encode_batch` read `.pooler_output`
+off the result of `model.get_image_features(...)` instead of using the
+tensor directly?** This is a real, version-specific behavior discovered
+by inspecting the installed `transformers` library's own source
+(`inspect.getsource`), not assumed from documentation: in the installed
+version, `get_image_features` returns a `BaseModelOutputWithPooling`
+object, not a bare tensor — the actual image embedding (after CLIP's
+visual projection layer) lives at `.pooler_output` on that object. Trusting
+outdated tutorials/docs here would have silently produced wrong code that
+only fails once a real model is loaded, which is exactly why this phase's
+integration tests load a real (if tiny) checkpoint rather than relying
+solely on fakes.
+
+**Why does every embedding get L2-normalized before being returned?**
+Downstream consumers of an embedding (semantic search, duplicate
+detection — later, out-of-scope-for-this-phase work) almost always want
+cosine similarity between vectors. Normalizing once, at generation time,
+means cosine similarity reduces to a plain dot product wherever it's
+later needed, rather than every future caller having to remember to
+normalize (or re-normalize) it themselves.
+
+**Why does `BaseEmbeddingService` declare an abstract `model_name`
+property, not just the two `generate_embedding(s)` methods the phase
+spec listed?** `ProductService` needs to record, on every `ImageEmbedding`
+it builds, which model actually produced that vector. Reading it from
+settings would be wrong the moment a test (or a future caller) injects a
+`CLIPEmbeddingService` configured with a different model than the
+process-wide default — the service that did the encoding is the only
+real source of truth for what model it used, so the interface makes that
+queryable rather than letting callers guess.
+
+**Why does `ProductService` embed `image_metadata.processed_path` (the
+standardized JPEG `ImageProcessingService` produced), not the original
+uploaded file?** The whole point of Phase 3's standardization step —
+consistent orientation, color mode, encoding — is that everything
+downstream, including embedding generation, operates on one predictable
+representation instead of every possible input format/orientation/color
+mode a client might upload. Embedding the raw upload would reintroduce
+exactly the variation Phase 3 exists to remove.
+
+**Why does `EmbeddingInfo` (the API-facing schema) expose only
+`model_name`/`dimension`, never `ImageEmbedding.vector`?** Same reasoning
+Phase 3's `ProcessedImageInfo` already established for excluding server
+filesystem paths: a raw 512-float (or whatever the model's dimension is)
+array has no use to an API consumer today — no similarity search or
+persistence layer exists yet for a client to do anything with it — so
+returning it would just bloat every response with data nobody can act on
+yet, without a considered decision about wire format, precision, or size
+once it actually matters.
+
+**Why does `ProductService` construct its `CLIPEmbeddingService` as a
+`BaseEmbeddingService | None = None` constructor parameter, matching
+`checksum_service`/`image_processing_service`, instead of importing
+`CLIPEmbeddingService` directly?** This is the same "depend on the seam,
+not the concrete implementation" reasoning already used throughout this
+codebase — a future encoder (DINOv2, SigLIP, ...) becomes a drop-in
+replacement with nothing outside `app/services/embeddings/` changing, and
+tests can inject a fast fake instead of loading a real model.
+
+**Why do this phase's tests use a hybrid strategy — fast fake-loader
+logic tests plus a handful of tests against a real, tiny CLIP checkpoint
+(`hf-internal-testing/tiny-random-CLIPModel`), instead of fakes
+everywhere?** Fakes alone would have missed the `.pooler_output` bug
+above entirely — they only assert that *this codebase's* logic is
+correct, not that real `transformers`/`torch` behaves the way the code
+assumes. A tiny, fast-downloading real checkpoint published specifically
+for test suites gives genuine end-to-end confidence (model loading,
+device placement, real tensor shapes, real inference) at a fraction of
+the size/time cost of the actual default model
+(`openai/clip-vit-base-patch32`), which is only ever downloaded outside
+of tests, on first real use.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -1684,4 +1803,66 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "feat: add image processing pipeline (Phase 3)"
+```
+
+**Phase 4 (Image Embedding Pipeline)** added, from the repo root — six
+steps in dependency order:
+
+```bash
+cd backend
+uv add transformers torch --extra-index-url https://download.pytorch.org/whl/cpu
+cd ..
+
+# Step 1 — AI settings + exceptions
+#   app/core/settings.py — AIModelSettings gained clip_model_name,
+#   embedding_device, embedding_batch_size
+#   app/core/constants.py — added DEFAULT_CLIP_MODEL_NAME
+#   app/exceptions/errors.py — added EmbeddingGenerationException
+#   backend/.env.example — documented the three new AI_MODELS__ variables
+#   tests/core/test_settings.py — extended with TestAIModelSettings
+
+# Step 2 — BaseEmbeddingService abstraction
+#   app/services/embeddings/base.py — hand-written (generate_embedding(s)
+#   plus an abstract model_name property)
+#   tests/services/embeddings/test_base.py — hand-written
+
+# Step 3 — ModelManager
+#   app/services/embeddings/model_manager.py — hand-written
+#   tests/services/embeddings/test_model_manager.py — hand-written
+#   (includes a thread-safety test and a real-tiny-model integration test)
+
+# Step 4 — CLIPEmbeddingService
+#   app/services/embeddings/clip_service.py — hand-written (implements
+#   model_name as a property returning self._model_name)
+#   tests/services/embeddings/test_clip_service.py — hand-written
+#   (batching, normalization, error wrapping, and real-tiny-model tests)
+
+# Step 5 — ImageEmbedding domain model
+#   app/models/embedding.py — hand-written
+#   tests/models/test_embedding.py — hand-written
+
+# Step 6 — integration
+#   app/models/product.py — Product gained embedding: ImageEmbedding
+#   app/services/product_service.py — composes CLIPEmbeddingService,
+#   calls it between image processing and metadata parsing
+#   app/schemas/product.py — added EmbeddingInfo, UploadResponse
+#   gained embedding
+#   app/api/products.py — maps Product.embedding onto the response
+#   app/dependencies/product.py — docstring updated to note
+#   CLIPEmbeddingService/ModelManager's "loaded once" guarantee
+#   tests/models/test_product.py, tests/services/test_product_service.py,
+#   tests/schemas/test_product.py, tests/api/test_products.py — updated
+#   for the new required field / fake and real-tiny-model fixtures
+
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+uv run uvicorn app.main:app --reload   # manual smoke test with curl -F uploads,
+                                        # inspect response.embedding
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "feat: add image embedding pipeline (Phase 4)"
 ```

@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas.product import (
+    EmbeddingInfo,
     ProcessedImageInfo,
     ProductCreate,
     ProductImage,
@@ -62,6 +63,14 @@ class TestProcessedImageInfo:
         assert info.color_mode == "RGB"
 
 
+class TestEmbeddingInfo:
+    def test_constructs_with_all_fields(self) -> None:
+        info = EmbeddingInfo(model_name="openai/clip-vit-base-patch32", dimension=512)
+
+        assert info.model_name == "openai/clip-vit-base-patch32"
+        assert info.dimension == 512
+
+
 class TestUploadResponse:
     def test_round_trips_through_model_dump_and_validate(self) -> None:
         response = UploadResponse(
@@ -78,6 +87,7 @@ class TestUploadResponse:
             processed_image=ProcessedImageInfo(
                 width=800, height=600, format="JPEG", color_mode="RGB"
             ),
+            embedding=EmbeddingInfo(model_name="openai/clip-vit-base-patch32", dimension=512),
         )
 
         dumped = response.model_dump(mode="json")

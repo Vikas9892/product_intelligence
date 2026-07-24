@@ -30,11 +30,21 @@ from app.application import create_app
 from app.core.config import settings
 from app.dependencies.product import get_product_service
 from app.dependencies.upload import get_upload_service
+from app.services.embeddings.clip_service import CLIPEmbeddingService
+from app.services.embeddings.model_manager import ModelManager
 from app.services.image_processing_service import ImageProcessingService
 from app.services.product_service import ProductService
 from app.services.upload_service import UploadService
 
 _UPLOAD_URL = f"{settings.application.api_prefix}/products/upload"
+
+# The same tiny, fast-loading real CLIP checkpoint the embeddings test
+# suite uses — proves the real embedding pipeline is wired end-to-end
+# through the HTTP layer, without paying full CLIP's download/load cost.
+# One shared `ModelManager` across every test in this file so it's loaded
+# once, not once per request.
+_TINY_MODEL_NAME = "hf-internal-testing/tiny-random-CLIPModel"
+_shared_model_manager = ModelManager(device="cpu")
 
 
 def _valid_jpeg_bytes(
@@ -50,6 +60,9 @@ def _override_services(app: FastAPI, upload_dir: Path) -> None:
     app.dependency_overrides[get_product_service] = lambda: ProductService(
         upload_dir=upload_dir,
         image_processing_service=ImageProcessingService(processed_dir=upload_dir / "processed"),
+        embedding_service=CLIPEmbeddingService(
+            model_name=_TINY_MODEL_NAME, model_manager=_shared_model_manager
+        ),
     )
 
 
@@ -141,6 +154,23 @@ class TestUploadProductSuccess:
         stored_path = tmp_path / stored_filename
 
         assert stored_path.read_bytes() == content
+
+    def test_returns_embedding_model_name_and_dimension_without_the_raw_vector(
+        self, upload_client: TestClient
+    ) -> None:
+        response = upload_client.post(
+            _UPLOAD_URL,
+            data={"name": "Widget"},
+            files=_image_file(),
+        )
+
+        body = response.json()
+        model, _processor, _device = _shared_model_manager.get_model(_TINY_MODEL_NAME)
+        assert body["embedding"] == {
+            "model_name": _TINY_MODEL_NAME,
+            "dimension": model.config.projection_dim,
+        }
+        assert "vector" not in body["embedding"]
 
     def test_only_a_required_name_is_needed(self, upload_client: TestClient) -> None:
         response = upload_client.post(

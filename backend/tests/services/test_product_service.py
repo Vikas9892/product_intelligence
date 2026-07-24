@@ -7,8 +7,14 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from app.exceptions.errors import ChecksumException, InvalidImageException, ValidationException
+from app.exceptions.errors import (
+    ChecksumException,
+    EmbeddingGenerationException,
+    InvalidImageException,
+    ValidationException,
+)
 from app.schemas.product import ProductCreate, ProductImage
+from app.services.embeddings.base import BaseEmbeddingService
 from app.services.image_processing_service import ImageProcessingService
 from app.services.product_service import (
     ProductService,
@@ -19,12 +25,47 @@ from app.services.product_service import (
 )
 
 
-def _build_service(tmp_path: Path) -> ProductService:
+class _FakeEmbeddingService(BaseEmbeddingService):
+    """A deterministic, instant stand-in for `CLIPEmbeddingService`.
+
+    `ProductService`'s own tests care about orchestration (is the
+    embedding wired into `Product` correctly?), not embedding *quality* or
+    real model behaviour — that's `test_clip_service.py`'s job. Loading a
+    real CLIP checkpoint here would make every product-service test pay
+    model-loading cost for no added confidence.
+    """
+
+    def __init__(self, *, dimension: int = 4, fail: bool = False) -> None:
+        self._dimension = dimension
+        self._fail = fail
+        self.calls: list[Path] = []
+
+    @property
+    def model_name(self) -> str:
+        return "fake-clip-model"
+
+    async def generate_embedding(self, image_path: Path) -> list[float]:
+        self.calls.append(image_path)
+        if self._fail:
+            raise EmbeddingGenerationException("fake embedding failure")
+        return [0.1 * (i + 1) for i in range(self._dimension)]
+
+    async def generate_embeddings(self, image_paths: list[Path]) -> list[list[float]]:
+        return [await self.generate_embedding(path) for path in image_paths]
+
+
+def _build_service(
+    tmp_path: Path, *, embedding_service: BaseEmbeddingService | None = None
+) -> ProductService:
     # Every test gets its own ImageProcessingService pointed at a tmp_path
-    # subdirectory — never the real settings.storage.processed_dir.
+    # subdirectory — never the real settings.storage.processed_dir — and a
+    # fake embedding service instead of loading a real CLIP model.
     return ProductService(
         upload_dir=tmp_path,
         image_processing_service=ImageProcessingService(processed_dir=tmp_path / "processed"),
+        embedding_service=(
+            embedding_service if embedding_service is not None else _FakeEmbeddingService()
+        ),
     )
 
 
@@ -152,6 +193,41 @@ class TestProcessUploadSuccess:
         assert product.image_metadata.format == "JPEG"
         assert product.image_metadata.color_mode == "RGB"
         assert product.image_metadata.processed_path.is_file()
+
+
+class TestProcessUploadEmbedding:
+    async def test_populates_embedding_from_the_embedding_service(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        fake_embedding_service = _FakeEmbeddingService(dimension=4)
+        service = _build_service(tmp_path, embedding_service=fake_embedding_service)
+
+        product = await service.process_upload(ProductCreate(name="Widget"), image)
+
+        assert product.embedding.product_id == product.id
+        assert product.embedding.model_name == "fake-clip-model"
+        assert product.embedding.embedding_dimension == 4
+        assert product.embedding.vector == pytest.approx([0.1, 0.2, 0.3, 0.4])
+
+    async def test_embeds_the_standardized_processed_image_not_the_original_upload(
+        self, tmp_path: Path
+    ) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        fake_embedding_service = _FakeEmbeddingService()
+        service = _build_service(tmp_path, embedding_service=fake_embedding_service)
+
+        product = await service.process_upload(ProductCreate(name="Widget"), image)
+
+        assert fake_embedding_service.calls == [product.image_metadata.processed_path]
+
+    async def test_propagates_embedding_generation_exception(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        service = _build_service(tmp_path, embedding_service=_FakeEmbeddingService(fail=True))
+
+        with pytest.raises(EmbeddingGenerationException):
+            await service.process_upload(ProductCreate(name="Widget"), image)
 
 
 class TestProcessUploadValidation:

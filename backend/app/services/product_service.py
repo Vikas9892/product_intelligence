@@ -5,18 +5,21 @@ internally-consistent `Product` domain object" (this phase).
 `ProductService.process_upload` orchestrates, in order: locate the
 already-stored file and compute its checksum (`ChecksumService`),
 standardize the image itself — orientation, color mode, size —
-(`ImageProcessingService`, Phase 3), parse internal file metadata
-(`app.utils.metadata.parse_file_metadata`), normalize the submitted
-product fields (the module-level `_normalize_*` functions below),
-re-validate the normalized result (`app.validators.product_validator`),
-generate a UUID4 identifier, and build the `Product` domain model. No
-database write, no embeddings, no AI model calls — see `backend/README.md`.
+(`ImageProcessingService`, Phase 3), generate a semantic embedding from
+the standardized image (`CLIPEmbeddingService`, Phase 4), parse internal
+file metadata (`app.utils.metadata.parse_file_metadata`), normalize the
+submitted product fields (the module-level `_normalize_*` functions
+below), re-validate the normalized result
+(`app.validators.product_validator`), generate a UUID4 identifier, and
+build the `Product` domain model. No database write, no vector search,
+no duplicate detection — see `backend/README.md`.
 
 Kept as an orchestrator, not a place where new validation/normalization
 *rules* get invented inline: normalization is small pure functions here
 (easy to unit test directly), validation delegates entirely to
-`app.validators.*`, and image processing delegates entirely to
-`ImageProcessingService`. `app/api/products.py` calls this service and
+`app.validators.*`, image processing delegates entirely to
+`ImageProcessingService`, and embedding generation delegates entirely to
+`CLIPEmbeddingService`. `app/api/products.py` calls this service and
 `UploadService` and nothing else — the router itself has no business logic.
 """
 
@@ -26,9 +29,12 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.models.embedding import ImageEmbedding
 from app.models.product import Product
 from app.schemas.product import ProductCreate, ProductImage
 from app.services.checksum_service import ChecksumService
+from app.services.embeddings.base import BaseEmbeddingService
+from app.services.embeddings.clip_service import CLIPEmbeddingService
 from app.services.image_processing_service import ImageProcessingService
 from app.utils.metadata import parse_file_metadata
 from app.validators.product_validator import validate_normalized_name, validate_price
@@ -44,6 +50,7 @@ class ProductService:
         *,
         checksum_service: ChecksumService | None = None,
         image_processing_service: ImageProcessingService | None = None,
+        embedding_service: BaseEmbeddingService | None = None,
         upload_dir: Path | None = None,
     ) -> None:
         self._checksum_service = (
@@ -53,6 +60,9 @@ class ProductService:
             image_processing_service
             if image_processing_service is not None
             else ImageProcessingService()
+        )
+        self._embedding_service = (
+            embedding_service if embedding_service is not None else CLIPEmbeddingService()
         )
         self._upload_dir = upload_dir if upload_dir is not None else settings.storage.upload_dir
 
@@ -85,6 +95,13 @@ class ProductService:
             stored_path, image.stored_filename
         )
 
+        vector = await self._embedding_service.generate_embedding(image_metadata.processed_path)
+        logger.info(
+            "Embedding generated: filename=%s, dimension=%d",
+            image.stored_filename,
+            len(vector),
+        )
+
         file_metadata = parse_file_metadata(image, checksum_sha256=checksum)
 
         normalized_name = _normalize_name(product.name)
@@ -97,6 +114,12 @@ class ProductService:
         logger.info("Normalization complete: product_name=%s", normalized_name)
 
         product_id = uuid.uuid4()
+        embedding = ImageEmbedding(
+            product_id=product_id,
+            model_name=self._embedding_service.model_name,
+            embedding_dimension=len(vector),
+            vector=vector,
+        )
         domain_product = Product(
             id=product_id,
             name=normalized_name,
@@ -105,6 +128,7 @@ class ProductService:
             price=normalized_price,
             file_metadata=file_metadata,
             image_metadata=image_metadata,
+            embedding=embedding,
         )
 
         logger.info("Product processed: id=%s, name=%s", product_id, normalized_name)

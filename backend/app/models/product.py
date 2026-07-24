@@ -24,6 +24,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from app.models.embedding import ImageEmbedding
 from app.models.image_metadata import ImageMetadata
 from app.utils.metadata import FileMetadata
 
@@ -48,3 +49,6 @@ class Product(BaseModel):
     #: Populated by `ImageProcessingService` (Phase 3) — always present,
     #: since every upload is processed before a `Product` is built.
     image_metadata: ImageMetadata
+    #: Populated by `CLIPEmbeddingService` (Phase 4) — always present,
+    #: since every upload is embedded right after image processing.
+    embedding: ImageEmbedding

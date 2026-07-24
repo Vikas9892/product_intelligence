@@ -1,11 +1,14 @@
 """FastAPI dependency provider for `ProductService`.
 
 Mirrors `app.dependencies.upload.get_upload_service`'s cached-singleton
-pattern. `ChecksumService` (which `ProductService` composes internally)
-gets no provider of its own — nothing calls it directly from a route, so
-there's no seam FastAPI's dependency injection needs to provide; it's an
-implementation detail of `ProductService`, not something a route ever
-depends on independently.
+pattern. `ChecksumService` and `CLIPEmbeddingService` (which `ProductService`
+composes internally) get no provider of their own — nothing calls them
+directly from a route, so there's no seam FastAPI's dependency injection
+needs to provide; they're implementation details of `ProductService`, not
+something a route ever depends on independently. This also gives
+`CLIPEmbeddingService`'s `ModelManager` its "loaded once" guarantee for
+free — see `app/services/embeddings/model_manager.py`'s docstring — since
+`ProductService` itself is built exactly once, here, behind `lru_cache`.
 """
 
 from functools import lru_cache

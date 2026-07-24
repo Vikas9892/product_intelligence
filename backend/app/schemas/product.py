@@ -69,16 +69,33 @@ class ProcessedImageInfo(BaseModel):
     color_mode: str
 
 
+class EmbeddingInfo(BaseModel):
+    """API-safe view of a generated image embedding.
+
+    Deliberately excludes `app.models.embedding.ImageEmbedding`'s `vector`
+    field — a raw 512-float (or whatever `dimension` is) array has no use
+    to an API consumer today (no similarity search or persistence exists
+    yet) and would just bloat the response, so only the model identity and
+    shape are exposed, mirroring `ProcessedImageInfo` excluding server
+    filesystem paths for the same "don't leak internal data that has no
+    external use" reasoning.
+    """
+
+    model_name: str
+    dimension: int
+
+
 class UploadResponse(BaseModel):
     """Response body for `POST /api/v1/products/upload`.
 
     No database row exists yet (Phase 2B processes but does not persist —
-    see `backend/README.md`). `product_id`, `checksum_sha256`, and
-    `processed_image` all come from `app.models.product.Product`, the
-    internal domain object `ProductService` builds; `product` reflects
-    the *normalized* fields (trimmed, cased, sluggified, price-rounded),
-    not the raw submitted values, since that's what was actually
-    processed and would (in a later phase) be persisted.
+    see `backend/README.md`). `product_id`, `checksum_sha256`,
+    `processed_image`, and `embedding` all come from
+    `app.models.product.Product`, the internal domain object
+    `ProductService` builds; `product` reflects the *normalized* fields
+    (trimmed, cased, sluggified, price-rounded), not the raw submitted
+    values, since that's what was actually processed and would (in a
+    later phase) be persisted.
     """
 
     product_id: UUID
@@ -86,6 +103,7 @@ class UploadResponse(BaseModel):
     image: ProductImage
     checksum_sha256: str
     processed_image: ProcessedImageInfo
+    embedding: EmbeddingInfo
 
 
 class ProductResponse(BaseModel):

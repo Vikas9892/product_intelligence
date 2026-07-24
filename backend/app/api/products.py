@@ -3,12 +3,14 @@
 `POST /products/upload` (mounted under `settings.application.api_prefix`
 by `app/application.py`, so `/api/v1/products/upload`) accepts product
 metadata plus a single image file as `multipart/form-data`, and runs it
-through the full Phase 2A + 2B + 3 pipeline:
+through the full Phase 2A + 2B + 3 + 4 pipeline:
 
     UploadService.save_upload      -> validate + store the file (Phase 2A)
     ProductService.process_upload  -> checksum, image processing
                                        (Phase 3, via ImageProcessingService),
-                                       normalize, validate, generate ID (2B)
+                                       embedding generation (Phase 4, via
+                                       CLIPEmbeddingService), normalize,
+                                       validate, generate ID (2B)
 
 Unlike `app/api/health.py`'s system routes (deliberately unversioned),
 this is a real, versioned business endpoint, so it belongs under the
@@ -41,7 +43,7 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from app.core.logging import get_logger
 from app.dependencies.product import get_product_service
 from app.dependencies.upload import get_upload_service
-from app.schemas.product import ProcessedImageInfo, ProductCreate, UploadResponse
+from app.schemas.product import EmbeddingInfo, ProcessedImageInfo, ProductCreate, UploadResponse
 from app.services.product_service import ProductService
 from app.services.upload_service import UploadService
 
@@ -106,5 +108,9 @@ async def upload_product(
             height=product.image_metadata.height,
             format=product.image_metadata.format,
             color_mode=product.image_metadata.color_mode,
+        ),
+        embedding=EmbeddingInfo(
+            model_name=product.embedding.model_name,
+            dimension=product.embedding.embedding_dimension,
         ),
     )

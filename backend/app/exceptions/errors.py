@@ -72,3 +72,16 @@ class FileTooLargeException(AppException):
     status_code = 413
     code = "file_too_large"
     message = "The uploaded file exceeds the maximum allowed size."
+
+
+class ChecksumException(AppException):
+    """A stored file's checksum could not be computed.
+
+    An infrastructure failure (the file vanished or became unreadable
+    between being stored and being hashed), not a client input problem —
+    hence a 500, unlike the 4xx upload-validation exceptions above.
+    """
+
+    status_code = 500
+    code = "checksum_error"
+    message = "Failed to compute the file's checksum."

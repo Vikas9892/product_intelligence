@@ -124,7 +124,7 @@ of relying on someone remembering to run `black` before committing.
 | `app/schemas/health.py` | Response models for the three endpoints above: `HealthResponse`, `ReadinessResponse` (with a `checks: dict[str, bool]` shape ready for real dependency checks later), `VersionResponse`. |
 | `app/schemas/errors.py` | `ErrorResponse`/`ErrorDetail` (Milestone 6): the single `{"success": false, "error": {"code", "message", "details"}}` shape every error response uses. |
 | `app/exceptions/base.py` | `AppException` (Milestone 6): the base class every domain exception subclasses. Carries a `status_code` (transport), a stable `code` (API contract), and a human `message` — see the Milestone 6 section for why those are kept separate instead of just using `HTTPException`. |
-| `app/exceptions/errors.py` | Concrete, domain-agnostic exceptions: `ValidationException` (422), `ResourceNotFoundException` (404), `ConflictException` (409), and (Phase 2A) `UnsupportedMediaTypeException` (415) and `FileTooLargeException` (413) for upload validation. |
+| `app/exceptions/errors.py` | Concrete, domain-agnostic exceptions: `ValidationException` (422), `ResourceNotFoundException` (404), `ConflictException` (409), (Phase 2A) `UnsupportedMediaTypeException` (415) and `FileTooLargeException` (413) for upload validation, and (Phase 2B) `ChecksumException` (500) for a checksum that couldn't be computed. |
 | `app/exceptions/handlers.py` | `register_exception_handlers(app)`: registers one handler each for `AppException`, `RequestValidationError`, `StarletteHTTPException`, and `Exception` (the catch-all for real bugs), so every error path returns the same JSON envelope. |
 | `app/middleware/request_id.py` | `RequestIDMiddleware` (Milestone 7): reuses an inbound `X-Request-ID` header or generates a UUID4, stores it on `request.state.request_id`, echoes it back as a response header. |
 | `app/middleware/timing.py` | `TimingMiddleware`: measures handling duration with `time.perf_counter`, stores it on `request.state.duration_ms`, echoes it as `X-Response-Time-Ms`. |
@@ -132,6 +132,7 @@ of relying on someone remembering to run `black` before committing.
 | `app/middleware/security_headers.py` | `SecurityHeadersMiddleware`: stamps a baseline set of OWASP-recommended security response headers (`X-Content-Type-Options`, `X-Frame-Options`, etc.) via `setdefault`, so a route that already set one of these wins. |
 | `app/schemas/product.py` | Phase 2A schemas: `ProductCreate` (name/description/category/price, bound from individual `Form(...)` fields), `ProductImage` (metadata about one stored file), `UploadResponse` (the upload endpoint's actual response), and `ProductResponse` — reserved ahead of need for once a database exists, the same way Phase 1's `AIModelSettings` was reserved. |
 | `app/services/upload_service.py` | Phase 2A: `UploadService` — validates an uploaded file's filename/extension, declared MIME type, and size (streaming to disk in bounded chunks, never buffering more than one chunk past the limit), and stores accepted files under a generated (never client-supplied) filename. All limits default to `settings.storage.*`/`constants.SUPPORTED_IMAGE_MIME_TYPES` but are constructor-overridable for tests. |
+| `app/services/checksum_service.py` | Phase 2B: `ChecksumService.compute_sha256(path)` — streams an already-stored file from disk in 1 MiB chunks and returns its SHA-256 hex digest. Standalone (operates on any file path, not coupled to the upload stream) so later phases (duplicate detection, caching, integrity checks) reuse it instead of reimplementing hashing. Raises `ChecksumException` if the file can't be read. |
 | `app/dependencies/upload.py` | `get_upload_service()`: a cached-singleton dependency provider for `UploadService`, mirroring `app.core.config.get_settings`'s pattern — Phase 2A's first real use of the `app/dependencies/` package reserved since Milestone 1. |
 | `app/api/products.py` | `POST /products/upload` (mounted under `/api/v1` — a real, versioned business endpoint, unlike `health.py`'s system routes). Accepts product metadata as individual `Form(...)` fields plus a `File()` upload, delegates validation/storage entirely to `UploadService`, returns an `UploadResponse`. See the Phase 2A section below for why the fields are individual `Form(...)` params rather than a single `Annotated[ProductCreate, Form()]`. |
 | `tests/__init__.py`, `tests/core/__init__.py`, `tests/api/__init__.py`, `tests/middleware/__init__.py`, `tests/exceptions/__init__.py`, `tests/schemas/__init__.py`, `tests/services/__init__.py`, `tests/dependencies/__init__.py` | Makes each test directory a package so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
@@ -154,6 +155,7 @@ of relying on someone remembering to run `black` before committing.
 | `tests/schemas/test_product.py` | Field validation (empty name, negative price, numeric-string coercion), a `ProductImage`/`UploadResponse` round-trip through `model_dump`/`model_validate`, and a sanity construction of the reserved `ProductResponse`. |
 | `tests/services/test_upload_service.py` | Unit tests for `UploadService` against a fake `UploadFile` and a `tmp_path` upload directory: successful storage (content matches, filename is generated, extension preserved/lowercased), every validation rejection (missing filename, disallowed extension/MIME type, oversized file), and that a rejected/oversized upload leaves no partial file behind. |
 | `tests/dependencies/test_upload.py` | Confirms `get_upload_service()` returns a cached singleton and that `cache_clear()` forces a fresh instance — the same contract `tests/core/test_config.py` verifies for `get_settings()`. |
+| `tests/services/test_checksum_service.py` | Confirms the digest matches `hashlib.sha256` directly for both a small file and one spanning multiple 1 MiB chunk reads, that identical content hashes identically and different content differs, and that a missing file raises `ChecksumException`. |
 | `tests/api/test_products.py` | Integration tests against the *real* `create_app()` app, with `get_upload_service` overridden (`app.dependency_overrides`) to redirect storage to `tmp_path`: a successful upload's response shape and on-disk file content, every validation failure's status code and error envelope (missing name, disallowed extension/MIME type, negative price), and the oversized-file 413 case. |
 | `scripts/.gitkeep`, `docs/.gitkeep` | Empty-directory placeholders — git does not track empty directories, so these keep the scaffold intact until real content lands. |
 
@@ -758,6 +760,35 @@ request bodies, and FastAPI only raises a runtime error demanding it the
 moment a route actually declares a form/file parameter — it's an optional
 dependency of FastAPI itself, not bundled by default, so any endpoint
 that accepts uploads needs it added explicitly (`uv add python-multipart`).
+
+## Phase 2B — Product Processing & Metadata Normalization design decisions
+
+*(This section grows milestone by milestone as Phase 2B lands — currently
+covers the Checksum Service milestone.)*
+
+**Why does `ChecksumService` re-read the file from disk instead of
+computing the checksum inline while `UploadService` streams it to disk in
+the first place?** This is a deliberate tradeoff, not an oversight. Hashing
+inline (updating a running SHA-256 as each chunk is written) would save a
+second read, but it would couple Phase 2A's `UploadService` — already
+built, tested, and documented — to a Phase 2B concern, and it would make
+`ChecksumService` a thin appendage of the upload stream rather than a
+genuinely standalone utility. Keeping it standalone means it can hash
+*any* file already on disk (useful later for verifying a file's integrity
+without re-uploading it, not just newly-uploaded ones), matching how the
+deliverable frames it — reused later for "duplicate detection, caching,
+integrity verification," all operations on already-stored files. The cost
+is a second read of the file; given this project's small default upload
+size cap, that's negligible next to the architectural clarity.
+
+**Why does `ChecksumService.compute_sha256` raise `ChecksumException`
+instead of letting the underlying `OSError` propagate?** An `OSError` here
+means something went wrong with the *server's* filesystem (the file
+vanished, permissions changed) between being stored and being hashed —
+not a client input problem. Wrapping it in a typed `AppException` gives
+it a 500 status, a stable `code` ("checksum_error"), and a message that
+doesn't leak a raw filesystem path/errno straight to an API response,
+the same reasoning `UploadService`'s existing exceptions already follow.
 
 ## Setup instructions
 

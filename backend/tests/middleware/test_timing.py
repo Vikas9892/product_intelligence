@@ -35,7 +35,11 @@ class TestTimingMiddleware:
             response = client.get("/slow")
 
         duration_ms = float(response.headers[RESPONSE_TIME_HEADER])
-        assert duration_ms >= _SIMULATED_HANDLER_DELAY_SECONDS * 1000
+        # A 5% tolerance absorbs OS timer-resolution jitter (observed on
+        # Windows under heavy system load) around asyncio.sleep's minimum
+        # guaranteed delay, without weakening what this test actually
+        # proves: the measurement tracks real handler time, not just ~0.
+        assert duration_ms >= _SIMULATED_HANDLER_DELAY_SECONDS * 1000 * 0.95
 
     def test_duration_is_available_on_request_state_inside_the_handler(self) -> None:
         # The header is only set *after* call_next returns, so the handler

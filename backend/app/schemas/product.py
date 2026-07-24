@@ -22,11 +22,14 @@ from pydantic import BaseModel, Field
 class ProductCreate(BaseModel):
     """Product metadata submitted alongside an image upload.
 
-    Bound as multipart form fields (`Annotated[ProductCreate, Form()]`) by
-    `POST /api/v1/products/upload`, not parsed from a JSON body — a file
-    upload and JSON can't share one request body, so the request is
-    entirely `multipart/form-data` and this model's fields arrive as form
-    fields alongside the file part.
+    Constructed by `app/api/products.py` from individual `Form(...)`
+    parameters (not bound directly via `Annotated[ProductCreate, Form()]`
+    — see that module's docstring for why combining a Form-model
+    parameter with a `File()` upload doesn't spread fields the way it
+    does in isolation), and again by `ProductService` to hold the
+    normalized field values. Not parsed from a JSON body — a file upload
+    and JSON can't share one request body, so the request is entirely
+    `multipart/form-data`.
     """
 
     name: str = Field(min_length=1, max_length=200, description="Product name.")

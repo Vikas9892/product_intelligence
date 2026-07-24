@@ -1030,8 +1030,22 @@ its own Python interpreters, so a system Python is not required).
 ```bash
 cd backend
 uv sync              # creates .venv, installs runtime + dev dependencies from uv.lock
-uv run pre-commit install --config ../.pre-commit-config.yaml
+cd ..
+uv run --project backend pre-commit install
 ```
+
+`pre-commit install` deliberately runs from the **repo root**, not
+`backend/` — git hooks always execute with their working directory at the
+repo root (regardless of where `git commit` is run from inside the repo),
+and `.pre-commit-config.yaml` lives there too, so this is the one command
+in this whole file that should *not* be run from inside `backend/`.
+`--project backend` still points it at backend's venv (where the
+`pre-commit` package is actually installed) without changing the working
+directory. An earlier version of this instruction (`cd backend && ...
+--config ../.pre-commit-config.yaml`) baked a relative path into the
+installed git hook that pointed *above* the repo at actual hook-execution
+time — silently broken since Milestone 1. See the Makefile's `install`
+target for the same fix, with the reasoning duplicated as a comment there.
 
 Or from the repo root via the Makefile: `make install`.
 

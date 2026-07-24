@@ -75,6 +75,11 @@ PROCESSED_IMAGE_EXTENSION = ".jpg"
 DEFAULT_MAX_IMAGE_DIMENSION_PX = 8000
 DEFAULT_PROCESSED_IMAGE_SIZE_PX = 1024
 
+# --- Image embeddings (Phase 4) ---
+# openai/clip-vit-base-patch32's projection dimension is 512 — a
+# well-known, moderately-sized CLIP checkpoint appropriate as a default.
+DEFAULT_CLIP_MODEL_NAME = "openai/clip-vit-base-patch32"
+
 # --- Pagination ---
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100

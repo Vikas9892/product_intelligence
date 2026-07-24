@@ -61,16 +61,30 @@ class DatabaseSettings(BaseModel):
 
 
 class AIModelSettings(BaseModel):
-    """External AI provider configuration.
+    """AI provider and model configuration.
 
-    No AI calls are made yet (that starts in later phases) — this just
-    reserves the shape so `.env` doesn't need to change when they arrive.
+    `openai_api_key`/`embedding_model`/`llm_model` reserve the shape for a
+    later, OpenAI-based *text* embedding/LLM phase — no calls to them are
+    made yet. `clip_model_name`/`embedding_device`/`embedding_batch_size`
+    are Phase 4's actual, in-use *image* embedding configuration; kept as
+    distinctly-named fields rather than reusing `embedding_model`, since
+    a CLIP checkpoint name and an OpenAI text-embedding model name are
+    unrelated settings that happen to share the word "embedding".
     """
 
     openai_api_key: SecretStr | None = None
     embedding_model: str = "text-embedding-3-small"
     llm_model: str = "gpt-4o-mini"
     request_timeout_seconds: float = Field(default=30.0, gt=0)
+
+    #: Hugging Face Hub model id for the CLIP vision encoder.
+    clip_model_name: str = constants.DEFAULT_CLIP_MODEL_NAME
+    #: "auto" (use CUDA if available, else CPU), or an explicit torch
+    #: device string ("cpu", "cuda", "cuda:0", ...).
+    embedding_device: str = "auto"
+    #: How many images `CLIPEmbeddingService.generate_embeddings` sends
+    #: through the model in a single forward pass.
+    embedding_batch_size: int = Field(default=8, gt=0)
 
 
 class StorageSettings(BaseModel):

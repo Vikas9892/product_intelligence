@@ -115,3 +115,18 @@ class ImageTooLargeException(AppException):
     status_code = 413
     code = "image_too_large"
     message = "The image's dimensions exceed the maximum allowed size."
+
+
+class EmbeddingGenerationException(AppException):
+    """An embedding could not be generated for an already-processed image.
+
+    An infrastructure failure (the processed file vanished, the model
+    failed to load, inference raised) rather than a client input
+    problem — by the time this runs, `ImageProcessingService` has already
+    confirmed the file is a valid, standardized image. Hence a 500, the
+    same reasoning as `ChecksumException`.
+    """
+
+    status_code = 500
+    code = "embedding_generation_error"
+    message = "Failed to generate an embedding for the processed image."

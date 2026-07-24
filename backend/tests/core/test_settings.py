@@ -5,7 +5,13 @@ from pydantic import ValidationError
 
 from app.core import paths
 from app.core.constants import Environment, LogLevel
-from app.core.settings import ApplicationSettings, SecuritySettings, Settings, StorageSettings
+from app.core.settings import (
+    AIModelSettings,
+    ApplicationSettings,
+    SecuritySettings,
+    Settings,
+    StorageSettings,
+)
 
 
 class TestApplicationSettings:
@@ -39,6 +45,19 @@ class TestStorageSettings:
     def test_rejects_a_non_positive_processed_image_size(self) -> None:
         with pytest.raises(ValidationError):
             StorageSettings(processed_image_size_px=0)
+
+
+class TestAIModelSettings:
+    def test_defaults(self) -> None:
+        settings = AIModelSettings()
+
+        assert settings.clip_model_name == "openai/clip-vit-base-patch32"
+        assert settings.embedding_device == "auto"
+        assert settings.embedding_batch_size == 8
+
+    def test_rejects_a_non_positive_batch_size(self) -> None:
+        with pytest.raises(ValidationError):
+            AIModelSettings(embedding_batch_size=0)
 
 
 class TestSecuritySettings:

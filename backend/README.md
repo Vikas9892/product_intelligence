@@ -48,7 +48,11 @@ backend/
 │   │   ├── logging.py        # Logs request start/completion (uses the ID + duration above)
 │   │   └── security_headers.py # Stamps baseline security response headers
 │   ├── services/          # Business logic, orchestration between repositories/external calls
-│   │   └── upload_service.py # Phase 2A: validates + durably stores uploaded product images
+│   │   ├── upload_service.py # Phase 2A: stores uploaded product images (validation now delegated)
+│   │   └── checksum_service.py # Phase 2B: SHA-256 of an already-stored file
+│   ├── validators/         # Reusable, pure validation functions — no I/O, no service state
+│   │   ├── file_validator.py # Filename/extension + declared MIME type checks
+│   │   └── product_validator.py # Post-normalization product-field invariant checks
 │   ├── repositories/      # Data access layer (DB, vector store, cache) behind an interface
 │   ├── models/             # ORM / persistence models
 │   ├── schemas/            # Pydantic request/response schemas (API contracts)
@@ -132,12 +136,14 @@ of relying on someone remembering to run `black` before committing.
 | `app/middleware/logging.py` | `RequestLoggingMiddleware`: logs one line when a request starts, one when it finishes — both tagged with the request ID, the completion line also with status code and duration. |
 | `app/middleware/security_headers.py` | `SecurityHeadersMiddleware`: stamps a baseline set of OWASP-recommended security response headers (`X-Content-Type-Options`, `X-Frame-Options`, etc.) via `setdefault`, so a route that already set one of these wins. |
 | `app/schemas/product.py` | Phase 2A schemas: `ProductCreate` (name/description/category/price, bound from individual `Form(...)` fields), `ProductImage` (metadata about one stored file), `UploadResponse` (the upload endpoint's actual response), and `ProductResponse` — reserved ahead of need for once a database exists, the same way Phase 1's `AIModelSettings` was reserved. |
-| `app/services/upload_service.py` | Phase 2A: `UploadService` — validates an uploaded file's filename/extension, declared MIME type, and size (streaming to disk in bounded chunks, never buffering more than one chunk past the limit), and stores accepted files under a generated (never client-supplied) filename. All limits default to `settings.storage.*`/`constants.SUPPORTED_IMAGE_MIME_TYPES` but are constructor-overridable for tests. |
+| `app/services/upload_service.py` | Phase 2A: `UploadService` — stores an accepted file under a generated (never client-supplied) filename, streaming it to disk in bounded chunks while enforcing the size limit as it goes (never buffering more than one chunk past the limit). Filename/extension and MIME type validation were extracted to `app/validators/file_validator.py` in Phase 2B — this service now calls into it rather than deciding validation rules itself. All limits default to `settings.storage.*`/`constants.SUPPORTED_IMAGE_MIME_TYPES` but are constructor-overridable for tests. |
+| `app/validators/file_validator.py` | Phase 2B: `validate_filename_and_extension`, `validate_mime_type` — pure functions (no I/O, no service state) extracted out of `UploadService` so validation rules are reusable independent of *how* a file gets stored. Size validation deliberately stays in `UploadService` — it's an inherently streaming, as-you-go check, not a pure function over an already-known value. |
+| `app/validators/product_validator.py` | Phase 2B: `validate_normalized_name`, `validate_price` — re-check domain invariants *after* normalization that `ProductCreate`'s schema-level validation can't express (e.g. a name that's all whitespace passes `min_length=1` before trimming but is invalid after) or that should hold regardless of which caller builds a `Product`, not just the HTTP route. |
 | `app/services/checksum_service.py` | Phase 2B: `ChecksumService.compute_sha256(path)` — streams an already-stored file from disk in 1 MiB chunks and returns its SHA-256 hex digest. Standalone (operates on any file path, not coupled to the upload stream) so later phases (duplicate detection, caching, integrity checks) reuse it instead of reimplementing hashing. Raises `ChecksumException` if the file can't be read. |
 | `app/utils/metadata.py` | Phase 2B: `FileMetadata` (transport-agnostic file metadata: filename, extension, MIME type, size, SHA-256 checksum, upload timestamp) and `parse_file_metadata(image, checksum_sha256=...)`, the adapter from Phase 2A's `ProductImage` + a computed checksum into this internal object. |
 | `app/dependencies/upload.py` | `get_upload_service()`: a cached-singleton dependency provider for `UploadService`, mirroring `app.core.config.get_settings`'s pattern — Phase 2A's first real use of the `app/dependencies/` package reserved since Milestone 1. |
 | `app/api/products.py` | `POST /products/upload` (mounted under `/api/v1` — a real, versioned business endpoint, unlike `health.py`'s system routes). Accepts product metadata as individual `Form(...)` fields plus a `File()` upload, delegates validation/storage entirely to `UploadService`, returns an `UploadResponse`. See the Phase 2A section below for why the fields are individual `Form(...)` params rather than a single `Annotated[ProductCreate, Form()]`. |
-| `tests/__init__.py`, `tests/core/__init__.py`, `tests/api/__init__.py`, `tests/middleware/__init__.py`, `tests/exceptions/__init__.py`, `tests/schemas/__init__.py`, `tests/services/__init__.py`, `tests/dependencies/__init__.py`, `tests/utils/__init__.py` | Makes each test directory a package so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
+| `tests/__init__.py`, `tests/core/__init__.py`, `tests/api/__init__.py`, `tests/middleware/__init__.py`, `tests/exceptions/__init__.py`, `tests/schemas/__init__.py`, `tests/services/__init__.py`, `tests/dependencies/__init__.py`, `tests/utils/__init__.py`, `tests/validators/__init__.py` | Makes each test directory a package so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
 | `tests/conftest.py` | Shared fixtures (Milestone 8): `app` (a fresh `create_app()` instance per test) and `client` (a `TestClient` bound to it, entered as a context manager so the lifespan actually runs). Only fixtures genuinely needed by multiple modules live here. |
 | `tests/test_environment.py` | A single sanity test (Python version check) proving the pytest + coverage pipeline actually runs. |
 | `tests/core/test_paths.py` | Verifies path relationships (`UPLOAD_DIR` under `STORAGE_DIR`, etc.) and that `ensure_runtime_directories()` creates the right directories, using `monkeypatch` + `tmp_path` so it never touches the real filesystem. |
@@ -159,6 +165,8 @@ of relying on someone remembering to run `black` before committing.
 | `tests/dependencies/test_upload.py` | Confirms `get_upload_service()` returns a cached singleton and that `cache_clear()` forces a fresh instance — the same contract `tests/core/test_config.py` verifies for `get_settings()`. |
 | `tests/services/test_checksum_service.py` | Confirms the digest matches `hashlib.sha256` directly for both a small file and one spanning multiple 1 MiB chunk reads, that identical content hashes identically and different content differs, and that a missing file raises `ChecksumException`. |
 | `tests/utils/test_metadata.py` | Confirms `FileMetadata` rejects a malformed/uppercase checksum, and that `parse_file_metadata` correctly lowercases the derived extension while carrying every other `ProductImage` field through unchanged. |
+| `tests/validators/test_file_validator.py` | Direct unit tests for both functions: allowed/disallowed extensions and MIME types, extension lowercasing, missing/empty filename, a filename with no extension at all, and a missing MIME type. |
+| `tests/validators/test_product_validator.py` | Confirms `validate_normalized_name` rejects only a blank string, and `validate_price` accepts `None`/zero/positive values but rejects negative ones. |
 | `tests/api/test_products.py` | Integration tests against the *real* `create_app()` app, with `get_upload_service` overridden (`app.dependency_overrides`) to redirect storage to `tmp_path`: a successful upload's response shape and on-disk file content, every validation failure's status code and error envelope (missing name, disallowed extension/MIME type, negative price), and the oversized-file 413 case. |
 | `scripts/.gitkeep`, `docs/.gitkeep` | Empty-directory placeholders — git does not track empty directories, so these keep the scaffold intact until real content lands. |
 
@@ -767,7 +775,7 @@ that accepts uploads needs it added explicitly (`uv add python-multipart`).
 ## Phase 2B — Product Processing & Metadata Normalization design decisions
 
 *(This section grows milestone by milestone as Phase 2B lands — currently
-covers the Checksum Service and File Metadata milestones.)*
+covers the Checksum Service, File Metadata, and Validators milestones.)*
 
 **Why does `ChecksumService` re-read the file from disk instead of
 computing the checksum inline while `UploadService` streams it to disk in
@@ -820,6 +828,49 @@ facing schemas). Composing the two in `ProductService` (next milestone)
 keeps each piece independently testable: `parse_file_metadata`'s tests
 never need a real file on disk, and `ChecksumService`'s tests never need
 a `ProductImage`.
+
+**Why extract `file_validator.py` out of `UploadService` now, instead of
+leaving the validation logic where Phase 2A put it?** Phase 2B introduces
+a second reason to want these same rules: `ProductService`'s pipeline
+needs to validate *normalized* product fields too, and putting all
+validation logic in dedicated `app/validators/` modules — rather than
+scattered across whichever service happens to need it first — means both
+`UploadService` and `ProductService` (and any future caller) share one
+place that decides what's acceptable, instead of validation rules being
+an accidental side effect of `UploadService`'s specific implementation.
+This is also a concrete instance of a general principle worth stating
+plainly: **don't put validation inside services.** A service's job is to
+*orchestrate* (validate, then act); the validation rules themselves are a
+separate, independently testable concern.
+
+**Why is file *size* validation deliberately NOT moved into
+`file_validator.py`?** Extension and MIME type validation are pure
+functions over an already-known value (you have the filename/content-type
+string before you check it). Size validation is fundamentally different:
+the file's total size isn't known until it's been completely read, and
+`UploadService` deliberately checks the running total *during* the
+streaming read (aborting and deleting the partial file the moment the
+limit is exceeded) rather than reading everything first and checking
+after — see Phase 2A's rationale. Forcing that into a "pure validator
+function" shape would mean either buffering the whole file first
+(defeating the point) or leaking streaming/disk-I/O concerns into what's
+supposed to be a dependency-free validator module. It stays exactly where
+it naturally belongs: interleaved with the write loop in `UploadService`.
+
+**Why does `product_validator.py` re-check things `ProductCreate`'s
+pydantic `Field()` constraints already seem to cover (e.g. price
+non-negativity)?** Two independent reasons converge on the same
+validator: (1) a name of `"   "` (whitespace) satisfies
+`Field(min_length=1)` — the *raw* string has length 3 — but is invalid
+once normalized to `""`, a case schema validation structurally cannot
+catch because normalization hasn't happened yet at that point. (2)
+`Product` (the domain model, next milestone) shouldn't have to trust that
+every possible caller already ran it through `ProductCreate` and FastAPI's
+validation — a defense-in-depth domain layer validates its own
+invariants at the point a domain object is actually built, not just at
+the HTTP boundary. Price's non-negativity check is cheap insurance for
+(2) even though today's only caller already satisfies it via (1)'s
+sibling mechanism.
 
 ## Setup instructions
 

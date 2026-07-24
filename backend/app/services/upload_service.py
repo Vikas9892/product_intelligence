@@ -1,11 +1,14 @@
 """Upload service: validates and durably stores uploaded product image files.
 
-The single place that decides whether an uploaded file is acceptable
-(filename/extension, declared MIME type, size) and where an accepted file
-actually lands on disk. Kept separate from `app/api/products.py` so the
-route stays a thin HTTP adapter — parse the request, call the service,
-shape the response — while this validation/storage logic stays unit
-testable without spinning up the ASGI app.
+The single place that decides *where* an accepted file lands on disk and
+enforces the size limit while streaming it there. Filename/extension and
+MIME type validation live in `app.validators.file_validator` (not inline
+here — see that module's docstring for why); this service calls into it
+rather than deciding validation rules itself. Kept separate from
+`app/api/products.py` so the route stays a thin HTTP adapter — parse the
+request, call the service, shape the response — while this
+validation/storage logic stays unit testable without spinning up the
+ASGI app.
 """
 
 import uuid
@@ -18,12 +21,9 @@ from starlette.concurrency import run_in_threadpool
 from app.core import constants
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.exceptions.errors import (
-    FileTooLargeException,
-    UnsupportedMediaTypeException,
-    ValidationException,
-)
+from app.exceptions.errors import FileTooLargeException
 from app.schemas.product import ProductImage
+from app.validators.file_validator import validate_filename_and_extension, validate_mime_type
 
 logger = get_logger(__name__)
 
@@ -85,8 +85,12 @@ class UploadService:
         type), or `FileTooLargeException` (exceeds the configured limit).
         Returns metadata describing where the accepted file was stored.
         """
-        filename, extension = self._validate_filename_and_extension(file.filename)
-        content_type = self._validate_mime_type(file.content_type)
+        filename, extension = validate_filename_and_extension(
+            file.filename, allowed_extensions=self._allowed_extensions
+        )
+        content_type = validate_mime_type(
+            file.content_type, allowed_mime_types=self._allowed_mime_types
+        )
 
         stored_filename = f"{uuid.uuid4().hex}{extension}"
         destination = self._upload_dir / stored_filename
@@ -107,31 +111,6 @@ class UploadService:
             size_bytes=size_bytes,
             uploaded_at=datetime.now(UTC),
         )
-
-    def _validate_filename_and_extension(self, filename: str | None) -> tuple[str, str]:
-        if not filename:
-            raise ValidationException("Uploaded file is missing a filename.")
-
-        extension = Path(filename).suffix.lower()
-        if extension not in self._allowed_extensions:
-            raise UnsupportedMediaTypeException(
-                f"Unsupported file extension '{extension or '(none)'}'. "
-                f"Allowed extensions: {', '.join(self._allowed_extensions)}."
-            )
-        return filename, extension
-
-    def _validate_mime_type(self, content_type: str | None) -> str:
-        # Declared type from the multipart part's Content-Type header —
-        # client-controlled, a first line of defense rather than an
-        # authoritative check. Verifying the file's *actual* bytes match
-        # (e.g. via Pillow) belongs to a later image-processing phase, not
-        # upload validation.
-        if content_type is None or content_type not in self._allowed_mime_types:
-            raise UnsupportedMediaTypeException(
-                f"Unsupported content type '{content_type}'. "
-                f"Allowed types: {', '.join(sorted(self._allowed_mime_types))}."
-            )
-        return content_type
 
     async def _stream_to_disk(self, file: UploadFile, destination: Path) -> int:
         """Read `file` in bounded chunks, enforcing the size limit as it goes.

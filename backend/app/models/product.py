@@ -24,6 +24,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from app.models.image_metadata import ImageMetadata
 from app.utils.metadata import FileMetadata
 
 
@@ -44,3 +45,6 @@ class Product(BaseModel):
     category: str | None
     price: float | None
     file_metadata: FileMetadata
+    #: Populated by `ImageProcessingService` (Phase 3) — always present,
+    #: since every upload is processed before a `Product` is built.
+    image_metadata: ImageMetadata

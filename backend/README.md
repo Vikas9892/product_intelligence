@@ -5,16 +5,20 @@ FastAPI backend service. This document covers all of **Phase 1**
 factory, health endpoints, global exception handling, middleware, and
 testing/CI — see the per-milestone sections below), **Phase 2A (Product
 Upload Pipeline)**: the first real business endpoint, accepting a product
-image plus metadata, validating it, and storing it; and **Phase 2B
-(Product Processing & Metadata Normalization)**: turning that stored
-upload into a checksummed, normalized, identified internal `Product`
-domain object.
-No database persistence, image processing, embeddings, or AI/search
-functionality exist yet — that is intentional. See
+image plus metadata, validating it, and storing it; **Phase 2B (Product
+Processing & Metadata Normalization)**: turning that stored upload into a
+checksummed, normalized, identified internal `Product` domain object; and
+**Phase 3 (Image Processing Pipeline)**: standardizing the uploaded image
+itself — orientation, color mode, size — into the consistent format
+AI models expect, before that `Product` is finalized.
+No database persistence, embeddings, or AI/search functionality exist
+yet — that is intentional. See
 [Why no code yet?](#why-no-code-yet), the
 [Phase 2A section](#phase-2a--product-upload-pipeline-design-decisions),
+the
+[Phase 2B section](#phase-2b--product-processing--metadata-normalization-design-decisions),
 and the
-[Phase 2B section](#phase-2b--product-processing--metadata-normalization-design-decisions)
+[Phase 3 section](#phase-3--image-processing-pipeline-design-decisions)
 below.
 
 ## Project overview
@@ -55,13 +59,16 @@ backend/
 │   ├── services/          # Business logic, orchestration between repositories/external calls
 │   │   ├── upload_service.py # Phase 2A: stores uploaded product images (validation now delegated)
 │   │   ├── checksum_service.py # Phase 2B: SHA-256 of an already-stored file
-│   │   └── product_service.py # Phase 2B: orchestrates metadata/checksum/normalization/ID -> Product
+│   │   ├── product_service.py # Phase 2B: orchestrates checksum/image-processing/normalization/ID -> Product
+│   │   └── image_processing_service.py # Phase 3: validate -> orient -> RGB -> resize -> save -> ImageMetadata
 │   ├── validators/         # Reusable, pure validation functions — no I/O, no service state
 │   │   ├── file_validator.py # Filename/extension + declared MIME type checks
-│   │   └── product_validator.py # Post-normalization product-field invariant checks
+│   │   ├── product_validator.py # Post-normalization product-field invariant checks
+│   │   └── image_validator.py # Phase 3: genuine-image / corruption / format / dimension checks
 │   ├── repositories/      # Data access layer (DB, vector store, cache) behind an interface
 │   ├── models/             # Internal domain models — ORM-backed once persistence exists
-│   │   └── product.py       # `Product` — internal domain model, distinct from the API schemas — Phase 2B
+│   │   ├── product.py       # `Product` — internal domain model, distinct from the API schemas — Phase 2B
+│   │   └── image_metadata.py # `ImageMetadata` — internal, includes real filesystem paths — Phase 3
 │   ├── schemas/            # Pydantic request/response schemas (API contracts)
 │   │   ├── health.py        # Response models for /health, /ready, /version
 │   │   ├── errors.py        # The `{"success", "error": {...}}` envelope every error returns
@@ -69,9 +76,10 @@ backend/
 │   ├── workers/            # Background jobs / async task consumers
 │   ├── dependencies/       # FastAPI dependency-injection providers
 │   │   ├── upload.py        # `get_upload_service()` — Phase 2A's first real dependency provider
-│   │   └── product.py       # `get_product_service()` — Phase 2B
+│   │   └── product.py       # `get_product_service()` — Phase 2B (composes ImageProcessingService too)
 │   └── utils/              # Small stateless helpers shared across layers
-│       └── metadata.py      # FileMetadata + parse_file_metadata() — Phase 2B "Parse Metadata" stage
+│       ├── metadata.py      # FileMetadata + parse_file_metadata() — Phase 2B "Parse Metadata" stage
+│       └── image.py         # Phase 3: apply_orientation, normalize_color_mode, resize, filename helper
 ├── tests/                  # pytest test suite, mirrors the app/ package layout
 ├── scripts/              # One-off / maintenance scripts (not part of the importable app)
 ├── docs/                 # Design notes, ADRs, phase write-ups
@@ -125,9 +133,9 @@ of relying on someone remembering to run `black` before committing.
 | `.env.example` | Documents every variable the settings schema (`app/core/settings.py`) accepts, grouped and commented; copy to `.env` locally (`.env` is gitignored — see [Milestone 2](#milestone-2--configuration-design-decisions)). |
 | `README.md` | This file. |
 | `app/__init__.py` and one `__init__.py` per subpackage | Makes each directory an importable Python package and enables absolute imports like `from app.core import ...`. Deliberately empty. |
-| `app/core/constants.py` | Fixed values the *code* decides, not per-deployment config: `Environment`/`LogLevel` enums, the `/api/v1` prefix, the obviously-fake default secret key, supported image extensions, pagination limits. |
-| `app/core/paths.py` | The one place that knows where the backend root actually is (`Path(__file__).resolve().parents[2]`) and derives `storage/`, `storage/uploads/`, and `logs/` from it. Exposes `ensure_runtime_directories()` to create them — not called on import, so importing config stays side-effect-free and tests stay hermetic. |
-| `app/core/settings.py` | The configuration *schema*: six `BaseModel` groups (`ApplicationSettings`, `DatabaseSettings`, `AIModelSettings`, `StorageSettings`, `SecuritySettings`, `LoggingSettings`) composed into one `Settings(BaseSettings)` root, with field-level and cross-field validation. No side effects — every class is directly constructible in a unit test. |
+| `app/core/constants.py` | Fixed values the *code* decides, not per-deployment config: `Environment`/`LogLevel` enums, the `/api/v1` prefix, the obviously-fake default secret key, supported image extensions/MIME types, pagination limits, and (Phase 3) `SUPPORTED_IMAGE_PIL_FORMATS`, the standardized `PROCESSED_IMAGE_FORMAT`/`_EXTENSION`, and the default dimension limits. |
+| `app/core/paths.py` | The one place that knows where the backend root actually is (`Path(__file__).resolve().parents[2]`) and derives `storage/`, `storage/uploads/`, `storage/processed/` (Phase 3), and `logs/` from it. Exposes `ensure_runtime_directories()` to create them — not called on import, so importing config stays side-effect-free and tests stay hermetic. |
+| `app/core/settings.py` | The configuration *schema*: six `BaseModel` groups (`ApplicationSettings`, `DatabaseSettings`, `AIModelSettings`, `StorageSettings`, `SecuritySettings`, `LoggingSettings`) composed into one `Settings(BaseSettings)` root, with field-level and cross-field validation. `StorageSettings` gained three Phase 3 fields: `processed_dir`, `max_image_dimension_px` (safety ceiling), `processed_image_size_px` (resize target). No side effects — every class is directly constructible in a unit test. |
 | `app/core/config.py` | The composition root: caches one `Settings()` instance via `@lru_cache` and exposes it as both `get_settings()` (for later FastAPI `Depends()` use) and the module-level `settings` singleton every other module should import. |
 | `app/core/logging.py` | Configures the stdlib root logger (level from `settings.logging.level`, one console handler, a `timestamp \| level \| logger name \| message` formatter) and exposes `get_logger(name)` so any module gets a working, consistently formatted logger with zero setup. |
 | `app/lifespan.py` | `lifespan(app)`: an `@asynccontextmanager` passed to `FastAPI(lifespan=...)`. Before `yield` (startup) it logs that the app is starting and calls `paths.ensure_runtime_directories()`; after `yield` (shutdown) it logs that the app is stopping. No database/AI connections yet — reserved for later milestones. |
@@ -137,30 +145,34 @@ of relying on someone remembering to run `black` before committing.
 | `app/schemas/health.py` | Response models for the three endpoints above: `HealthResponse`, `ReadinessResponse` (with a `checks: dict[str, bool]` shape ready for real dependency checks later), `VersionResponse`. |
 | `app/schemas/errors.py` | `ErrorResponse`/`ErrorDetail` (Milestone 6): the single `{"success": false, "error": {"code", "message", "details"}}` shape every error response uses. |
 | `app/exceptions/base.py` | `AppException` (Milestone 6): the base class every domain exception subclasses. Carries a `status_code` (transport), a stable `code` (API contract), and a human `message` — see the Milestone 6 section for why those are kept separate instead of just using `HTTPException`. |
-| `app/exceptions/errors.py` | Concrete, domain-agnostic exceptions: `ValidationException` (422), `ResourceNotFoundException` (404), `ConflictException` (409), (Phase 2A) `UnsupportedMediaTypeException` (415) and `FileTooLargeException` (413) for upload validation, and (Phase 2B) `ChecksumException` (500) for a checksum that couldn't be computed. |
+| `app/exceptions/errors.py` | Concrete, domain-agnostic exceptions: `ValidationException` (422), `ResourceNotFoundException` (404), `ConflictException` (409), (Phase 2A) `UnsupportedMediaTypeException` (415) and `FileTooLargeException` (413) for upload validation, (Phase 2B) `ChecksumException` (500) for a checksum that couldn't be computed, and (Phase 3) `InvalidImageException` (422, corrupted/undecodable image data) and `ImageTooLargeException` (413, pixel dimensions rather than byte size). |
 | `app/exceptions/handlers.py` | `register_exception_handlers(app)`: registers one handler each for `AppException`, `RequestValidationError`, `StarletteHTTPException`, and `Exception` (the catch-all for real bugs), so every error path returns the same JSON envelope. |
 | `app/middleware/request_id.py` | `RequestIDMiddleware` (Milestone 7): reuses an inbound `X-Request-ID` header or generates a UUID4, stores it on `request.state.request_id`, echoes it back as a response header. |
 | `app/middleware/timing.py` | `TimingMiddleware`: measures handling duration with `time.perf_counter`, stores it on `request.state.duration_ms`, echoes it as `X-Response-Time-Ms`. |
 | `app/middleware/logging.py` | `RequestLoggingMiddleware`: logs one line when a request starts, one when it finishes — both tagged with the request ID, the completion line also with status code and duration. |
 | `app/middleware/security_headers.py` | `SecurityHeadersMiddleware`: stamps a baseline set of OWASP-recommended security response headers (`X-Content-Type-Options`, `X-Frame-Options`, etc.) via `setdefault`, so a route that already set one of these wins. |
-| `app/schemas/product.py` | Phase 2A schemas: `ProductCreate` (name/description/category/price, bound from individual `Form(...)` fields), `ProductImage` (metadata about one stored file), `UploadResponse` (the upload endpoint's actual response — extended in Phase 2B with `product_id` and `checksum_sha256`, both sourced from `Product`), and `ProductResponse` — reserved ahead of need for once a database exists, the same way Phase 1's `AIModelSettings` was reserved. |
-| `app/models/product.py` | Phase 2B: `Product` — the internal domain model `ProductService` builds, deliberately separate from the `app/schemas/product.py` API contracts (see that phase's design decisions below for why). Holds normalized fields, the generated `id`, and a `FileMetadata`; never returned directly by a route. |
+| `app/schemas/product.py` | Phase 2A schemas: `ProductCreate` (name/description/category/price, bound from individual `Form(...)` fields), `ProductImage` (metadata about one stored file), `UploadResponse` (the upload endpoint's actual response — extended in Phase 2B with `product_id`/`checksum_sha256`, and in Phase 3 with `processed_image`), `ProcessedImageInfo` (Phase 3: the API-safe width/height/format/color_mode view, deliberately excluding real filesystem paths), and `ProductResponse` — reserved ahead of need for once a database exists, the same way Phase 1's `AIModelSettings` was reserved. |
+| `app/models/product.py` | Phase 2B: `Product` — the internal domain model `ProductService` builds, deliberately separate from the `app/schemas/product.py` API contracts (see that phase's design decisions below for why). Holds normalized fields, the generated `id`, a `FileMetadata`, and (Phase 3) an `ImageMetadata`; never returned directly by a route. |
+| `app/models/image_metadata.py` | Phase 3: `ImageMetadata` — internal, transport-agnostic description of a processed image: width, height, format, color mode, and the real `original_path`/`processed_path` filesystem paths. Built exclusively by `ImageProcessingService`; its paths are exactly why this stays a separate internal model from any API schema. |
 | `app/services/upload_service.py` | Phase 2A: `UploadService` — stores an accepted file under a generated (never client-supplied) filename, streaming it to disk in bounded chunks while enforcing the size limit as it goes (never buffering more than one chunk past the limit). Filename/extension and MIME type validation were extracted to `app/validators/file_validator.py` in Phase 2B — this service now calls into it rather than deciding validation rules itself. All limits default to `settings.storage.*`/`constants.SUPPORTED_IMAGE_MIME_TYPES` but are constructor-overridable for tests. |
 | `app/validators/file_validator.py` | Phase 2B: `validate_filename_and_extension`, `validate_mime_type` — pure functions (no I/O, no service state) extracted out of `UploadService` so validation rules are reusable independent of *how* a file gets stored. Size validation deliberately stays in `UploadService` — it's an inherently streaming, as-you-go check, not a pure function over an already-known value. |
+| `app/validators/image_validator.py` | Phase 3: `ImageValidator` — verifies a stored file is a genuine, undamaged image (Pillow's `verify()` then a fresh reopen + full decode, per Pillow's own recommended pattern), rejects formats outside `constants.SUPPORTED_IMAGE_PIL_FORMATS`, and enforces `settings.storage.max_image_dimension_px`. Checks the *actually decoded* format, not the file extension or declared MIME type. |
 | `app/validators/product_validator.py` | Phase 2B: `validate_normalized_name`, `validate_price` — re-check domain invariants *after* normalization that `ProductCreate`'s schema-level validation can't express (e.g. a name that's all whitespace passes `min_length=1` before trimming but is invalid after) or that should hold regardless of which caller builds a `Product`, not just the HTTP route. |
 | `app/services/checksum_service.py` | Phase 2B: `ChecksumService.compute_sha256(path)` — streams an already-stored file from disk in 1 MiB chunks and returns its SHA-256 hex digest. Standalone (operates on any file path, not coupled to the upload stream) so later phases (duplicate detection, caching, integrity checks) reuse it instead of reimplementing hashing. Raises `ChecksumException` if the file can't be read. |
 | `app/utils/metadata.py` | Phase 2B: `FileMetadata` (transport-agnostic file metadata: filename, extension, MIME type, size, SHA-256 checksum, upload timestamp) and `parse_file_metadata(image, checksum_sha256=...)`, the adapter from Phase 2A's `ProductImage` + a computed checksum into this internal object. |
-| `app/services/product_service.py` | Phase 2B: `ProductService.process_upload(product, image)` — the orchestrator. Locates the stored file and computes its checksum, parses `FileMetadata`, normalizes `name`/`description`/`category`/`price` (the module-level `_normalize_*` functions), re-validates the normalized result, generates a UUID4, and builds a `Product`. Logs each pipeline stage (never file contents). |
+| `app/utils/image.py` | Phase 3: pure Pillow transformation functions with no file I/O — `apply_orientation` (bakes in the EXIF rotation, via `ImageOps.exif_transpose`), `normalize_color_mode` (flattens any transparency onto white, then converts to RGB), `resize_preserving_aspect_ratio` (downscale-only, never upscales), `generate_processed_filename`. Each is directly unit-testable against an in-memory `PIL.Image`, no disk or service needed. |
+| `app/services/image_processing_service.py` | Phase 3: `ImageProcessingService.process_image(original_path, stored_filename)` — validates via `ImageValidator`, then applies orientation, normalizes color mode, resizes, and saves a standardized JPEG copy under `settings.storage.processed_dir`, returning `ImageMetadata`. All Pillow calls run in a thread pool (blocking I/O), the same pattern `UploadService`/`ChecksumService` already use. |
+| `app/services/product_service.py` | Phase 2B (extended in Phase 3): `ProductService.process_upload(product, image)` — the orchestrator. Locates the stored file, computes its checksum, standardizes the image (`ImageProcessingService`, Phase 3), parses `FileMetadata`, normalizes `name`/`description`/`category`/`price` (the module-level `_normalize_*` functions), re-validates the normalized result, generates a UUID4, and builds a `Product`. Logs each pipeline stage (never file contents). |
 | `app/dependencies/upload.py` | `get_upload_service()`: a cached-singleton dependency provider for `UploadService`, mirroring `app.core.config.get_settings`'s pattern — Phase 2A's first real use of the `app/dependencies/` package reserved since Milestone 1. |
-| `app/dependencies/product.py` | `get_product_service()`: the same cached-singleton pattern for `ProductService`. `ChecksumService` gets no provider of its own — it's composed internally by `ProductService`, not depended on directly by any route. |
-| `app/api/products.py` | `POST /products/upload` (mounted under `/api/v1` — a real, versioned business endpoint, unlike `health.py`'s system routes). Accepts product metadata as individual `Form(...)` fields plus a `File()` upload; calls `UploadService.save_upload` (Phase 2A) then `ProductService.process_upload` (Phase 2B) in sequence, and maps the resulting `Product` onto `UploadResponse`. See the Phase 2A section for why the fields are individual `Form(...)` params rather than a single `Annotated[ProductCreate, Form()]`. |
+| `app/dependencies/product.py` | `get_product_service()`: the same cached-singleton pattern for `ProductService`. Neither `ChecksumService` nor (Phase 3) `ImageProcessingService` gets a provider of its own — both are composed internally by `ProductService`, not depended on directly by any route. |
+| `app/api/products.py` | `POST /products/upload` (mounted under `/api/v1` — a real, versioned business endpoint, unlike `health.py`'s system routes). Accepts product metadata as individual `Form(...)` fields plus a `File()` upload; calls `UploadService.save_upload` (Phase 2A) then `ProductService.process_upload` (Phase 2B, now including Phase 3's image processing) in sequence, and maps the resulting `Product` (including its `image_metadata`) onto `UploadResponse`. See the Phase 2A section for why the fields are individual `Form(...)` params rather than a single `Annotated[ProductCreate, Form()]`. |
 | `tests/__init__.py`, `tests/core/__init__.py`, `tests/api/__init__.py`, `tests/middleware/__init__.py`, `tests/exceptions/__init__.py`, `tests/schemas/__init__.py`, `tests/services/__init__.py`, `tests/dependencies/__init__.py`, `tests/utils/__init__.py`, `tests/validators/__init__.py`, `tests/models/__init__.py` | Makes each test directory a package so pytest resolves absolute imports the same way the app does; `tests/` mirrors `app/`'s layout. |
-| `tests/services/test_product_service.py` | Direct unit tests for every `_normalize_*` function (trimming, case, category slugification and separator-collapsing, price rounding), plus `process_upload` end-to-end against `tmp_path`: a full success case (checksum matches `hashlib.sha256` on the real stored content, fields normalized correctly, a fresh UUID4 per call), the whitespace-only-name and negative-price defensive-validation paths (the latter via `ProductCreate.model_construct` to simulate a caller that bypassed schema validation), and a missing stored file raising `ChecksumException`. |
+| `tests/services/test_product_service.py` | Direct unit tests for every `_normalize_*` function (trimming, case, category slugification and separator-collapsing, price rounding), plus `process_upload` end-to-end against `tmp_path` with a real Pillow-generated image: a full success case (checksum matches `hashlib.sha256` on the real stored content, fields normalized correctly, `image_metadata` populated, a fresh UUID4 per call), the whitespace-only-name and negative-price defensive-validation paths (the latter via `ProductCreate.model_construct` to simulate a caller that bypassed schema validation), a missing stored file raising `ChecksumException`, and a corrupt stored file raising `InvalidImageException`. |
 | `tests/dependencies/test_product.py` | Confirms `get_product_service()` returns a cached singleton and that `cache_clear()` forces a fresh instance — the same contract as `tests/dependencies/test_upload.py`. |
 | `tests/conftest.py` | Shared fixtures (Milestone 8): `app` (a fresh `create_app()` instance per test) and `client` (a `TestClient` bound to it, entered as a context manager so the lifespan actually runs). Only fixtures genuinely needed by multiple modules live here. |
 | `tests/test_environment.py` | A single sanity test (Python version check) proving the pytest + coverage pipeline actually runs. |
-| `tests/core/test_paths.py` | Verifies path relationships (`UPLOAD_DIR` under `STORAGE_DIR`, etc.) and that `ensure_runtime_directories()` creates the right directories, using `monkeypatch` + `tmp_path` so it never touches the real filesystem. |
-| `tests/core/test_settings.py` | Covers defaults, field validation (port range, minimum secret-key length, `SecretStr` not leaking into `repr()`), env-var overrides via nested `__` delimiters, every production-safety rule in `Settings._validate_production_safety` (including the Milestone 7 `trusted_hosts` rule), and the new `cors_allowed_origins`/`trusted_hosts` defaults. |
+| `tests/core/test_paths.py` | Verifies path relationships (`UPLOAD_DIR`/`PROCESSED_DIR` under `STORAGE_DIR`, etc.) and that `ensure_runtime_directories()` creates the right directories (including Phase 3's `PROCESSED_DIR`), using `monkeypatch` + `tmp_path` so it never touches the real filesystem. |
+| `tests/core/test_settings.py` | Covers defaults, field validation (port range, minimum secret-key length, `SecretStr` not leaking into `repr()`), env-var overrides via nested `__` delimiters, every production-safety rule in `Settings._validate_production_safety` (including the Milestone 7 `trusted_hosts` rule), the `cors_allowed_origins`/`trusted_hosts` defaults, and (Phase 3) `StorageSettings`' defaults and its two positive-only dimension fields. |
 | `tests/core/test_config.py` | Confirms `get_settings()` returns the same cached object across calls, that `cache_clear()` forces a fresh one, and that the module-level `settings` singleton is a real `Settings` instance. |
 | `tests/core/test_logging.py` | Covers level resolution (explicit override vs. `settings.logging.level`), the idempotent/`force` handler-installation behavior, the console formatter's exact output, and an end-to-end check that `get_logger(...).info(...)` really reaches stdout formatted correctly. An autouse fixture snapshots/restores the real root logger around every test so nothing here leaks into other tests. |
 | `tests/test_lifespan.py` | Enters/exits `lifespan(app)` as an async context manager directly (no HTTP server needed) and asserts, via `caplog`, that the startup message logs before `yield` and the shutdown message logs after; asserts `paths.ensure_runtime_directories` is called exactly once on startup via `monkeypatch`. |
@@ -173,15 +185,19 @@ of relying on someone remembering to run `black` before committing.
 | `tests/middleware/test_security_headers.py` | Asserts the full baseline header set is present, and that `setdefault` means a header the route already set (e.g. a custom `X-Frame-Options`) is not overwritten. |
 | `tests/exceptions/test_base.py`, `test_errors.py` | Unit tests for `AppException` and its concrete subclasses' defaults/overrides — no HTTP involved. |
 | `tests/exceptions/test_handlers.py` | Integration tests: a throwaway FastAPI app with `register_exception_handlers` applied and routes that deliberately raise each error type, asserting the exact JSON envelope for domain exceptions, `RequestValidationError`, plain `HTTPException`, and unhandled exceptions (and that the latter never leaks the real exception message). |
-| `tests/schemas/test_product.py` | Field validation (empty name, negative price, numeric-string coercion), a `ProductImage`/`UploadResponse` round-trip through `model_dump`/`model_validate`, and a sanity construction of the reserved `ProductResponse`. |
+| `tests/schemas/test_product.py` | Field validation (empty name, negative price, numeric-string coercion), a `ProcessedImageInfo` construction check, a `ProductImage`/`UploadResponse` (now including `processed_image`) round-trip through `model_dump`/`model_validate`, and a sanity construction of the reserved `ProductResponse`. |
 | `tests/services/test_upload_service.py` | Unit tests for `UploadService` against a fake `UploadFile` and a `tmp_path` upload directory: successful storage (content matches, filename is generated, extension preserved/lowercased), every validation rejection (missing filename, disallowed extension/MIME type, oversized file), and that a rejected/oversized upload leaves no partial file behind. |
 | `tests/dependencies/test_upload.py` | Confirms `get_upload_service()` returns a cached singleton and that `cache_clear()` forces a fresh instance — the same contract `tests/core/test_config.py` verifies for `get_settings()`. |
 | `tests/services/test_checksum_service.py` | Confirms the digest matches `hashlib.sha256` directly for both a small file and one spanning multiple 1 MiB chunk reads, that identical content hashes identically and different content differs, and that a missing file raises `ChecksumException`. |
 | `tests/utils/test_metadata.py` | Confirms `FileMetadata` rejects a malformed/uppercase checksum, and that `parse_file_metadata` correctly lowercases the derived extension while carrying every other `ProductImage` field through unchanged. |
+| `tests/utils/test_image.py` | Unit tests against in-memory Pillow images, no disk: `apply_orientation` (EXIF orientation 6 swaps dimensions; no-tag/normal-orientation images pass through unchanged), `normalize_color_mode` (RGB is a no-op by object identity; RGBA transparency flattens to white while opaque RGBA color is preserved; grayscale/palette convert to RGB), `resize_preserving_aspect_ratio` (downscales correctly, is a no-op at/under the limit, never produces a zero-sized result for a 1×1 image), and `generate_processed_filename`'s extension standardization. |
 | `tests/validators/test_file_validator.py` | Direct unit tests for both functions: allowed/disallowed extensions and MIME types, extension lowercasing, missing/empty filename, a filename with no extension at all, and a missing MIME type. |
 | `tests/validators/test_product_validator.py` | Confirms `validate_normalized_name` rejects only a blank string, and `validate_price` accepts `None`/zero/positive values but rejects negative ones. |
-| `tests/models/test_product.py` | Confirms `Product` constructs with all fields, accepts `None` for every optional field, and round-trips through `model_dump`/`model_validate`. |
-| `tests/api/test_products.py` | Integration tests against the *real* `create_app()` app, with both `get_upload_service` and `get_product_service` overridden (`app.dependency_overrides`) to redirect storage to the same `tmp_path`: a successful upload's normalized response fields, a valid `product_id`/`checksum_sha256` (verified against `hashlib.sha256` on the actual submitted bytes), on-disk file content, every validation failure's status code and error envelope (missing name, whitespace-only name reaching `ProductService`, disallowed extension/MIME type, negative price), and the oversized-file 413 case. |
+| `tests/validators/test_image_validator.py` | Against real files on disk: accepts valid JPEG/PNG/WEBP/1×1 images; rejects a non-image file, a severely truncated JPEG (fails `verify()`), and a JPEG truncated at 90% of its bytes (passes `verify()` but fails the full decode — exercises that failure path specifically); rejects a format outside the allowed set even with a *misleading extension* (a BMP saved as `photo.jpg`, proving this checks real decoded content); and rejects/accepts images at, above, and below a configurable dimension limit. |
+| `tests/models/test_product.py` | Confirms `Product` constructs with all fields (including Phase 3's `image_metadata`), accepts `None` for every optional field, and round-trips through `model_dump`/`model_validate`. |
+| `tests/models/test_image_metadata.py` | Confirms `ImageMetadata` constructs with all fields, rejects non-positive width/height, and round-trips through `model_dump`/`model_validate`. |
+| `tests/services/test_image_processing_service.py` | Against real files on disk: a full success case (correct `ImageMetadata`, a genuinely reopenable output JPEG), RGBA PNG → RGB JPEG conversion, resizing an oversized image while preserving aspect ratio, leaving a small image at its original size, processing a 1×1 image without error, applying EXIF orientation before saving (dimensions swap correctly), creating the processed directory if missing, and propagating each of `ImageValidator`'s three exception types (plus confirming no processed file is written when validation fails). |
+| `tests/api/test_products.py` | Integration tests against the *real* `create_app()` app, with both `get_upload_service` and `get_product_service` (now composing an `ImageProcessingService`) overridden (`app.dependency_overrides`) to redirect storage to the same `tmp_path`. Every uploaded file is a real Pillow-generated JPEG. Covers: a successful upload's normalized response fields and `processed_image` dimensions/format, a valid `product_id`/`checksum_sha256` (verified against `hashlib.sha256` on the actual submitted bytes), on-disk file content, every validation failure's status code and error envelope (missing name, whitespace-only name reaching `ProductService`, disallowed extension/MIME type, negative price, a non-image file with an allowed extension — Phase 3's `invalid_image`), and the oversized-file 413 case. |
 | `scripts/.gitkeep`, `docs/.gitkeep` | Empty-directory placeholders — git does not track empty directories, so these keep the scaffold intact until real content lands. |
 
 ## Milestone 2 — configuration design decisions
@@ -1022,6 +1038,176 @@ means the route function itself is a readable, linear description of the
 whole pipeline, and each service can be tested (and reasoned about)
 without needing the other to exist.
 
+## Phase 3 — Image Processing Pipeline design decisions
+
+This is where AI-facing work begins: standardizing an uploaded image into
+the consistent format models like CLIP/DINOv2 expect, before any
+embedding/model-calling phase exists. Six pieces landed, in dependency
+order (not quite the milestone numbering the phase spec listed, since
+that numbering wasn't a buildable order — utilities and the domain model
+are dependencies of the validator/service that use them, so they're built
+first; see the "How this was created" commands below for the exact
+correspondence): image utilities, the `ImageMetadata` domain model,
+`ImageValidator`, `ImageProcessingService`, and finally wiring it all into
+`ProductService`/the router/response schema.
+
+**Why is `ImageValidator` a class (with configurable limits) while
+`file_validator.py` is plain functions?** `ImageValidator` needs to hold
+configuration (`max_dimension_px`, `allowed_formats`) across its two
+internal steps (`_verify_integrity`, `_decode`) the same way
+`UploadService`/`ProductService` hold theirs — a class with an `__init__`
+is the natural shape for "a validator with configurable limits called
+more than once," the same reasoning that already makes those two
+services classes rather than free functions. `file_validator.py`'s two
+functions take their limits as explicit parameters instead because they
+have no state to hold between calls and nothing else to configure.
+
+**Why the two-pass `verify()` then reopen-and-`load()` pattern, instead of
+just calling `.load()` once?** This is Pillow's own documented pattern for
+a reason: `Image.verify()` is a cheap structural check (headers/file
+structure, no full pixel decode) that catches obviously malformed files
+fast, but Pillow's own docs say the `Image` object is unusable for
+anything else afterward — hence reopening fresh. Relying on `verify()`
+alone isn't enough, though: it can pass on a file whose *pixel data* is
+truncated (see `tests/validators/test_image_validator.py`'s "scan data"
+test, which found the exact byte-truncation percentage where this
+actually happens) — only a full `.load()` catches that. Using only
+`.load()` and skipping `.verify()` would work for correctness, but
+`verify()`-then-`load()` is what Pillow recommends and it costs nothing
+extra to keep it, so both checks stay.
+
+**Why catch `Exception` broadly in `ImageValidator` instead of specific
+Pillow exception types?** Pillow raises different exception types across
+its per-format plugins and failure modes — plain `OSError`,
+`SyntaxError`, its own `UnidentifiedImageError`, and others — for "this
+isn't decodable." Enumerating all of them (and keeping the list current
+as Pillow evolves) would be a maintenance burden for no benefit: every
+one of them means the same thing to a caller ("not a valid image"),
+converted uniformly to `InvalidImageException`.
+
+**Why does `InvalidImageException` (422) exist separately from
+`UnsupportedMediaTypeException` (415), when Phase 2A already established
+415 for "the payload is the wrong kind of thing"?** They're different
+failures at different points in the pipeline. `UnsupportedMediaTypeException`
+already covers "the file's *extension/declared type* isn't accepted"
+(Phase 2A, `file_validator`) and now also "it decoded fine, but to a
+format outside the allowed set" (Phase 3, e.g. a real BMP). Neither of
+those describes "the bytes claim to be an image and even have an allowed
+extension, but Pillow can't make sense of them at all" — corruption,
+truncation, or a non-image file with a misleading name. That's a
+different failure mode (the *content* is broken, not merely the wrong
+*kind*), so it gets its own type and its own 422. This is exactly the
+`InvalidImageException` the Phase 2B section predicted might be needed
+"once something actually raises it" — deliberately not added back then
+because nothing did yet.
+
+**Why is `ImageTooLargeException` (413) distinct from Phase 2A's
+`FileTooLargeException` (413), given they share a status code?** They
+measure two independent things a client could abuse independently: byte
+size on disk (`FileTooLargeException`, enforced while streaming to disk)
+versus decoded pixel dimensions (`ImageTooLargeException`, enforced by
+`ImageValidator` after a full decode). A small, heavily-compressed file
+can still decode into an enormous pixel grid — a classic
+"decompression bomb" — so passing the byte-size check proves nothing
+about the dimension check, and vice versa. Sharing a status code is fine
+(clients that care about the distinction branch on `code`, not status);
+what matters is that each has its own independent, correctly-scoped
+enforcement point.
+
+**Why does every processed image get re-encoded to JPEG, even a PNG or
+WEBP input?** Standardizing the *output* format (not just color mode)
+removes an entire axis of variation every downstream consumer would
+otherwise have to handle: no alpha channel to worry about (already
+resolved during color-mode normalization), one decoder to support, one
+set of assumptions about compression artifacts. A later phase generating
+embeddings only ever has to open one format, regardless of what a client
+originally uploaded.
+
+**Why does `resize_preserving_aspect_ratio` only ever downscale, never
+upscale?** Upscaling a smaller image fabricates detail that was never
+actually captured — it would make a low-resolution photo *look* like it
+has more information than it does, which is actively misleading input to
+a downstream embedding model rather than neutral. A smaller image is left
+exactly as it is; only images exceeding the target size are resized down.
+
+**Why does `normalize_color_mode` flatten transparency onto a *white*
+background specifically, not black or some other color?** There's no
+universally "correct" answer — a transparent pixel has no defined color,
+full stop — but white is the least visually surprising default for
+product photography specifically (the overwhelmingly common real-world
+use case here): product photos are conventionally shot against white or
+neutral backgrounds already, so compositing transparency onto white tends
+to blend in rather than introduce a jarring border artifact the way black
+often would against a light-colored product.
+
+**Why does `apply_orientation` strip the EXIF orientation tag rather than
+just rotating the pixels and leaving the tag in place?** `ImageOps.exif_transpose`
+does this automatically as part of applying the rotation — and it must:
+if the tag were left at (say) `6` after the pixels were already rotated
+to account for it, any *other* tool that reads EXIF (a browser, another
+image library, a later phase's own re-processing) would rotate an
+already-correctly-oriented image a second time. Baking the rotation into
+the pixels and clearing the tag is what makes "orientation" a property of
+the pixel data going forward, not metadata a future reader has to
+remember to check.
+
+**Why does `ImageProcessingService` run every Pillow call inside
+`run_in_threadpool`, the same as `UploadService`/`ChecksumService`?**
+Pillow's I/O and decode/encode operations are synchronous and CPU/disk-
+bound — calling them directly inside an `async def` would block the
+single event loop for the duration of every image operation, stalling
+every other concurrent request the server is handling. This is the same
+reasoning Phase 2A/2B already established for file I/O; Phase 3 just
+applies it to Pillow specifically.
+
+**Why does `ProductService` compose `ImageProcessingService` internally
+(the same way it already composes `ChecksumService`) instead of the
+router calling `UploadService` → `ChecksumService` → `ImageProcessingService`
+→ `ProductService` as four separate steps, matching the phase's own
+pipeline diagram literally?** "Keep routers thin" is stated as a hard
+requirement in both this phase and Phase 2B's — exploding the router into
+four sequential service calls would violate that, and would also break
+the precedent Phase 2B already set (checksum computation lives inside
+`ProductService`, not the router). Read as a *logical* data-flow diagram
+(what depends on what, in what order) rather than a literal call
+sequence the router must perform, the diagram is fully satisfied: the
+router still calls exactly two things (`UploadService.save_upload`, then
+`ProductService.process_upload`), and internally `ProductService` runs
+checksum → image processing → metadata → normalize → validate → build, in
+that order — "the image is processed before metadata is finalized" holds
+exactly as stated.
+
+**Why does `ProcessedImageInfo` (the API-facing schema) expose only
+width/height/format/color_mode, and not `ImageMetadata`'s
+`original_path`/`processed_path`?** Those are real server filesystem
+paths — the same reasoning that already keeps `ProductImage` (Phase 2A)
+down to a generated `stored_filename` rather than a path. Leaking a
+server's directory structure into an API response is an unforced
+information disclosure with no benefit to a legitimate client.
+
+**Why does `UploadResponse.processed_image` sit as a new top-level field
+rather than nested inside `image` (`ProductImage`)?** Same reasoning
+Phase 2B already used for `checksum_sha256`: `ProductImage` is Phase 2A's
+contract for "what `UploadService` knows the instant a file is saved" —
+before any Phase 3 processing has even started. Extending it with fields
+a *later*, different service populates would blur what `ProductImage`
+actually represents and create a window where an `image` object exists
+with those fields meaningless/unset.
+
+**Why doesn't this phase add HEIC support, despite the phase's own
+motivation section naming it as a real-world format phones commonly
+produce?** HEIC isn't decodable by Pillow out of the box — it requires an
+additional third-party plugin dependency (e.g. `pillow-heif`), which
+isn't among this phase's listed deliverables. Mentioning HEIC as
+*motivation* for why normalization matters in general doesn't imply every
+mentioned format must be supported; the explicitly listed supported
+formats (JPEG/PNG/WEBP, unchanged from Phase 2A) are what's actually
+implemented. A HEIC upload today is correctly rejected as an unsupported
+extension at the existing `file_validator` stage — adding real HEIC
+support later is a small, isolated addition (one new allowed extension/
+MIME type/PIL format, plus the new dependency) whenever it's actually
+needed.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -1438,4 +1624,64 @@ cd ..
 uv run --project backend pre-commit run --all-files -c .pre-commit-config.yaml
 git add -A
 git commit -m "feat: wire ProductService into the upload endpoint (Phase 2B milestone 6/6)"
+```
+
+**Phase 3 (Image Processing Pipeline)** added, from the repo root — six
+steps in dependency order (not the phase spec's own milestone numbering,
+which wasn't a buildable sequence — the validator/service that use the
+utilities and domain model need those to exist first):
+
+```bash
+cd backend
+uv add pillow
+cd ..
+
+# Step 1 — constants/settings/paths
+#   app/core/constants.py — added SUPPORTED_IMAGE_PIL_FORMATS,
+#   PROCESSED_IMAGE_FORMAT/_EXTENSION, dimension defaults
+#   app/core/paths.py — added PROCESSED_DIR, updated ensure_runtime_directories
+#   app/core/settings.py — StorageSettings gained processed_dir,
+#   max_image_dimension_px, processed_image_size_px
+#   app/exceptions/errors.py — added InvalidImageException, ImageTooLargeException
+#   backend/.env.example — documented the three new STORAGE__ variables
+
+# Step 2 — image utilities
+#   app/utils/image.py — hand-written
+#   tests/utils/test_image.py — hand-written
+
+# Step 3 — ImageMetadata domain model
+#   app/models/image_metadata.py — hand-written
+mkdir -p backend/tests/models  # (already existed from Phase 2B)
+#   tests/models/test_image_metadata.py — hand-written
+
+# Step 4 — ImageValidator
+#   app/validators/image_validator.py — hand-written
+#   tests/validators/test_image_validator.py — hand-written
+
+# Step 5 — ImageProcessingService
+#   app/services/image_processing_service.py — hand-written
+#   tests/services/test_image_processing_service.py — hand-written
+
+# Step 6 — integration
+#   app/models/product.py — Product gained image_metadata: ImageMetadata
+#   app/services/product_service.py — composes ImageProcessingService,
+#   calls it between checksum and metadata parsing
+#   app/schemas/product.py — added ProcessedImageInfo, UploadResponse
+#   gained processed_image
+#   app/api/products.py — maps Product.image_metadata onto the response
+#   tests/models/test_product.py, tests/services/test_product_service.py,
+#   tests/schemas/test_product.py, tests/api/test_products.py — updated
+#   for the new required field / real-image test fixtures
+
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+uv run uvicorn app.main:app --reload   # manual smoke test: resize, EXIF
+                                        # rotation, RGBA->RGB, corruption
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "feat: add image processing pipeline (Phase 3)"
 ```

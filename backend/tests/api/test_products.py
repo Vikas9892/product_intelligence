@@ -1,12 +1,18 @@
 """Integration tests for `POST /api/v1/products/upload`.
 
 Builds the *real* `create_app()` application (not a throwaway app) but
-overrides both the `get_upload_service` and `get_product_service`
-dependencies (`app.dependency_overrides[...] = ...`) to redirect storage
-to the same `tmp_path` — this is exactly the seam `app/dependencies/`
-exists for (see that package's module docstrings), and means these tests
-exercise the real router, real middleware, and real global exception
-handlers without ever writing into the real `backend/storage/` directory.
+overrides the `get_upload_service` and `get_product_service` dependencies
+(`app.dependency_overrides[...] = ...`) to redirect storage to the same
+`tmp_path` — this is exactly the seam `app/dependencies/` exists for (see
+that package's module docstrings), and means these tests exercise the
+real router, real middleware, and real global exception handlers without
+ever writing into the real `backend/storage/` directory.
+
+Every uploaded file here is a real, Pillow-generated JPEG
+(`_valid_jpeg_bytes`) — since Phase 3, the pipeline actually decodes and
+validates image content, so placeholder byte strings like
+`b"fake-image-bytes"` (used before Phase 3) no longer make it past
+`ImageProcessingService`.
 """
 
 import hashlib
@@ -18,20 +24,33 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from app.application import create_app
 from app.core.config import settings
 from app.dependencies.product import get_product_service
 from app.dependencies.upload import get_upload_service
+from app.services.image_processing_service import ImageProcessingService
 from app.services.product_service import ProductService
 from app.services.upload_service import UploadService
 
 _UPLOAD_URL = f"{settings.application.api_prefix}/products/upload"
 
 
+def _valid_jpeg_bytes(
+    *, size: tuple[int, int] = (20, 20), color: tuple[int, int, int] = (255, 0, 0)
+) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", size, color).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
 def _override_services(app: FastAPI, upload_dir: Path) -> None:
     app.dependency_overrides[get_upload_service] = lambda: UploadService(upload_dir=upload_dir)
-    app.dependency_overrides[get_product_service] = lambda: ProductService(upload_dir=upload_dir)
+    app.dependency_overrides[get_product_service] = lambda: ProductService(
+        upload_dir=upload_dir,
+        image_processing_service=ImageProcessingService(processed_dir=upload_dir / "processed"),
+    )
 
 
 @pytest.fixture
@@ -47,9 +66,15 @@ def _image_file(
     *,
     filename: str = "photo.jpg",
     content_type: str = "image/jpeg",
-    content: bytes = b"fake-image-bytes",
+    content: bytes | None = None,
 ) -> dict[str, tuple[str, io.BytesIO, str]]:
-    return {"file": (filename, io.BytesIO(content), content_type)}
+    return {
+        "file": (
+            filename,
+            io.BytesIO(content if content is not None else _valid_jpeg_bytes()),
+            content_type,
+        )
+    }
 
 
 class TestUploadProductSuccess:
@@ -72,12 +97,11 @@ class TestUploadProductSuccess:
         }
         assert body["image"]["original_filename"] == "photo.jpg"
         assert body["image"]["content_type"] == "image/jpeg"
-        assert body["image"]["size_bytes"] == len(b"fake-image-bytes")
 
     def test_returns_a_valid_product_id_and_checksum(
         self, upload_client: TestClient, tmp_path: Path
     ) -> None:
-        content = b"specific bytes for checksum verification"
+        content = _valid_jpeg_bytes(color=(1, 2, 3))
         response = upload_client.post(
             _UPLOAD_URL,
             data={"name": "Widget"},
@@ -88,19 +112,35 @@ class TestUploadProductSuccess:
         assert uuid.UUID(body["product_id"])  # a real UUID string
         assert body["checksum_sha256"] == hashlib.sha256(content).hexdigest()
 
-    def test_actually_writes_the_file_to_the_overridden_upload_directory(
-        self, upload_client: TestClient, tmp_path: Path
-    ) -> None:
+    def test_returns_processed_image_dimensions_and_format(self, upload_client: TestClient) -> None:
         response = upload_client.post(
             _UPLOAD_URL,
             data={"name": "Widget"},
-            files=_image_file(content=b"specific-test-content"),
+            files=_image_file(content=_valid_jpeg_bytes(size=(30, 15))),
+        )
+
+        body = response.json()
+        assert body["processed_image"] == {
+            "width": 30,
+            "height": 15,
+            "format": "JPEG",
+            "color_mode": "RGB",
+        }
+
+    def test_actually_writes_the_file_to_the_overridden_upload_directory(
+        self, upload_client: TestClient, tmp_path: Path
+    ) -> None:
+        content = _valid_jpeg_bytes(color=(9, 9, 9))
+        response = upload_client.post(
+            _UPLOAD_URL,
+            data={"name": "Widget"},
+            files=_image_file(content=content),
         )
 
         stored_filename = response.json()["image"]["stored_filename"]
         stored_path = tmp_path / stored_filename
 
-        assert stored_path.read_bytes() == b"specific-test-content"
+        assert stored_path.read_bytes() == content
 
     def test_only_a_required_name_is_needed(self, upload_client: TestClient) -> None:
         response = upload_client.post(
@@ -149,7 +189,7 @@ class TestUploadProductValidation:
         response = upload_client.post(
             _UPLOAD_URL,
             data={"name": "Widget"},
-            files=_image_file(filename="document.txt", content_type="text/plain"),
+            files=_image_file(filename="document.txt", content_type="text/plain", content=b"hi"),
         )
 
         assert response.status_code == 415
@@ -177,6 +217,21 @@ class TestUploadProductValidation:
         assert response.status_code == 422
         assert response.json()["error"]["code"] == "validation_error"
 
+    def test_a_non_image_file_with_an_allowed_extension_returns_422(
+        self, upload_client: TestClient
+    ) -> None:
+        # Extension/MIME type both claim "jpg"/"image/jpeg" (passing
+        # UploadService), but the bytes aren't a real image at all —
+        # caught by ImageProcessingService (Phase 3), not UploadService.
+        response = upload_client.post(
+            _UPLOAD_URL,
+            data={"name": "Widget"},
+            files=_image_file(content=b"this is not image data at all"),
+        )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_image"
+
 
 class TestUploadProductSizeLimit:
     def test_oversized_file_returns_413(self, tmp_path: Path) -> None:
@@ -195,4 +250,9 @@ class TestUploadProductSizeLimit:
 
         assert response.status_code == 413
         assert response.json()["error"]["code"] == "file_too_large"
-        assert list(tmp_path.iterdir()) == []
+        # No *file* was written anywhere — FastAPI resolving the
+        # ProductService dependency still eagerly creates the (empty)
+        # processed/ directory even though this request fails before ever
+        # using it, the same way UploadService's upload_dir always exists.
+        written_files = [path for path in tmp_path.rglob("*") if path.is_file()]
+        assert written_files == []

@@ -85,3 +85,33 @@ class ChecksumException(AppException):
     status_code = 500
     code = "checksum_error"
     message = "Failed to compute the file's checksum."
+
+
+class InvalidImageException(AppException):
+    """An uploaded file claims to be an image but is corrupted or undecodable.
+
+    Distinct from `UnsupportedMediaTypeException` (415): the file's
+    extension/declared MIME type were already accepted by
+    `file_validator` — this fires when Pillow can't actually make sense
+    of the bytes (truncated data, a non-image file with a misleading
+    extension, an unrecognized/unsupported decoded format). 422, not 415:
+    the *kind* of upload was acceptable, its *content* wasn't.
+    """
+
+    status_code = 422
+    code = "invalid_image"
+    message = "The uploaded file is not a valid image."
+
+
+class ImageTooLargeException(AppException):
+    """An image's pixel dimensions exceed the configured maximum.
+
+    Distinct from `FileTooLargeException` (byte size on disk): a small,
+    heavily-compressed file can still decode to an enormous pixel grid
+    (a classic decompression-bomb pattern) — this check is against actual
+    decoded width/height, independent of the file's size in bytes.
+    """
+
+    status_code = 413
+    code = "image_too_large"
+    message = "The image's dimensions exceed the maximum allowed size."

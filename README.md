@@ -14,8 +14,8 @@ reviewable milestone rather than a single monolithic drop.
 |------:|-------|
 | 0  | Planning |
 | 1  | Backend skeleton (complete) |
-| **2**  | **Product ingestion — 2A (upload pipeline) + 2B (processing/normalization) complete, this milestone** |
-| 3  | Image processing |
+| 2  | Product ingestion — 2A (upload pipeline) + 2B (processing/normalization) complete |
+| **3**  | **Image processing — complete, this milestone** |
 | 4  | Text embeddings |
 | 5  | Image embeddings |
 | 6  | Vector database |
@@ -56,13 +56,13 @@ make test      # pytest with coverage
 ```
 
 `make run` starts `uvicorn app.main:app --reload`, serving `/health`,
-`/ready`, `/version`, and `POST /api/v1/products/upload` (Phase 2A + 2B).
+`/ready`, `/version`, and `POST /api/v1/products/upload` (now including
+Phase 3's image standardization).
 
 ## Status
 
-Phase 1 (Backend Foundation) is complete, and Phase 2A (Product Upload
-Pipeline) + 2B (Product Processing & Metadata Normalization) have landed
-ahead of the rest of Phase 2 (Product Ingestion):
+Phases 1 and 2 (Backend Foundation, Product Ingestion) are complete, and
+Phase 3 (Image Processing) has now landed too:
 
 - **Milestone 1 — Backend Skeleton**: project structure, dependency
   management (`uv`), linting/formatting/type-checking, testing, and
@@ -108,9 +108,22 @@ ahead of the rest of Phase 2 (Product Ingestion):
   (`app/services/product_service.py`) orchestrating checksum + metadata +
   normalization + validation + UUID4 generation — now wired into the
   upload endpoint. Still no database write.
+- **Phase 3 — Image Processing Pipeline**: the first AI-facing work.
+  `ImageValidator` (`app/validators/image_validator.py`) verifies an
+  upload is a genuine, undamaged, appropriately-sized image (Pillow's
+  `verify()` + a full reopen/decode — never trusting the file extension);
+  `ImageProcessingService` (`app/services/image_processing_service.py`)
+  then applies EXIF orientation, converts to RGB (flattening any
+  transparency onto white), resizes (downscale-only, preserving aspect
+  ratio), and saves a standardized JPEG under a new `storage/processed/`
+  directory, returning an internal `ImageMetadata`
+  (`app/models/image_metadata.py`) — now the middle stage of
+  `ProductService`'s pipeline, between checksum computation and field
+  normalization. Still no database write, no embeddings, no AI model
+  calls.
 
-157 unit/integration tests, 99% coverage on `app/`.
+208 unit/integration tests, 99% coverage on `app/`.
 
-No database persistence, image processing, embeddings, or AI/search code
-exists yet by design — see [`backend/README.md`](backend/README.md) for
-the full rationale and every design decision behind the phases above.
+No database persistence, embeddings, or AI/search code exists yet by
+design — see [`backend/README.md`](backend/README.md) for the full
+rationale and every design decision behind the phases above.

@@ -57,6 +57,24 @@ SUPPORTED_IMAGE_EXTENSIONS: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp")
 SUPPORTED_IMAGE_MIME_TYPES: frozenset[str] = frozenset({"image/jpeg", "image/png", "image/webp"})
 DEFAULT_UPLOAD_MAX_SIZE_MB = 10
 
+# --- Image processing (Phase 3) ---
+# Pillow's own format names (`Image.format` after a successful decode) —
+# distinct from SUPPORTED_IMAGE_MIME_TYPES above, which is the client's
+# *declared* Content-Type and cannot be trusted. This is checked against
+# what Pillow actually decoded, independent of file extension or header.
+SUPPORTED_IMAGE_PIL_FORMATS: frozenset[str] = frozenset({"JPEG", "PNG", "WEBP"})
+# Every processed image is re-encoded to this format regardless of its
+# original one — see ImageProcessingService for why standardizing the
+# output format simplifies everything downstream (no alpha channel to
+# worry about, one decoder for every later phase to support).
+PROCESSED_IMAGE_FORMAT = "JPEG"
+PROCESSED_IMAGE_EXTENSION = ".jpg"
+# A generous safety ceiling (rejects decompression-bomb-scale images
+# before any resizing work) — distinct from DEFAULT_PROCESSED_IMAGE_SIZE_PX,
+# which is the much smaller target size images are actually resized to.
+DEFAULT_MAX_IMAGE_DIMENSION_PX = 8000
+DEFAULT_PROCESSED_IMAGE_SIZE_PX = 1024
+
 # --- Pagination ---
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100

@@ -6,7 +6,13 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.product import ProductCreate, ProductImage, ProductResponse, UploadResponse
+from app.schemas.product import (
+    ProcessedImageInfo,
+    ProductCreate,
+    ProductImage,
+    ProductResponse,
+    UploadResponse,
+)
 
 
 class TestProductCreate:
@@ -46,6 +52,16 @@ class TestProductImage:
             )
 
 
+class TestProcessedImageInfo:
+    def test_constructs_with_all_fields(self) -> None:
+        info = ProcessedImageInfo(width=1024, height=768, format="JPEG", color_mode="RGB")
+
+        assert info.width == 1024
+        assert info.height == 768
+        assert info.format == "JPEG"
+        assert info.color_mode == "RGB"
+
+
 class TestUploadResponse:
     def test_round_trips_through_model_dump_and_validate(self) -> None:
         response = UploadResponse(
@@ -59,6 +75,9 @@ class TestUploadResponse:
                 uploaded_at=datetime.now(UTC),
             ),
             checksum_sha256="a" * 64,
+            processed_image=ProcessedImageInfo(
+                width=800, height=600, format="JPEG", color_mode="RGB"
+            ),
         )
 
         dumped = response.model_dump(mode="json")

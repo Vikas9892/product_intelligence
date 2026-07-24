@@ -5,9 +5,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
-from app.exceptions.errors import ChecksumException, ValidationException
+from app.exceptions.errors import ChecksumException, InvalidImageException, ValidationException
 from app.schemas.product import ProductCreate, ProductImage
+from app.services.image_processing_service import ImageProcessingService
 from app.services.product_service import (
     ProductService,
     _normalize_category,
@@ -15,6 +17,24 @@ from app.services.product_service import (
     _normalize_name,
     _normalize_price,
 )
+
+
+def _build_service(tmp_path: Path) -> ProductService:
+    # Every test gets its own ImageProcessingService pointed at a tmp_path
+    # subdirectory — never the real settings.storage.processed_dir.
+    return ProductService(
+        upload_dir=tmp_path,
+        image_processing_service=ImageProcessingService(processed_dir=tmp_path / "processed"),
+    )
+
+
+def _write_valid_image(
+    upload_dir: Path, stored_filename: str, *, size: tuple[int, int] = (50, 50)
+) -> bytes:
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    path = upload_dir / stored_filename
+    Image.new("RGB", size, (255, 0, 0)).save(path, format="JPEG")
+    return path.read_bytes()
 
 
 def _write_stored_file(upload_dir: Path, stored_filename: str, content: bytes) -> None:
@@ -81,10 +101,9 @@ class TestNormalizePrice:
 
 class TestProcessUploadSuccess:
     async def test_builds_a_normalized_identified_product(self, tmp_path: Path) -> None:
-        content = b"fake-image-bytes"
-        image = _image(stored_filename="generated.jpg", size_bytes=len(content))
-        _write_stored_file(tmp_path, image.stored_filename, content)
-        service = ProductService(upload_dir=tmp_path)
+        image = _image(stored_filename="generated.jpg")
+        _write_valid_image(tmp_path, image.stored_filename)
+        service = _build_service(tmp_path)
         product_create = ProductCreate(
             name=" Nike ",
             description="  A fine shirt  ",
@@ -100,10 +119,9 @@ class TestProcessUploadSuccess:
         assert product.price == 1999.0
 
     async def test_generates_a_fresh_uuid4_per_call(self, tmp_path: Path) -> None:
-        content = b"fake-image-bytes"
         image = _image()
-        _write_stored_file(tmp_path, image.stored_filename, content)
-        service = ProductService(upload_dir=tmp_path)
+        _write_valid_image(tmp_path, image.stored_filename)
+        service = _build_service(tmp_path)
         product_create = ProductCreate(name="Widget")
 
         first = await service.process_upload(product_create, image)
@@ -112,10 +130,9 @@ class TestProcessUploadSuccess:
         assert first.id != second.id
 
     async def test_file_metadata_checksum_matches_the_stored_content(self, tmp_path: Path) -> None:
-        content = b"specific known content for hashing"
         image = _image()
-        _write_stored_file(tmp_path, image.stored_filename, content)
-        service = ProductService(upload_dir=tmp_path)
+        content = _write_valid_image(tmp_path, image.stored_filename)
+        service = _build_service(tmp_path)
 
         product = await service.process_upload(ProductCreate(name="Widget"), image)
 
@@ -123,12 +140,25 @@ class TestProcessUploadSuccess:
         assert product.file_metadata.original_filename == "photo.jpg"
         assert product.file_metadata.extension == ".jpg"
 
+    async def test_populates_image_metadata_from_image_processing(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename, size=(50, 50))
+        service = _build_service(tmp_path)
+
+        product = await service.process_upload(ProductCreate(name="Widget"), image)
+
+        assert product.image_metadata.width == 50
+        assert product.image_metadata.height == 50
+        assert product.image_metadata.format == "JPEG"
+        assert product.image_metadata.color_mode == "RGB"
+        assert product.image_metadata.processed_path.is_file()
+
 
 class TestProcessUploadValidation:
     async def test_rejects_a_name_that_is_blank_after_trimming(self, tmp_path: Path) -> None:
         image = _image()
-        _write_stored_file(tmp_path, image.stored_filename, b"content")
-        service = ProductService(upload_dir=tmp_path)
+        _write_valid_image(tmp_path, image.stored_filename)
+        service = _build_service(tmp_path)
         # A real caller can reach this: "   " passes ProductCreate's
         # min_length=1 (raw length 3) but is blank once normalized.
         product_create = ProductCreate(name="   ")
@@ -140,8 +170,8 @@ class TestProcessUploadValidation:
         self, tmp_path: Path
     ) -> None:
         image = _image()
-        _write_stored_file(tmp_path, image.stored_filename, b"content")
-        service = ProductService(upload_dir=tmp_path)
+        _write_valid_image(tmp_path, image.stored_filename)
+        service = _build_service(tmp_path)
         # ProductCreate's own Field(ge=0) already blocks this through the
         # normal constructor - model_construct bypasses validation to
         # simulate a caller that reaches ProductService without it (e.g.
@@ -157,7 +187,19 @@ class TestProcessUploadChecksumFailure:
         self, tmp_path: Path
     ) -> None:
         image = _image(stored_filename="never-written.jpg")
-        service = ProductService(upload_dir=tmp_path)
+        service = _build_service(tmp_path)
 
         with pytest.raises(ChecksumException):
+            await service.process_upload(ProductCreate(name="Widget"), image)
+
+
+class TestProcessUploadImageProcessingFailure:
+    async def test_propagates_invalid_image_exception_for_a_corrupt_stored_file(
+        self, tmp_path: Path
+    ) -> None:
+        image = _image()
+        _write_stored_file(tmp_path, image.stored_filename, b"not a real image")
+        service = _build_service(tmp_path)
+
+        with pytest.raises(InvalidImageException):
             await service.process_upload(ProductCreate(name="Widget"), image)

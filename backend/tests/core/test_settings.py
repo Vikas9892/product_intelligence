@@ -3,8 +3,9 @@
 import pytest
 from pydantic import ValidationError
 
+from app.core import paths
 from app.core.constants import Environment, LogLevel
-from app.core.settings import ApplicationSettings, SecuritySettings, Settings
+from app.core.settings import ApplicationSettings, SecuritySettings, Settings, StorageSettings
 
 
 class TestApplicationSettings:
@@ -19,6 +20,25 @@ class TestApplicationSettings:
     def test_rejects_out_of_range_port(self) -> None:
         with pytest.raises(ValidationError):
             ApplicationSettings(port=70000)
+
+
+class TestStorageSettings:
+    def test_defaults(self) -> None:
+        settings = StorageSettings()
+
+        assert settings.upload_dir == paths.UPLOAD_DIR
+        assert settings.processed_dir == paths.PROCESSED_DIR
+        assert settings.max_upload_size_mb == 10
+        assert settings.max_image_dimension_px == 8000
+        assert settings.processed_image_size_px == 1024
+
+    def test_rejects_a_non_positive_max_image_dimension(self) -> None:
+        with pytest.raises(ValidationError):
+            StorageSettings(max_image_dimension_px=0)
+
+    def test_rejects_a_non_positive_processed_image_size(self) -> None:
+        with pytest.raises(ValidationError):
+            StorageSettings(processed_image_size_px=0)
 
 
 class TestSecuritySettings:

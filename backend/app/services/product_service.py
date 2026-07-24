@@ -3,19 +3,21 @@ saved" (Phase 2A's `UploadService`) and "here is a normalized, identified,
 internally-consistent `Product` domain object" (this phase).
 
 `ProductService.process_upload` orchestrates, in order: locate the
-already-stored file and compute its checksum (`ChecksumService`), parse
-internal file metadata (`app.utils.metadata.parse_file_metadata`),
-normalize the submitted product fields (the module-level `_normalize_*`
-functions below), re-validate the normalized result
-(`app.validators.product_validator`), generate a UUID4 identifier, and
-build the `Product` domain model. No database write, no image
-processing, no AI — see `backend/README.md`.
+already-stored file and compute its checksum (`ChecksumService`),
+standardize the image itself — orientation, color mode, size —
+(`ImageProcessingService`, Phase 3), parse internal file metadata
+(`app.utils.metadata.parse_file_metadata`), normalize the submitted
+product fields (the module-level `_normalize_*` functions below),
+re-validate the normalized result (`app.validators.product_validator`),
+generate a UUID4 identifier, and build the `Product` domain model. No
+database write, no embeddings, no AI model calls — see `backend/README.md`.
 
 Kept as an orchestrator, not a place where new validation/normalization
 *rules* get invented inline: normalization is small pure functions here
 (easy to unit test directly), validation delegates entirely to
-`app.validators.*`. `app/api/products.py` calls this service and nothing
-else — the router itself has no business logic.
+`app.validators.*`, and image processing delegates entirely to
+`ImageProcessingService`. `app/api/products.py` calls this service and
+`UploadService` and nothing else — the router itself has no business logic.
 """
 
 import re
@@ -27,6 +29,7 @@ from app.core.logging import get_logger
 from app.models.product import Product
 from app.schemas.product import ProductCreate, ProductImage
 from app.services.checksum_service import ChecksumService
+from app.services.image_processing_service import ImageProcessingService
 from app.utils.metadata import parse_file_metadata
 from app.validators.product_validator import validate_normalized_name, validate_price
 
@@ -40,10 +43,16 @@ class ProductService:
         self,
         *,
         checksum_service: ChecksumService | None = None,
+        image_processing_service: ImageProcessingService | None = None,
         upload_dir: Path | None = None,
     ) -> None:
         self._checksum_service = (
             checksum_service if checksum_service is not None else ChecksumService()
+        )
+        self._image_processing_service = (
+            image_processing_service
+            if image_processing_service is not None
+            else ImageProcessingService()
         )
         self._upload_dir = upload_dir if upload_dir is not None else settings.storage.upload_dir
 
@@ -52,8 +61,11 @@ class ProductService:
 
         `image` must describe a file `UploadService` has already written
         under this service's `upload_dir`. Raises `ChecksumException` if
-        that file can't be read, or `ValidationException` if the
-        normalized product fields fail a domain invariant.
+        that file can't be read; `InvalidImageException`,
+        `UnsupportedMediaTypeException`, or `ImageTooLargeException` if it
+        fails image validation/processing (see `ImageProcessingService`);
+        or `ValidationException` if the normalized product fields fail a
+        domain invariant.
         """
         logger.info(
             "Upload processing started: product_name=%s, filename=%s",
@@ -67,6 +79,10 @@ class ProductService:
             "Checksum generated: filename=%s, checksum=%s",
             image.stored_filename,
             checksum,
+        )
+
+        image_metadata = await self._image_processing_service.process_image(
+            stored_path, image.stored_filename
         )
 
         file_metadata = parse_file_metadata(image, checksum_sha256=checksum)
@@ -88,6 +104,7 @@ class ProductService:
             category=normalized_category,
             price=normalized_price,
             file_metadata=file_metadata,
+            image_metadata=image_metadata,
         )
 
         logger.info("Product processed: id=%s, name=%s", product_id, normalized_name)

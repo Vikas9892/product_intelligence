@@ -16,6 +16,7 @@ ENV_FILE: Path = BACKEND_DIR / ".env"
 
 STORAGE_DIR: Path = BACKEND_DIR / "storage"
 UPLOAD_DIR: Path = STORAGE_DIR / "uploads"
+PROCESSED_DIR: Path = STORAGE_DIR / "processed"
 LOG_DIR: Path = BACKEND_DIR / "logs"
 
 DEFAULT_SQLITE_PATH: Path = STORAGE_DIR / "app.db"
@@ -29,5 +30,5 @@ def ensure_runtime_directories() -> None:
     importing this module — keeping imports side-effect-free is what lets
     the config system be unit-tested without touching the real filesystem.
     """
-    for directory in (STORAGE_DIR, UPLOAD_DIR, LOG_DIR):
+    for directory in (STORAGE_DIR, UPLOAD_DIR, PROCESSED_DIR, LOG_DIR):
         directory.mkdir(parents=True, exist_ok=True)

@@ -3,21 +3,22 @@
 `POST /products/upload` (mounted under `settings.application.api_prefix`
 by `app/application.py`, so `/api/v1/products/upload`) accepts product
 metadata plus a single image file as `multipart/form-data`, and runs it
-through the full Phase 2A + 2B pipeline:
+through the full Phase 2A + 2B + 3 pipeline:
 
     UploadService.save_upload      -> validate + store the file (Phase 2A)
-    ProductService.process_upload  -> checksum + metadata + normalize +
-                                       validate + generate ID (Phase 2B)
+    ProductService.process_upload  -> checksum, image processing
+                                       (Phase 3, via ImageProcessingService),
+                                       normalize, validate, generate ID (2B)
 
 Unlike `app/api/health.py`'s system routes (deliberately unversioned),
 this is a real, versioned business endpoint, so it belongs under the
 prefix — see the Phase 2A section of `backend/README.md`.
 
-No database write happens here (Phase 2B processes but does not persist
-— that arrives in a later phase) — the response describes the fully
-processed, normalized, identified upload, built from `Product`
-(`app/models/product.py`), the internal domain object, deliberately not
-returned directly (see that module's docstring).
+No database write happens here (this pipeline processes but does not
+persist — that arrives in a later phase) — the response describes the
+fully processed, normalized, identified, image-standardized upload, built
+from `Product` (`app/models/product.py`), the internal domain object,
+deliberately not returned directly (see that module's docstring).
 
 **Why individual `Form(...)` parameters instead of
 `Annotated[ProductCreate, Form()]`?** FastAPI's "Form models" feature
@@ -40,7 +41,7 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from app.core.logging import get_logger
 from app.dependencies.product import get_product_service
 from app.dependencies.upload import get_upload_service
-from app.schemas.product import ProductCreate, UploadResponse
+from app.schemas.product import ProcessedImageInfo, ProductCreate, UploadResponse
 from app.services.product_service import ProductService
 from app.services.upload_service import UploadService
 
@@ -100,4 +101,10 @@ async def upload_product(
         ),
         image=image,
         checksum_sha256=product.file_metadata.checksum_sha256,
+        processed_image=ProcessedImageInfo(
+            width=product.image_metadata.width,
+            height=product.image_metadata.height,
+            format=product.image_metadata.format,
+            color_mode=product.image_metadata.color_mode,
+        ),
     )

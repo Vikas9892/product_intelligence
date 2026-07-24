@@ -53,22 +53,39 @@ class ProductImage(BaseModel):
     uploaded_at: datetime
 
 
+class ProcessedImageInfo(BaseModel):
+    """API-safe view of a processed image's dimensions and format.
+
+    Deliberately excludes `app.models.image_metadata.ImageMetadata`'s
+    `original_path`/`processed_path` fields — those are real server
+    filesystem paths, which (per Phase 2A's rationale for `ProductImage`
+    only ever exposing a generated `stored_filename`, never a path) must
+    never appear in an API response.
+    """
+
+    width: int
+    height: int
+    format: str
+    color_mode: str
+
+
 class UploadResponse(BaseModel):
     """Response body for `POST /api/v1/products/upload`.
 
     No database row exists yet (Phase 2B processes but does not persist —
-    see `backend/README.md`). `product_id` and `checksum_sha256` come from
-    `app.models.product.Product`, the internal domain object
-    `ProductService` builds; `product` reflects the *normalized* fields
-    (trimmed, cased, sluggified, price-rounded), not the raw submitted
-    values, since that's what was actually processed and would (in a
-    later phase) be persisted.
+    see `backend/README.md`). `product_id`, `checksum_sha256`, and
+    `processed_image` all come from `app.models.product.Product`, the
+    internal domain object `ProductService` builds; `product` reflects
+    the *normalized* fields (trimmed, cased, sluggified, price-rounded),
+    not the raw submitted values, since that's what was actually
+    processed and would (in a later phase) be persisted.
     """
 
     product_id: UUID
     product: ProductCreate
     image: ProductImage
     checksum_sha256: str
+    processed_image: ProcessedImageInfo
 
 
 class ProductResponse(BaseModel):

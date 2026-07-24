@@ -80,6 +80,16 @@ class StorageSettings(BaseModel):
     max_upload_size_mb: int = Field(default=constants.DEFAULT_UPLOAD_MAX_SIZE_MB, gt=0)
     allowed_image_extensions: tuple[str, ...] = constants.SUPPORTED_IMAGE_EXTENSIONS
 
+    #: Where processed (normalized, resized) images are written — Phase 3.
+    processed_dir: Path = paths.PROCESSED_DIR
+    #: Hard safety ceiling: reject images larger than this in either
+    #: dimension before doing any resizing work (decompression-bomb
+    #: protection). Distinct from `processed_image_size_px` below.
+    max_image_dimension_px: int = Field(default=constants.DEFAULT_MAX_IMAGE_DIMENSION_PX, gt=0)
+    #: Target size images are resized to (preserving aspect ratio) — the
+    #: standardized dimension downstream AI models will consume.
+    processed_image_size_px: int = Field(default=constants.DEFAULT_PROCESSED_IMAGE_SIZE_PX, gt=0)
+
 
 class SecuritySettings(BaseModel):
     """Auth/crypto configuration."""

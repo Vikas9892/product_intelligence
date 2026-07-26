@@ -7,6 +7,7 @@ ranking/thresholding/decision logic can be tested against precisely
 controlled inputs.
 """
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -285,3 +286,79 @@ class TestErrorWrapping:
 
         with pytest.raises(DuplicateDetectionException):
             await _detect(service)
+
+
+class _RoutingFakeHybridSearchService(HybridSearchService):
+    """Returns a different candidate set depending on the query text, so
+    concurrent `.detect()` calls (each for a different product) can be
+    verified to never see each other's candidates.
+    """
+
+    def __init__(self, results_by_text: dict[str, list[HybridSearchResult]]) -> None:
+        self._results_by_text = results_by_text
+
+    async def search(
+        self,
+        *,
+        image: ProductImage | None = None,
+        text: str | None = None,
+        top_k: int | None = None,
+        filters: ProductFilters | None = None,
+    ) -> list[HybridSearchResult]:
+        assert text is not None
+        return self._results_by_text[text]
+
+
+class TestConcurrency:
+    async def test_concurrent_detect_calls_each_return_their_own_decision(self) -> None:
+        product_ids = {f"Widget-{i}": uuid4() for i in range(8)}
+        results_by_text = {
+            name: [_hybrid_result(product_id)] for name, product_id in product_ids.items()
+        }
+        service = DuplicateDetectionService(
+            hybrid_search_service=_RoutingFakeHybridSearchService(results_by_text),
+            similarity_scorer=_FakeSimilarityScorer(
+                overall_similarity_by_product=dict.fromkeys(product_ids.values(), 0.95)
+            ),
+            threshold=0.90,
+        )
+
+        decisions = await asyncio.gather(
+            *(
+                service.detect(
+                    name=name,
+                    brand=None,
+                    category=None,
+                    description=None,
+                    attributes=ProductAttributes(),
+                    image=_image(),
+                )
+                for name in product_ids
+            )
+        )
+
+        for name, decision in zip(product_ids, decisions, strict=True):
+            assert decision.matched_product == product_ids[name]
+
+
+class TestMalformedInput:
+    async def test_unicode_and_very_long_text_does_not_crash_detection(self) -> None:
+        product_id = uuid4()
+        service = DuplicateDetectionService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(product_id)]),
+            similarity_scorer=_FakeSimilarityScorer(
+                overall_similarity_by_product={product_id: 0.5}
+            ),
+        )
+
+        decision = await service.detect(
+            name="   \t\n  ",
+            brand="",
+            category=None,
+            description="日本語 emoji 🚀🚀🚀 " + ("x" * 5000),
+            attributes=ProductAttributes(),
+            image=_image(),
+        )
+
+        assert isinstance(decision, DuplicateDecision)
+        assert 0.0 <= decision.confidence <= 1.0

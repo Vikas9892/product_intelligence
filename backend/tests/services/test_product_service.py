@@ -1,5 +1,6 @@
 """Unit tests for `ProductService` and its normalization functions."""
 
+import asyncio
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -501,3 +502,20 @@ class TestProcessUploadImageProcessingFailure:
 
         with pytest.raises(InvalidImageException):
             await service.process_upload(ProductCreate(name="Widget"), image)
+
+
+class TestProcessUploadConcurrency:
+    async def test_concurrent_uploads_each_produce_a_distinct_product(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        vector_store = _FakeVectorStore()
+        service = _build_service(tmp_path, vector_store=vector_store)
+        product_create = ProductCreate(name="Widget")
+
+        products = await asyncio.gather(
+            *(service.process_upload(product_create, image) for _ in range(8))
+        )
+
+        assert len({product.id for product in products}) == 8
+        assert len(vector_store.upserted_image) == 8
+        assert len(vector_store.upserted_text) == 8

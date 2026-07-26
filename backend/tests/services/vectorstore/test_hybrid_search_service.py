@@ -6,6 +6,7 @@ image/text pipelines — those are `test_search_service.py`/
 logic in isolation.
 """
 
+import asyncio
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -42,6 +43,23 @@ class _FakeTextSearchService(TextSearchService):
     async def search_by_text(self, query, *, top_k=None, filters=None) -> SearchResult:  # type: ignore[no-untyped-def]
         self.calls.append({"query": query, "top_k": top_k, "filters": filters})
         return SearchResult(query_model_name="fake-text-model", neighbors=self._neighbors)
+
+
+class _RoutingFakeTextSearchService(TextSearchService):
+    """Returns a different, query-specific neighbor per call — unlike
+    `_FakeTextSearchService`'s single fixed response, this lets a
+    concurrency test prove that concurrent calls each get back *their
+    own* correct result, not one call's result leaking into another's.
+    """
+
+    def __init__(self, neighbors_by_query: dict[str, NearestNeighbor]) -> None:
+        self._neighbors_by_query = neighbors_by_query
+
+    async def search_by_text(self, query, *, top_k=None, filters=None) -> SearchResult:  # type: ignore[no-untyped-def]
+        await asyncio.sleep(0)  # yield control, widening any race window
+        return SearchResult(
+            query_model_name="fake-text-model", neighbors=[self._neighbors_by_query[query]]
+        )
 
 
 def _image() -> ProductImage:
@@ -241,3 +259,21 @@ class TestHybridFusion:
 
         with pytest.raises(HybridSearchException):
             await service.search(image=_image(), text="query")
+
+
+class TestConcurrency:
+    async def test_concurrent_text_searches_each_return_their_own_result(self) -> None:
+        neighbors_by_query = {
+            f"query-{i}": NearestNeighbor(product_id=uuid4(), score=0.5) for i in range(8)
+        }
+        service = HybridSearchService(
+            search_service=_FakeSearchService(),
+            text_search_service=_RoutingFakeTextSearchService(neighbors_by_query),
+        )
+
+        results = await asyncio.gather(
+            *(service.search(text=query) for query in neighbors_by_query)
+        )
+
+        for query, result in zip(neighbors_by_query, results, strict=True):
+            assert result[0].product_id == neighbors_by_query[query].product_id

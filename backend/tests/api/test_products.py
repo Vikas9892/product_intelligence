@@ -37,6 +37,7 @@ from app.services.embeddings.text_base import BaseTextEmbeddingService
 from app.services.image_processing_service import ImageProcessingService
 from app.services.product_service import ProductService
 from app.services.upload_service import UploadService
+from app.services.vectorstore.base import VectorCollection
 from app.services.vectorstore.qdrant_store import QdrantVectorStore
 
 _UPLOAD_URL = f"{settings.application.api_prefix}/products/upload"
@@ -229,6 +230,29 @@ class TestUploadProductSuccess:
 
         assert response.status_code == 201
         assert response.json()["product"]["name"] == "Minimal Widget"
+
+
+class TestUploadIndexesBothCollections:
+    """Confirms the full upload -> image embedding -> text embedding ->
+    image index -> text index pipeline actually reaches the vector store,
+    not just that `ProductService`'s own unit tests believe it does.
+    """
+
+    async def test_the_uploaded_product_exists_in_the_image_collection(
+        self, upload_client: TestClient
+    ) -> None:
+        response = upload_client.post(_UPLOAD_URL, data={"name": "Widget"}, files=_image_file())
+        product_id = uuid.UUID(response.json()["product_id"])
+
+        assert await _shared_vector_store.exists(VectorCollection.IMAGE, product_id) is True
+
+    async def test_the_uploaded_product_exists_in_the_text_collection(
+        self, upload_client: TestClient
+    ) -> None:
+        response = upload_client.post(_UPLOAD_URL, data={"name": "Widget"}, files=_image_file())
+        product_id = uuid.UUID(response.json()["product_id"])
+
+        assert await _shared_vector_store.exists(VectorCollection.TEXT, product_id) is True
 
 
 class TestUploadProductValidation:

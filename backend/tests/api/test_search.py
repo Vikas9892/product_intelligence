@@ -215,3 +215,51 @@ class TestSearchProducts:
 
         assert response.status_code == 422
         assert response.json()["error"]["code"] == "invalid_image"
+
+    def test_category_filter_excludes_products_from_other_categories(
+        self, search_client: TestClient
+    ) -> None:
+        shoe_id = _upload(search_client, name="Shoe Widget", category="shoes")
+        shirt_id = _upload(search_client, name="Shirt Widget", category="shirts")
+
+        response = search_client.post(_SEARCH_URL, data={"query": "widget", "category": "shirts"})
+
+        product_ids = [result["product_id"] for result in response.json()["results"]]
+        assert shirt_id in product_ids
+        assert shoe_id not in product_ids
+
+    def test_brand_filter_excludes_products_from_other_brands(
+        self, search_client: TestClient
+    ) -> None:
+        nike_id = _upload(search_client, name="Nike Widget", brand="Nike")
+        adidas_id = _upload(search_client, name="Adidas Widget", brand="Adidas")
+
+        response = search_client.post(_SEARCH_URL, data={"query": "widget", "brand": "Nike"})
+
+        product_ids = [result["product_id"] for result in response.json()["results"]]
+        assert nike_id in product_ids
+        assert adidas_id not in product_ids
+
+    def test_price_range_filter_excludes_products_outside_the_range(
+        self, search_client: TestClient
+    ) -> None:
+        cheap_id = _upload(search_client, name="Cheap Widget", price="5.00")
+        mid_id = _upload(search_client, name="Mid Widget", price="50.00")
+        expensive_id = _upload(search_client, name="Expensive Widget", price="500.00")
+
+        response = search_client.post(
+            _SEARCH_URL, data={"query": "widget", "min_price": "10", "max_price": "100"}
+        )
+
+        product_ids = [result["product_id"] for result in response.json()["results"]]
+        assert mid_id in product_ids
+        assert cheap_id not in product_ids
+        assert expensive_id not in product_ids
+
+    def test_top_k_limits_the_number_of_results(self, search_client: TestClient) -> None:
+        for i in range(5):
+            _upload(search_client, name=f"Widget {i}")
+
+        response = search_client.post(_SEARCH_URL, data={"query": "widget", "top_k": "2"})
+
+        assert len(response.json()["results"]) == 2

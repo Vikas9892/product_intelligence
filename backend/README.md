@@ -1433,6 +1433,223 @@ used for `get_image_features`'s `.pooler_output`. A fake would only ever
 prove this codebase's own logic was internally consistent, not that it
 actually matches Qdrant's real behavior.
 
+## Phase 6 — Text Embeddings & Hybrid Search design decisions
+
+This phase adds a second modality alongside Phase 4/5's image pipeline:
+every uploaded product now also gets a text embedding (from its name,
+brand, category, and description), indexed into its own Qdrant
+collection, searchable on its own or fused with an image search. Six
+pieces landed, in dependency order: text embedding infrastructure
+(`BaseTextEmbeddingService`, `SentenceTransformerEmbeddingService`,
+`TextModelManager`, `TextEmbedding`), the two-collection vector store
+redesign that both product indexing and search need, product text
+indexing (`ProductService` wiring), `HybridSearchService`, and finally
+the replaced `/products/search` endpoint.
+
+### Architecture
+
+```
+                     ProductService.process_upload
+                              │
+              ┌───────────────┼───────────────┐
+              ▼                               ▼
+      CLIPEmbeddingService          SentenceTransformerEmbeddingService
+      (image embedding)             (text embedding: name/brand/
+              │                      category/description)
+              ▼                               ▼
+      QdrantVectorStore.upsert_image   QdrantVectorStore.upsert_text
+              │                               │
+              ▼                               ▼
+      "product_images" collection    "product_text" collection
+
+
+                        HybridSearchService.search
+                              │
+              ┌───────────────┼───────────────┐
+              ▼                               ▼
+        SearchService                  TextSearchService
+      (image-only search)            (text-only search)
+              │                               │
+              ▼                               ▼
+      search_image(...)                search_text(...)
+              │                               │
+              └───────────────┬───────────────┘
+                               ▼
+                   score fusion (hybrid mode only)
+                               │
+                               ▼
+                    ranked HybridSearchResult list
+```
+
+`SearchService` and `TextSearchService` each depend only on
+`BaseVectorStore`/their own embedding service — neither knows the other
+exists. `HybridSearchService` is the only thing that composes both,
+matching the codebase's established "depend on the seam, not the
+concrete implementation" pattern (Phase 4's `BaseEmbeddingService`)
+applied one layer up: a search *pipeline* composed from single-modality
+building blocks, not one service that knows about every modality itself.
+
+### Text Embeddings
+
+`SentenceTransformerEmbeddingService` (`BAAI/bge-small-en-v1.5` by
+default, 384-dimensional) mirrors `CLIPEmbeddingService` closely: lazy
+model loading via `TextModelManager` (a near-exact copy of `ModelManager`'s
+double-checked-locking "load once" pattern, reusing its `resolve_device`
+function directly rather than duplicating it), batched inference off the
+event loop, and normalized output — except Sentence Transformers
+normalizes natively (`encode(normalize_embeddings=...)`) where CLIP
+needed a manual L2-normalize step.
+
+The text actually embedded for a product is built from its raw, only
+lightly-trimmed name/brand/category/description — deliberately *not*
+`_normalize_category`'s slugified form (`"men-tshirts"`). Slugifying
+exists so category is a stable, exact-match filter value for Qdrant; a
+sentence embedding model should see natural language ("Men Tshirts"),
+not a URL-safe slug. The two normalizations serve different purposes and
+are kept independent — see `ProductService._build_text_representation`.
+
+### Collections
+
+Two Qdrant collections, both cosine distance, both created lazily on
+first use (see `QdrantVectorStore`'s own docstring): `product_images`
+(512-dimensional, matching the default CLIP checkpoint) and
+`product_text` (384-dimensional, matching the default Sentence
+Transformers checkpoint). `BaseVectorStore`'s abstract methods
+(`upsert`/`search`/`delete`/`exists`) all take an explicit
+`VectorCollection` argument; `upsert_image`/`upsert_text`/`search_image`/
+`search_text` are concrete convenience methods on the base class itself,
+implemented once in terms of those five primitives — a concrete
+`QdrantVectorStore` subclass never has to implement per-modality logic
+twice, and the per-collection lazy-creation state (a dict of "ready"
+flags, a dict of locks, both keyed by `VectorCollection`) means loading
+one collection never blocks the other.
+
+Every point's payload (in both collections) carries the same metadata:
+`name`, `brand`, `category`, `price`, `description` — built once in
+`ProductService` and reused for both the image and text upserts, since
+it's the same product's metadata regardless of which collection is
+storing which vector.
+
+### Score Fusion
+
+`HybridSearchService.search` dispatches on whatever's actually provided:
+
+- **Image only** — runs `SearchService.search_by_image`, returns its
+  scores/ranking untouched.
+- **Text only** — runs `TextSearchService.search_by_text`, returns its
+  scores/ranking untouched.
+- **Both** — runs both searches (each asked for the same `top_k` the
+  caller requested — see the trade-off this implies below), merges
+  candidates by `product_id`, and computes
+
+  ```
+  final_score = IMAGE_WEIGHT * image_score + TEXT_WEIGHT * text_score
+  ```
+
+  A candidate present in only one side's results contributes `0.0` for
+  the side it's missing from, gets tagged with only that side's modality
+  in `matched_modalities`, then the fused, deduplicated list is sorted
+  descending and truncated to `top_k`.
+
+Single-modality scores are returned **unweighted** — multiplying every
+score by `IMAGE_WEIGHT` when there's no text query to balance against
+would just deflate every score by a constant factor for no benefit; the
+weights only mean something as a *relative* balance between two
+modalities actually being fused.
+
+**Known limitation, by design:** because both sub-searches are asked for
+the caller's own `top_k` (not an inflated candidate pool), a product that
+ranks outside `top_k` on *both* individual searches can never surface
+after fusion, even if it would have scored well combined. Over-fetching
+to guard against this is a real hybrid-search refinement, but it's a
+ranking-quality tuning knob this phase's own scope excludes
+("Learning-to-rank"), so it's a documented trade-off rather than an
+unstated gap.
+
+### Supported Search Modes
+
+`POST /api/v1/products/search` accepts an optional `file` (query image)
+and an optional `query` (text) — at least one is required, or
+`HybridSearchService` raises `ValidationException` (422) — plus optional
+`brand`/`category`/`min_price`/`max_price` filters and `top_k`. The three
+modes (image-only, text-only, hybrid) aren't separate endpoints; which
+one runs is entirely determined by which fields the request actually
+included. The response never includes a raw embedding vector — only
+`product_id`, `score`, `matched_modalities`, and `metadata` — the same
+"don't expose data a client can't act on" reasoning `EmbeddingInfo`
+(Phase 4) and Phase 5's original search response already established.
+
+### Configuration
+
+New settings, all following the established grouped-settings pattern
+(`app/core/settings.py`):
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `AI_MODELS__TEXT_MODEL_NAME` | `BAAI/bge-small-en-v1.5` | Sentence Transformers checkpoint |
+| `AI_MODELS__TEXT_DEVICE` | `auto` | `"auto"`/`"cpu"`/`"cuda[:N]"`, same convention as `embedding_device` |
+| `AI_MODELS__TEXT_BATCH_SIZE` | `32` | Forward-pass batch size for text embedding |
+| `AI_MODELS__TEXT_NORMALIZE` | `true` | Passed to `encode(normalize_embeddings=...)` |
+| `VECTOR_STORE__IMAGE_COLLECTION_NAME` | `product_images` | Renamed from Phase 5's `collection_name` |
+| `VECTOR_STORE__IMAGE_VECTOR_SIZE` | `512` | Renamed from Phase 5's `vector_size` |
+| `VECTOR_STORE__TEXT_COLLECTION_NAME` | `product_text` | New |
+| `VECTOR_STORE__TEXT_VECTOR_SIZE` | `384` | New |
+| `HYBRID_SEARCH__IMAGE_WEIGHT` | `0.7` | Score fusion weight |
+| `HYBRID_SEARCH__TEXT_WEIGHT` | `0.3` | Score fusion weight |
+
+Renaming `VECTOR_STORE__COLLECTION_NAME`/`VECTOR_STORE__VECTOR_SIZE`
+(rather than leaving them and adding new text-specific names alongside)
+was a deliberate breaking change: Phase 5's single collection *becomes*
+the image collection this phase, and keeping the old names around
+unused/renamed-in-spirit-only would be more confusing than a clean
+rename, especially since nothing outside this codebase held a persisted
+dependency on the old names yet (no production Qdrant deployment exists).
+
+### Why does `BaseVectorStore`'s per-modality `VectorCollection` enum live
+in `app/services/vectorstore/base.py`, while a separate, value-identical
+`SearchModality` enum lives in `app/models/search.py`?
+
+They mean different things that only happen to share two values today —
+"which Qdrant collection an operation targets" vs. "which query type
+matched a hybrid search result" — but the deeper reason they're not the
+same type is that `app.services.vectorstore.base` already imports
+`NearestNeighbor`/`ProductFilters` *from* `app.models.search`; having
+`app.models.search` import `VectorCollection` back would be a circular
+import. `SearchModality` accepts a small amount of duplication to avoid
+a real layering problem.
+
+### Why is `HybridSearchService` a separate class instead of teaching
+`SearchService` about text?
+
+This was an explicit design call, not just an implementation detail:
+keeping `SearchService` (image-only) and the new `TextSearchService`
+(text-only) each focused on one modality, with `HybridSearchService`
+composing both plus its own fusion logic, keeps every piece independently
+testable and means neither single-modality service has to carry logic
+(weights, fusion, "what if the other modality wasn't queried") that has
+nothing to do with its own actual job.
+
+### Why does `ProductService` build the text representation and generate
+the text embedding immediately after the image embedding, in the same
+request, rather than as a separate step?
+
+Same reasoning Phase 4 already established for folding image-embedding
+generation into upload, and Phase 5 for upserting into the vector store
+there too: `HybridSearchService`/`TextSearchService` can only ever find
+products that already have a text-collection entry. Doing it later, as a
+separate call, would be an easy-to-forget follow-up step and would leave
+a window where a product exists but isn't fully searchable.
+
+### Why does `ProductCreate` gain a new `brand` field in this phase,
+when Phase 6's own milestones are about embeddings, not the upload schema?
+
+The phase's own Milestone 2 requirements list "Brand" as one of the four
+inputs building a product's text representation (alongside name,
+category, description) — brand genuinely didn't exist as a capturable
+field before this phase, so adding it (optional, following the exact
+same pattern `description`/`category`/`price` already use) was necessary
+to satisfy that requirement, not a scope-creeping addition.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -2048,4 +2265,118 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden vector search test coverage (Phase 5 milestone 6/6)"
+```
+
+**Phase 6 (Text Embeddings & Hybrid Search)** added, from the repo root —
+six milestones, each its own commit. Milestone 3 was actually built (and
+committed) before Milestone 2, since product text indexing depends on the
+two-collection vector store existing first — the phase's own milestone
+numbering isn't a buildable order here, the same reordering earlier
+phases already used for their own dependencies:
+
+```bash
+cd backend
+uv add sentence-transformers
+cd ..
+
+# Milestone 1 — text embedding infrastructure
+#   app/services/embeddings/text_base.py — BaseTextEmbeddingService
+#   app/services/embeddings/text_model_manager.py — TextModelManager
+#   (reuses ModelManager.resolve_device directly)
+#   app/services/embeddings/sentence_transformer_service.py — SentenceTransformerEmbeddingService
+#   app/models/text_embedding.py — TextEmbedding
+#   app/core/constants.py — added DEFAULT_TEXT_MODEL_NAME, DEFAULT_TEXT_VECTOR_SIZE
+#   app/core/settings.py — AIModelSettings gained text_model_name/text_device/
+#   text_batch_size/text_normalize
+#   app/exceptions/errors.py — added TextEmbeddingException
+#   backend/.env.example — documented the four new AI_MODELS__TEXT_* variables
+#   tests/services/embeddings/test_text_base.py, test_text_model_manager.py,
+#   test_sentence_transformer_service.py, tests/models/test_text_embedding.py,
+#   tests/core/test_settings.py — hand-written / extended
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add text embedding infrastructure (Phase 6 milestone 1/6)"
+
+# Milestone 3 — text vector storage (built before milestone 2, see above)
+#   app/services/vectorstore/base.py — BaseVectorStore methods gained a
+#   VectorCollection argument; upsert_image/upsert_text/search_image/
+#   search_text added as concrete convenience methods
+#   app/services/vectorstore/qdrant_store.py — manages two collections,
+#   each with independent lazy creation and locking
+#   app/models/search.py — added ProductFilters (replaces the old flat
+#   filters dict now that price needs a range condition)
+#   app/core/constants.py, app/core/settings.py — collection settings
+#   renamed/extended for two collections; added HybridSearchSettings
+#   backend/.env.example — updated VECTOR_STORE__ variables
+#   app/services/vectorstore/search_service.py, app/api/search.py — updated
+#   for the new collection-aware/ProductFilters signatures
+#   tests/services/vectorstore/test_base.py, test_qdrant_store.py,
+#   test_search_service.py, tests/services/test_product_service.py,
+#   tests/models/test_search.py, tests/core/test_settings.py,
+#   tests/api/test_products.py, tests/api/test_search.py — updated
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: split the vector store into image and text collections (Phase 6 milestone 3/6)"
+
+# Milestone 2 — product text indexing
+#   app/services/product_service.py — builds a text representation
+#   (name/brand/category/description) and embeds it right after the
+#   image embedding; upserts into both collections
+#   app/models/product.py — Product gained brand, text_embedding
+#   app/schemas/product.py, app/api/products.py — ProductCreate/the
+#   upload form gained an optional brand field
+#   tests/services/test_product_service.py, tests/models/test_product.py,
+#   tests/schemas/test_product.py, tests/api/test_products.py,
+#   tests/api/test_search.py — hand-written / updated
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: generate and index a text embedding for every uploaded product (Phase 6 milestone 2/6)"
+
+# Milestone 4 — HybridSearchService
+#   app/services/vectorstore/text_search_service.py — TextSearchService
+#   (mirrors SearchService, but text-only)
+#   app/services/vectorstore/hybrid_search_service.py — HybridSearchService
+#   (dispatches image-only/text-only/hybrid; weighted score fusion)
+#   app/models/search.py — added SearchModality, HybridSearchResult
+#   app/exceptions/errors.py — added HybridSearchException
+#   app/dependencies/hybrid_search.py — get_hybrid_search_service
+#   tests/services/vectorstore/test_text_search_service.py,
+#   test_hybrid_search_service.py, tests/dependencies/test_hybrid_search.py,
+#   tests/models/test_search.py — hand-written / extended
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add hybrid search with weighted score fusion (Phase 6 milestone 4/6)"
+
+# Milestone 5 — replace the search API endpoint
+#   app/schemas/search.py — ProductSearchResult gained matched_modalities
+#   app/api/search.py — rewritten: optional file + optional query (at
+#   least one required), brand/category/price-range filters, backed by
+#   HybridSearchService instead of SearchService
+#   tests/schemas/test_search.py, tests/api/test_search.py — rewritten
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: replace the search endpoint with image/text/hybrid search (Phase 6 milestone 5/6)"
+
+# Milestone 6 — test hardening + documentation
+#   tests/api/test_products.py — confirms an upload actually lands in
+#   both the image and text collections, not just that ProductService's
+#   own unit tests believe it does
+#   tests/api/test_search.py — brand/category/price-range filters, top_k,
+#   end-to-end through the real hybrid endpoint
+#   tests/services/test_product_service.py — concurrent uploads produce
+#   distinct products
+#   tests/services/vectorstore/test_hybrid_search_service.py — concurrent
+#   searches each return their own correct, uncontaminated result
+#   backend/README.md — this section
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+uv run uvicorn app.main:app --reload   # manual smoke test: upload a product,
+                                        # then search by image, by text, and by both
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden text and hybrid search test coverage (Phase 6 milestone 6/6)"
 ```

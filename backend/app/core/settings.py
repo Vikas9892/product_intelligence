@@ -150,6 +150,31 @@ class HybridSearchSettings(BaseModel):
     text_weight: float = Field(default=0.3, ge=0)
 
 
+class CatalogIntelligenceSettings(BaseModel):
+    """Catalog enrichment configuration for `CatalogIntelligenceService` (Phase 7).
+
+    `enabled` gates whether `ProductService` runs catalog enrichment at
+    all; `enable_text_attributes`/`enable_image_attributes` separately
+    gate whether `CatalogIntelligenceService` itself calls each
+    extraction service — a deployment might want image analysis but not
+    text (or vice versa) without disabling enrichment entirely.
+    `attribute_confidence_threshold` is the quality gate an
+    `AttributePrediction`/`CatalogTag` must clear to survive into the
+    final `CatalogIntelligenceResult`; the three `quality_*_weight`
+    fields are `CatalogIntelligenceService`'s quality-score formula,
+    kept configurable rather than hardcoded constants.
+    """
+
+    enabled: bool = True
+    enable_text_attributes: bool = True
+    enable_image_attributes: bool = True
+    attribute_confidence_threshold: float = Field(default=0.60, ge=0, le=1)
+    max_generated_tags: int = Field(default=20, gt=0)
+    quality_completeness_weight: float = Field(default=0.50, ge=0)
+    quality_confidence_weight: float = Field(default=0.30, ge=0)
+    quality_consistency_weight: float = Field(default=0.20, ge=0)
+
+
 class StorageSettings(BaseModel):
     """Local/object storage for uploaded product assets."""
 
@@ -210,6 +235,9 @@ class Settings(BaseSettings):
     ai_models: AIModelSettings = Field(default_factory=AIModelSettings)
     vector_store: VectorStoreSettings = Field(default_factory=VectorStoreSettings)
     hybrid_search: HybridSearchSettings = Field(default_factory=HybridSearchSettings)
+    catalog_intelligence: CatalogIntelligenceSettings = Field(
+        default_factory=CatalogIntelligenceSettings
+    )
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

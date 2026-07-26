@@ -8,6 +8,7 @@ from app.core.constants import Environment, LogLevel
 from app.core.settings import (
     AIModelSettings,
     ApplicationSettings,
+    CatalogIntelligenceSettings,
     HybridSearchSettings,
     SecuritySettings,
     Settings,
@@ -108,6 +109,36 @@ class TestHybridSearchSettings:
     def test_rejects_a_negative_text_weight(self) -> None:
         with pytest.raises(ValidationError):
             HybridSearchSettings(text_weight=-0.1)
+
+
+class TestCatalogIntelligenceSettings:
+    def test_defaults(self) -> None:
+        settings = CatalogIntelligenceSettings()
+
+        assert settings.enabled is True
+        assert settings.enable_text_attributes is True
+        assert settings.enable_image_attributes is True
+        assert settings.attribute_confidence_threshold == 0.60
+        assert settings.max_generated_tags == 20
+        assert settings.quality_completeness_weight == 0.50
+        assert settings.quality_confidence_weight == 0.30
+        assert settings.quality_consistency_weight == 0.20
+
+    def test_rejects_a_confidence_threshold_above_one(self) -> None:
+        with pytest.raises(ValidationError):
+            CatalogIntelligenceSettings(attribute_confidence_threshold=1.1)
+
+    def test_rejects_a_negative_confidence_threshold(self) -> None:
+        with pytest.raises(ValidationError):
+            CatalogIntelligenceSettings(attribute_confidence_threshold=-0.1)
+
+    def test_rejects_a_non_positive_max_generated_tags(self) -> None:
+        with pytest.raises(ValidationError):
+            CatalogIntelligenceSettings(max_generated_tags=0)
+
+    def test_rejects_a_negative_quality_weight(self) -> None:
+        with pytest.raises(ValidationError):
+            CatalogIntelligenceSettings(quality_completeness_weight=-0.1)
 
 
 class TestSecuritySettings:

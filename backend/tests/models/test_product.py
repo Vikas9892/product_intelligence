@@ -4,9 +4,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from app.models.catalog_intelligence_result import CatalogIntelligenceResult
+from app.models.catalog_tags import CatalogTag, Source
 from app.models.embedding import ImageEmbedding
 from app.models.image_metadata import ImageMetadata
 from app.models.product import Product
+from app.models.product_attributes import ProductAttributes
 from app.models.text_embedding import TextEmbedding
 from app.utils.metadata import FileMetadata
 
@@ -51,6 +54,15 @@ def _text_embedding(product_id: UUID) -> TextEmbedding:
     )
 
 
+def _catalog_intelligence() -> CatalogIntelligenceResult:
+    return CatalogIntelligenceResult(
+        attributes=ProductAttributes(brand="Nike", confidence=0.9),
+        tags=[CatalogTag(tag="running", confidence=0.9, source=Source.TEXT)],
+        quality_score=0.85,
+        processing_time=0.01,
+    )
+
+
 class TestProduct:
     def test_constructs_with_all_fields(self) -> None:
         product_id = uuid4()
@@ -68,6 +80,7 @@ class TestProduct:
             image_metadata=image_metadata,
             embedding=_embedding(product_id),
             text_embedding=_text_embedding(product_id),
+            catalog_intelligence=_catalog_intelligence(),
         )
 
         assert product.id == product_id
@@ -95,6 +108,7 @@ class TestProduct:
             image_metadata=_image_metadata(),
             embedding=_embedding(product_id),
             text_embedding=_text_embedding(product_id),
+            catalog_intelligence=_catalog_intelligence(),
         )
 
         assert product.brand is None
@@ -116,6 +130,7 @@ class TestProduct:
             image_metadata=_image_metadata(),
             embedding=_embedding(product_id),
             text_embedding=_text_embedding(product_id),
+            catalog_intelligence=_catalog_intelligence(),
         )
 
         dumped = product.model_dump(mode="json")

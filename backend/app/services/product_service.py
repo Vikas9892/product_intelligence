@@ -9,12 +9,15 @@ standardize the image itself — orientation, color mode, size —
 the standardized image (`CLIPEmbeddingService`, Phase 4), build a text
 representation from the product's name/brand/category/description and
 embed it too (`BaseTextEmbeddingService`, Phase 6 — generated immediately
-after the image embedding), parse internal file metadata
+after the image embedding), run catalog intelligence enrichment
+(`CatalogIntelligenceService`, Phase 7 — extracted attributes, generated
+tags, a quality score), parse internal file metadata
 (`app.utils.metadata.parse_file_metadata`), normalize the submitted
 product fields (the module-level `_normalize_*` functions below),
 re-validate the normalized result (`app.validators.product_validator`),
 generate a UUID4 identifier, build the `Product` domain model, and upsert
-both embeddings into their respective vector store collections
+both embeddings — now carrying the enriched attributes/tags as
+additional metadata — into their respective vector store collections
 (`BaseVectorStore`, Phases 5-6) so the product is immediately searchable
 by image or by text. No database write, no duplicate detection — see
 `backend/README.md`.
@@ -30,21 +33,33 @@ atomic-feeling step for a caller, the same way embedding generation
 itself was folded in here in Phase 4 rather than left as a separate,
 easy-to-forget follow-up call.
 
-**Why does the text representation use the raw submitted
-brand/category — not `_normalize_category`'s slugified result
-(`"men-tshirts"`)?** Slugifying exists so category is a stable,
-exact-match filter value; it's actively a worse input for a *semantic*
-text embedding model, which should see natural language ("Men Tshirts"),
-not a URL-safe slug. The two normalizations serve different purposes
-(filtering vs. meaning) and are kept independent — see
-`_build_text_representation`'s own docstring.
+**Why does the text representation (and catalog intelligence enrichment)
+use the raw submitted brand/category — not `_normalize_category`'s
+slugified result (`"men-tshirts"`)?** Slugifying exists so category is a
+stable, exact-match filter value; it's actively a worse input for a
+*semantic* text embedding model or a text attribute extractor, both of
+which should see natural language ("Men Tshirts"), not a URL-safe slug.
+The two normalizations serve different purposes (filtering vs. meaning)
+and are kept independent — see `_build_text_representation`'s own
+docstring.
+
+**Why does `brand`/`category` in the vector store's metadata stay the
+already-established normalized/slugified values, while `color`/
+`material`/`gender`/`season`/`style`/`tags` come straight from
+`CatalogIntelligenceResult`?** Changing what `brand`/`category` mean in
+already-indexed metadata would silently break `ProductFilters` equality
+matching (Phase 6) for anything indexed before this phase; the five new
+fields have no prior meaning to preserve, so they're populated directly
+from whatever catalog intelligence resolved (which may be `None`, same as
+any other optional attribute).
 
 Kept as an orchestrator, not a place where new validation/normalization
 *rules* get invented inline: normalization is small pure functions here
 (easy to unit test directly), validation delegates entirely to
 `app.validators.*`, image processing delegates entirely to
 `ImageProcessingService`, embedding generation delegates entirely to
-`CLIPEmbeddingService`/`BaseTextEmbeddingService`, and vector storage
+`CLIPEmbeddingService`/`BaseTextEmbeddingService`, catalog enrichment
+delegates entirely to `CatalogIntelligenceService`, and vector storage
 delegates entirely to `BaseVectorStore`. `app/api/products.py` calls this
 service and `UploadService` and nothing else — the router itself has no
 business logic.
@@ -56,10 +71,13 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.models.catalog_intelligence_result import CatalogIntelligenceResult
 from app.models.embedding import ImageEmbedding
 from app.models.product import Product
+from app.models.product_attributes import ProductAttributes
 from app.models.text_embedding import TextEmbedding
 from app.schemas.product import ProductCreate, ProductImage
+from app.services.catalog.catalog_intelligence_service import CatalogIntelligenceService
 from app.services.checksum_service import ChecksumService
 from app.services.embeddings.base import BaseEmbeddingService
 from app.services.embeddings.clip_service import CLIPEmbeddingService
@@ -86,6 +104,8 @@ class ProductService:
         image_processing_service: ImageProcessingService | None = None,
         embedding_service: BaseEmbeddingService | None = None,
         text_embedding_service: BaseTextEmbeddingService | None = None,
+        catalog_intelligence_service: CatalogIntelligenceService | None = None,
+        catalog_intelligence_enabled: bool | None = None,
         vector_store: BaseVectorStore | None = None,
         upload_dir: Path | None = None,
     ) -> None:
@@ -104,6 +124,16 @@ class ProductService:
             text_embedding_service
             if text_embedding_service is not None
             else SentenceTransformerEmbeddingService()
+        )
+        self._catalog_intelligence_service = (
+            catalog_intelligence_service
+            if catalog_intelligence_service is not None
+            else CatalogIntelligenceService()
+        )
+        self._catalog_intelligence_enabled = (
+            catalog_intelligence_enabled
+            if catalog_intelligence_enabled is not None
+            else settings.catalog_intelligence.enabled
         )
         self._vector_store = vector_store if vector_store is not None else QdrantVectorStore()
         self._upload_dir = upload_dir if upload_dir is not None else settings.storage.upload_dir
@@ -154,6 +184,25 @@ class ProductService:
             len(text_vector),
         )
 
+        if self._catalog_intelligence_enabled:
+            catalog_result = await self._catalog_intelligence_service.enrich(
+                name=product.name,
+                brand=product.brand,
+                category=product.category,
+                description=product.description,
+                image_path=image_metadata.processed_path,
+            )
+        else:
+            catalog_result = CatalogIntelligenceResult(
+                attributes=ProductAttributes(), tags=[], quality_score=0.0, processing_time=0.0
+            )
+        logger.info(
+            "Catalog intelligence enrichment applied: filename=%s, tags=%d, quality_score=%.2f",
+            image.stored_filename,
+            len(catalog_result.tags),
+            catalog_result.quality_score,
+        )
+
         file_metadata = parse_file_metadata(image, checksum_sha256=checksum)
 
         normalized_name = _normalize_name(product.name)
@@ -190,6 +239,7 @@ class ProductService:
             image_metadata=image_metadata,
             embedding=embedding,
             text_embedding=text_embedding,
+            catalog_intelligence=catalog_result,
         )
 
         vector_metadata = {
@@ -198,6 +248,12 @@ class ProductService:
             "category": normalized_category,
             "price": normalized_price,
             "description": normalized_description,
+            "color": catalog_result.attributes.color,
+            "material": catalog_result.attributes.material,
+            "gender": catalog_result.attributes.gender,
+            "season": catalog_result.attributes.season,
+            "style": catalog_result.attributes.style,
+            "tags": [tag.tag for tag in catalog_result.tags],
         }
         await self._vector_store.upsert_image(
             [VectorRecord(product_id=product_id, vector=embedding.vector, metadata=vector_metadata)]

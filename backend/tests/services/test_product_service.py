@@ -17,7 +17,10 @@ from app.exceptions.errors import (
     ValidationException,
     VectorStoreException,
 )
+from app.models.catalog_intelligence_result import CatalogIntelligenceResult
+from app.models.product_attributes import ProductAttributes
 from app.schemas.product import ProductCreate, ProductImage
+from app.services.catalog.catalog_intelligence_service import CatalogIntelligenceService
 from app.services.embeddings.base import BaseEmbeddingService
 from app.services.embeddings.text_base import BaseTextEmbeddingService
 from app.services.image_processing_service import ImageProcessingService
@@ -133,17 +136,52 @@ class _FakeVectorStore(BaseVectorStore):
         return True
 
 
+class _FakeCatalogIntelligenceService(CatalogIntelligenceService):
+    """A deterministic, instant stand-in for `CatalogIntelligenceService`.
+
+    Same reasoning as the other fakes here: `ProductService`'s own tests
+    care about orchestration (is the result wired into `Product`/the
+    vector metadata correctly?), not the real extraction/merge/scoring
+    logic — that's `test_catalog_intelligence_service.py`'s job. Defaults
+    to an empty result (no attributes, no tags) so tests that don't care
+    about catalog intelligence aren't affected by it.
+    """
+
+    def __init__(self, *, result: CatalogIntelligenceResult | None = None) -> None:
+        self._result = (
+            result
+            if result is not None
+            else CatalogIntelligenceResult(
+                attributes=ProductAttributes(), tags=[], quality_score=0.0, processing_time=0.0
+            )
+        )
+
+    async def enrich(
+        self,
+        *,
+        name: str,
+        brand: str | None,
+        category: str | None,
+        description: str | None,
+        image_path: Path,
+    ) -> CatalogIntelligenceResult:
+        return self._result
+
+
 def _build_service(
     tmp_path: Path,
     *,
     embedding_service: BaseEmbeddingService | None = None,
     text_embedding_service: BaseTextEmbeddingService | None = None,
+    catalog_intelligence_service: CatalogIntelligenceService | None = None,
+    catalog_intelligence_enabled: bool | None = None,
     vector_store: BaseVectorStore | None = None,
 ) -> ProductService:
     # Every test gets its own ImageProcessingService pointed at a tmp_path
     # subdirectory — never the real settings.storage.processed_dir — and
-    # fake embedding/vector-store services instead of loading a real CLIP
-    # or Sentence Transformers model, or talking to Qdrant.
+    # fake embedding/catalog-intelligence/vector-store services instead of
+    # loading a real CLIP or Sentence Transformers model, running the real
+    # catalog intelligence pipeline, or talking to Qdrant.
     return ProductService(
         upload_dir=tmp_path,
         image_processing_service=ImageProcessingService(processed_dir=tmp_path / "processed"),
@@ -155,6 +193,12 @@ def _build_service(
             if text_embedding_service is not None
             else _FakeTextEmbeddingService()
         ),
+        catalog_intelligence_service=(
+            catalog_intelligence_service
+            if catalog_intelligence_service is not None
+            else _FakeCatalogIntelligenceService()
+        ),
+        catalog_intelligence_enabled=catalog_intelligence_enabled,
         vector_store=vector_store if vector_store is not None else _FakeVectorStore(),
     )
 
@@ -419,6 +463,12 @@ class TestProcessUploadVectorStoreUpsert:
             "category": "men-tshirts",
             "price": 19.99,
             "description": None,
+            "color": None,
+            "material": None,
+            "gender": None,
+            "season": None,
+            "style": None,
+            "tags": [],
         }
 
     async def test_upserts_a_text_record_matching_the_built_product(self, tmp_path: Path) -> None:
@@ -442,6 +492,12 @@ class TestProcessUploadVectorStoreUpsert:
             "category": "men-tshirts",
             "price": 19.99,
             "description": None,
+            "color": None,
+            "material": None,
+            "gender": None,
+            "season": None,
+            "style": None,
+            "tags": [],
         }
 
     async def test_propagates_vector_store_exception(self, tmp_path: Path) -> None:
@@ -451,6 +507,64 @@ class TestProcessUploadVectorStoreUpsert:
 
         with pytest.raises(VectorStoreException):
             await service.process_upload(ProductCreate(name="Widget"), image)
+
+
+class TestProcessUploadCatalogIntelligence:
+    """Orchestration tests for Phase 7's `CatalogIntelligenceService` integration.
+
+    Merge/conflict-resolution/scoring logic itself is
+    `test_catalog_intelligence_service.py`'s job; these tests only check
+    that `ProductService` wires the result into `Product.catalog_intelligence`
+    and the vector store metadata, and that the feature flag disables it.
+    """
+
+    async def test_a_populated_result_is_wired_into_the_product_and_vector_metadata(
+        self, tmp_path: Path
+    ) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        vector_store = _FakeVectorStore()
+        catalog_result = CatalogIntelligenceResult(
+            attributes=ProductAttributes(
+                color="Red",
+                material="Mesh",
+                gender="Men",
+                season="Summer",
+                style="Running",
+                confidence=0.8,
+            ),
+            tags=[],
+            quality_score=0.75,
+            processing_time=0.02,
+        )
+        service = _build_service(
+            tmp_path,
+            vector_store=vector_store,
+            catalog_intelligence_service=_FakeCatalogIntelligenceService(result=catalog_result),
+        )
+
+        product = await service.process_upload(ProductCreate(name="Widget"), image)
+
+        assert product.catalog_intelligence == catalog_result
+        record = vector_store.upserted_image[0]
+        assert record.metadata["color"] == "Red"
+        assert record.metadata["material"] == "Mesh"
+        assert record.metadata["gender"] == "Men"
+        assert record.metadata["season"] == "Summer"
+        assert record.metadata["style"] == "Running"
+
+    async def test_disabling_catalog_intelligence_yields_the_default_empty_result(
+        self, tmp_path: Path
+    ) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        service = _build_service(tmp_path, catalog_intelligence_enabled=False)
+
+        product = await service.process_upload(ProductCreate(name="Widget"), image)
+
+        assert product.catalog_intelligence.attributes == ProductAttributes()
+        assert product.catalog_intelligence.tags == []
+        assert product.catalog_intelligence.quality_score == 0.0
 
 
 class TestProcessUploadValidation:

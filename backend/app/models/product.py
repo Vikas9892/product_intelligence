@@ -24,6 +24,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from app.models.catalog_intelligence_result import CatalogIntelligenceResult
 from app.models.embedding import ImageEmbedding
 from app.models.image_metadata import ImageMetadata
 from app.models.text_embedding import TextEmbedding
@@ -58,3 +59,8 @@ class Product(BaseModel):
     #: always present, generated immediately after the image embedding
     #: from the product's name/brand/category/description.
     text_embedding: TextEmbedding
+    #: Populated by `CatalogIntelligenceService` (Phase 7) — always
+    #: present, even when catalog intelligence is disabled via settings
+    #: (an empty `ProductAttributes`/no tags/zero quality score, rather
+    #: than making this field itself optional).
+    catalog_intelligence: CatalogIntelligenceResult

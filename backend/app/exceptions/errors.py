@@ -178,3 +178,18 @@ class HybridSearchException(AppException):
     status_code = 500
     code = "hybrid_search_error"
     message = "Failed to combine image and text search results."
+
+
+class CatalogIntelligenceException(AppException):
+    """Catalog enrichment (attribute extraction, tag generation, or quality
+    scoring) failed unexpectedly.
+
+    An infrastructure failure in deterministic, server-side processing —
+    not a client input problem — the product text/image being enriched
+    has already been validated and processed by the time this runs. Hence
+    a 500, the same reasoning as `HybridSearchException`.
+    """
+
+    status_code = 500
+    code = "catalog_intelligence_error"
+    message = "Failed to enrich the product with catalog intelligence."

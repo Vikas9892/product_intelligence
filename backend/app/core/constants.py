@@ -100,6 +100,14 @@ DEFAULT_TEXT_COLLECTION_NAME = "product_text"
 DEFAULT_SEARCH_TOP_K = 10
 MAX_SEARCH_TOP_K = 100
 
+# --- Catalog intelligence (Phase 7) ---
+# Resolution buckets, by total decoded pixel count (width * height).
+LOW_RESOLUTION_MAX_PIXELS = 250_000  # up to roughly 500x500
+MEDIUM_RESOLUTION_MAX_PIXELS = 1_000_000  # up to roughly 1000x1000
+# Brightness buckets, by mean normalized (0-1) grayscale pixel value.
+BRIGHTNESS_DARK_MAX = 0.35
+BRIGHTNESS_BRIGHT_MIN = 0.6
+
 # --- Pagination ---
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100

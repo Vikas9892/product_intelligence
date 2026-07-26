@@ -4,6 +4,13 @@ from PIL import Image
 
 from app.utils.image import (
     apply_orientation,
+    classify_brightness,
+    classify_color_name,
+    classify_orientation,
+    classify_resolution,
+    compute_aspect_ratio,
+    compute_brightness,
+    compute_dominant_color,
     generate_processed_filename,
     normalize_color_mode,
     resize_preserving_aspect_ratio,
@@ -119,3 +126,97 @@ class TestGenerateProcessedFilename:
 
     def test_is_a_no_op_extension_wise_for_an_already_jpg_name(self) -> None:
         assert generate_processed_filename("abc123.jpg") == "abc123.jpg"
+
+
+class TestComputeDominantColor:
+    def test_returns_the_only_color_in_a_solid_image(self) -> None:
+        image = Image.new("RGB", (40, 40), (200, 30, 30))
+
+        assert compute_dominant_color(image) == (200, 30, 30)
+
+    def test_returns_the_majority_color_when_mixed(self) -> None:
+        image = Image.new("RGB", (40, 40), (0, 0, 255))
+        for x in range(2):  # a small minority patch of a different color
+            for y in range(2):
+                image.putpixel((x, y), (255, 0, 0))
+
+        assert compute_dominant_color(image) == (0, 0, 255)
+
+    def test_handles_a_grayscale_image(self) -> None:
+        image = Image.new("L", (40, 40), 128)
+
+        color = compute_dominant_color(image)
+
+        assert color == (128, 128, 128)
+
+
+class TestClassifyColorName:
+    def test_classifies_pure_red(self) -> None:
+        assert classify_color_name((255, 0, 0)) == "red"
+
+    def test_classifies_pure_black(self) -> None:
+        assert classify_color_name((0, 0, 0)) == "black"
+
+    def test_classifies_pure_white(self) -> None:
+        assert classify_color_name((255, 255, 255)) == "white"
+
+    def test_classifies_a_near_match(self) -> None:
+        assert classify_color_name((250, 5, 5)) == "red"
+
+
+class TestComputeBrightness:
+    def test_black_image_has_zero_brightness(self) -> None:
+        image = Image.new("RGB", (20, 20), (0, 0, 0))
+
+        assert compute_brightness(image) == 0.0
+
+    def test_white_image_has_full_brightness(self) -> None:
+        image = Image.new("RGB", (20, 20), (255, 255, 255))
+
+        assert compute_brightness(image) == 1.0
+
+    def test_mid_gray_image_has_roughly_half_brightness(self) -> None:
+        image = Image.new("RGB", (20, 20), (128, 128, 128))
+
+        assert 0.4 < compute_brightness(image) < 0.6
+
+
+class TestClassifyBrightness:
+    def test_classifies_dark(self) -> None:
+        assert classify_brightness(0.1) == "dark"
+
+    def test_classifies_bright(self) -> None:
+        assert classify_brightness(0.9) == "bright"
+
+    def test_classifies_medium(self) -> None:
+        assert classify_brightness(0.5) == "medium"
+
+
+class TestClassifyOrientation:
+    def test_classifies_portrait(self) -> None:
+        assert classify_orientation(100, 200) == "portrait"
+
+    def test_classifies_landscape(self) -> None:
+        assert classify_orientation(200, 100) == "landscape"
+
+    def test_classifies_square(self) -> None:
+        assert classify_orientation(150, 150) == "square"
+
+
+class TestComputeAspectRatio:
+    def test_computes_a_wide_ratio(self) -> None:
+        assert compute_aspect_ratio(200, 100) == 2.0
+
+    def test_computes_a_tall_ratio(self) -> None:
+        assert compute_aspect_ratio(100, 200) == 0.5
+
+
+class TestClassifyResolution:
+    def test_classifies_low_resolution(self) -> None:
+        assert classify_resolution(100, 100) == "low_resolution"
+
+    def test_classifies_medium_resolution(self) -> None:
+        assert classify_resolution(800, 800) == "medium_resolution"
+
+    def test_classifies_high_resolution(self) -> None:
+        assert classify_resolution(2000, 2000) == "high_resolution"

@@ -9,6 +9,7 @@ unit-testable against an in-memory image, no disk or service required.
 """
 
 from pathlib import Path
+from typing import cast
 
 from PIL import Image, ImageOps
 
@@ -79,6 +80,101 @@ def resize_preserving_aspect_ratio(image: Image.Image, *, max_dimension: int) ->
     scale = min(max_dimension / width, max_dimension / height)
     new_size = (max(1, round(width * scale)), max(1, round(height * scale)))
     return image.resize(new_size, Image.Resampling.LANCZOS)
+
+
+#: A small, fixed set of reference colors — Phase 7's dominant-color
+#: classification picks whichever of these is nearest (by squared
+#: Euclidean RGB distance) to an image's actual dominant color, the same
+#: "deterministic, not learned" spirit as `TextAttributeExtractionService`'s
+#: keyword dictionaries.
+_NAMED_COLORS: dict[str, tuple[int, int, int]] = {
+    "black": (0, 0, 0),
+    "white": (255, 255, 255),
+    "gray": (128, 128, 128),
+    "red": (255, 0, 0),
+    "orange": (255, 165, 0),
+    "yellow": (255, 255, 0),
+    "green": (0, 128, 0),
+    "blue": (0, 0, 255),
+    "purple": (128, 0, 128),
+    "pink": (255, 192, 203),
+    "brown": (139, 69, 19),
+}
+
+
+def compute_dominant_color(image: Image.Image) -> tuple[int, int, int]:
+    """Return the single most representative RGB color in `image`.
+
+    Downsamples to a small (50x50) thumbnail first — the dominant color
+    of a product photo doesn't change based on resolution, and scanning
+    every pixel of a full-size image for this would be needless work.
+    """
+    thumbnail = image.convert("RGB").resize((50, 50), Image.Resampling.LANCZOS)
+    color_counts = thumbnail.getcolors(maxcolors=thumbnail.width * thumbnail.height)
+    # `maxcolors` above covers every pixel in the thumbnail, so `getcolors`
+    # can never actually return `None` here — this narrows its `Optional`
+    # return type rather than handling a case that can't happen.
+    assert color_counts is not None
+    _, dominant_rgb = max(color_counts, key=lambda item: item[0])
+    # `thumbnail` was converted to "RGB" above, so Pillow's own (mode-
+    # dependent) `getcolors` stub is imprecise here — at runtime this is
+    # always a 3-tuple, never the single-int form "L"/"1"-mode images use.
+    return cast(tuple[int, int, int], dominant_rgb)
+
+
+def classify_color_name(rgb: tuple[int, int, int]) -> str:
+    """Return the closest named color (from a small, fixed palette) to `rgb`."""
+    return min(
+        _NAMED_COLORS,
+        key=lambda name: sum((a - b) ** 2 for a, b in zip(rgb, _NAMED_COLORS[name], strict=True)),
+    )
+
+
+def compute_brightness(image: Image.Image) -> float:
+    """Return `image`'s mean pixel brightness, normalized to `[0, 1]`."""
+    grayscale = image.convert("L")
+    histogram = grayscale.histogram()
+    total_pixels = grayscale.width * grayscale.height
+    weighted_sum = sum(value * count for value, count in enumerate(histogram))
+    return (weighted_sum / total_pixels) / 255 if total_pixels else 0.0
+
+
+def classify_brightness(brightness: float) -> str:
+    """Bucket a normalized `[0, 1]` brightness value into "dark"/"medium"/"bright"."""
+    if brightness <= constants.BRIGHTNESS_DARK_MAX:
+        return "dark"
+    if brightness >= constants.BRIGHTNESS_BRIGHT_MIN:
+        return "bright"
+    return "medium"
+
+
+def classify_orientation(width: int, height: int) -> str:
+    """Bucket an image's dimensions into "portrait"/"landscape"/"square"."""
+    if height > width:
+        return "portrait"
+    if width > height:
+        return "landscape"
+    return "square"
+
+
+def compute_aspect_ratio(width: int, height: int) -> float:
+    """Return `width / height`."""
+    return width / height
+
+
+def classify_resolution(width: int, height: int) -> str:
+    """Bucket an image's total pixel count into a "*_resolution" tag.
+
+    Thresholds are fixed, codebase-decided constants
+    (`constants.LOW_RESOLUTION_MAX_PIXELS`/`MEDIUM_RESOLUTION_MAX_PIXELS`),
+    not something an operator would tune per-deployment.
+    """
+    total_pixels = width * height
+    if total_pixels <= constants.LOW_RESOLUTION_MAX_PIXELS:
+        return "low_resolution"
+    if total_pixels <= constants.MEDIUM_RESOLUTION_MAX_PIXELS:
+        return "medium_resolution"
+    return "high_resolution"
 
 
 def generate_processed_filename(stored_filename: str) -> str:

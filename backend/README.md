@@ -1835,6 +1835,200 @@ is where it's first needed — a dedicated `source.py` for one three-value
 enum shared by two closely-related models would be more indirection than
 the enum itself warrants.
 
+## Phase 8 — Duplicate Detection Engine design decisions
+
+This phase adds a duplicate-detection step that evaluates every uploaded
+product against the existing catalog *before* it's indexed, combining
+four independent similarity signals (image, text, metadata, attributes)
+into one weighted confidence score. Five pieces landed, in dependency
+order: the domain models, `SimilarityScorer`, `DuplicateDetectionService`,
+upload-pipeline integration (`OFF`/`WARN`/`BLOCK` modes), and a dedicated
+`POST /products/check-duplicate` endpoint for checking without uploading.
+
+### Architecture
+
+```
+                     ProductService.process_upload
+                              │
+                (after catalog intelligence)
+                              ▼
+                  DuplicateDetectionService.detect
+                              │
+                              ▼
+                  HybridSearchService.search
+              (image + text query, top-K candidates)
+                              │
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+     one HybridSearchResult            one HybridSearchResult
+     per candidate, per candidate...
+                              │
+                              ▼
+              SimilarityScorer.score (once per candidate)
+          ┌──────────┬──────────┬──────────┬──────────┐
+          ▼          ▼          ▼          ▼          │
+       image       text     metadata   attribute       │
+     (reused      (reused    (rapidfuzz  (rapidfuzz     │
+      hybrid       hybrid    name/brand/  ProductAttributes
+      search       search    category)    fields)        │
+      score)       score)                                │
+          └──────────┴──────────┴──────────┴─────────────┘
+                              ▼
+                      DuplicateResult
+             (per-signal weight/contribution + overall)
+                              ▼
+              rank by overall_similarity, threshold the best
+                              ▼
+                      DuplicateDecision
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+        OFF: skip                    WARN: store + attach
+                                      BLOCK: reject (409), don't index
+```
+
+`SimilarityScorer` is deliberately the one place similarity is computed —
+`DuplicateDetectionService` only ranks/thresholds what it returns. That
+separation is the phase's own explicit design goal: the same scorer can
+later be reused by a recommendation engine or a cross-encoder reranker
+without dragging retrieval/decision logic along with it.
+
+### Similarity Signals
+
+Given the product being checked and one candidate already retrieved by
+`HybridSearchService`, `SimilarityScorer.score` computes four signals and
+bundles them into a `DuplicateResult`:
+
+- **image** — the candidate's own `image_score` from hybrid retrieval
+  (`HybridSearchResult` gained this field, alongside the existing fused
+  `score`, specifically so this signal could be reused rather than
+  re-embedding the image a second time just to get an unfused number).
+- **text** — the same reuse, using `candidate.text_score`.
+- **metadata** — `rapidfuzz.fuzz.token_sort_ratio`, case-insensitive and
+  word-order-insensitive, averaged over whichever of name/brand/category
+  is present on both sides. Tolerates typos ("Nike" vs "Nikee") and the
+  candidate's slugified category metadata ("running-shoes" vs "Running
+  Shoes") without either being scored as a real difference.
+- **attribute** — the same fuzzy-ratio approach, field-by-field, over
+  `ProductAttributes`' brand/category/color/material/style/gender against
+  the candidate's metadata. A field missing on either side is excluded
+  from the average rather than penalized — a product simply lacking a
+  detected `material` isn't evidence of dissimilarity.
+
+Each signal is weighted and summed:
+
+```
+overall_similarity = IMAGE_WEIGHT * image_score
+                    + TEXT_WEIGHT * text_score
+                    + METADATA_WEIGHT * metadata_score
+                    + ATTRIBUTE_WEIGHT * attribute_score
+```
+
+clamped to `[0, 1]` (cosine similarity can stray slightly outside that
+range). `DuplicateDetectionSettings` validates the four weights sum to
+exactly `1.0` — they represent a complete split of "how much each signal
+counts," so a misconfigured deployment fails fast at startup rather than
+silently producing a confidence score that doesn't mean what it claims to.
+
+### Decision Making
+
+`DuplicateDetectionService.detect` retrieves `DUPLICATE_DETECTION__TOP_K`
+candidates via `HybridSearchService`, scores each independently, ranks by
+`overall_similarity`, and thresholds the best one against
+`DUPLICATE_DETECTION__THRESHOLD`. The winner (if any) becomes
+`matched_product`/`confidence`; every scored candidate is exposed via
+`top_candidates`, highest similarity first, so a caller can inspect the
+full picture rather than just the winner. No candidates at all (an empty
+catalog, or a genuinely novel product) yields a `DuplicateDecision` with
+`is_duplicate=False`, `confidence=0.0`, and an explanatory `reason` —
+never an error.
+
+### Upload Integration
+
+`ProductService.process_upload` calls `DuplicateDetectionService.detect`
+right after catalog intelligence enrichment (it needs the resolved
+`ProductAttributes` for the attribute signal), using the raw submitted
+name/brand/category/description — the same reasoning already established
+for text embedding and catalog intelligence. Three modes
+(`DuplicateDetectionMode`, configured via `DUPLICATE_DETECTION__MODE`):
+
+- **`OFF`** — detection never runs; `Product.duplicate_decision` is still
+  always populated (mirroring `catalog_intelligence`'s "always present"
+  convention), just with a neutral "disabled" decision.
+- **`WARN`** — detection runs, the product is stored/indexed regardless
+  of the outcome, and the decision is attached to `UploadResponse` for
+  the caller's own judgment.
+- **`BLOCK`** — the exact same detection, but a flagged duplicate raises
+  `ConflictException` (409) *before* normalization, `Product`
+  construction, or the vector store upsert — a rejected upload never
+  becomes searchable and never needs a compensating delete.
+
+### Duplicate-Check Endpoint
+
+`POST /products/check-duplicate` answers "would this be a duplicate?"
+without ever storing or indexing anything — useful for a client that
+wants to warn a user *before* they commit to uploading. `DuplicateCheckService`
+composes `ImageProcessingService` (to get the processed image path
+catalog intelligence needs), `CatalogIntelligenceService`, and
+`DuplicateDetectionService` — the same three steps `ProductService` runs,
+minus normalization/validation/persistence. Accepts optional `top_k`/
+`threshold` form fields that override the configured defaults for that
+one call only. The response never includes a raw embedding vector,
+matching every other response schema in this codebase (`EmbeddingInfo`,
+`ProductSearchResult`).
+
+### Configuration
+
+New settings, all under `DuplicateDetectionSettings`
+(`app/core/settings.py`), env prefix `DUPLICATE_DETECTION__`:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `DUPLICATE_DETECTION__MODE` | `warn` | `off`/`warn`/`block` |
+| `DUPLICATE_DETECTION__THRESHOLD` | `0.90` | Minimum `overall_similarity` to count as a match |
+| `DUPLICATE_DETECTION__TOP_K` | `10` | Candidates retrieved per check |
+| `DUPLICATE_DETECTION__IMAGE_WEIGHT` | `0.35` | Confidence formula weight |
+| `DUPLICATE_DETECTION__TEXT_WEIGHT` | `0.25` | Confidence formula weight |
+| `DUPLICATE_DETECTION__METADATA_WEIGHT` | `0.20` | Confidence formula weight |
+| `DUPLICATE_DETECTION__ATTRIBUTE_WEIGHT` | `0.20` | Confidence formula weight |
+
+The four weights must sum to `1.0` (validated at settings-load time).
+
+### Explicitly out of scope this phase
+
+No cross-encoder reranking, no LLM verification, no human review
+workflow, no background workers, no OCR, no recommendation engine, no
+pricing intelligence, no Redis caching, no UI/frontend, no unrelated
+database migrations — matching the phase spec's own "Do NOT Implement"
+list. A recommendation engine and cross-encoder reranking are explicitly
+future phases that will *reuse* `SimilarityScorer`, not something this
+phase builds itself.
+
+### Why does `HybridSearchResult` gain `image_score`/`text_score` fields
+instead of `DuplicateDetectionService` re-running image/text search itself?
+
+`HybridSearchService` already computes both per-modality scores
+internally (`_FusionEntry.image_score`/`text_score`) before fusing them
+into the single `score` `HybridSearchService` returns to search callers
+— exposing them on `HybridSearchResult` reuses a number that's already
+been computed rather than a `SimilarityScorer` needing to re-run
+`SearchService`/`TextSearchService` (and pay the same embedding cost)
+just to recover it. The two new fields are additive and default to
+`0.0`, so `POST /products/search`'s existing response schema (which maps
+`HybridSearchResult` field-by-field, not by unpacking the whole model) is
+unaffected.
+
+### Why does `ProductService` reprocess the image a second time during
+duplicate detection, when it already processed it once for its own embedding?
+
+`DuplicateDetectionService` delegates candidate retrieval entirely to
+`HybridSearchService`, which (via `SearchService`) always re-standardizes
+whatever image path it's given — that's how single-modality image search
+already worked before this phase, and reusing it here (rather than
+teaching `HybridSearchService` to accept a pre-computed embedding) keeps
+duplicate detection from needing its own parallel image-processing path.
+It's a real, accepted redundancy — the same trade-off `HybridSearchService`
+already documents for over-fetching in score fusion — not an oversight.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -2655,5 +2849,111 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden catalog intelligence test coverage and document Phase 7 (Phase 7 milestone 6/6)"
+git push
+```
+
+## Phase 8 — Duplicate Detection Engine (built from scratch)
+
+```bash
+# Milestone 1/6 — duplicate detection domain models
+#   app/models/similarity_signal.py — SimilaritySignal
+#   app/models/duplicate_candidate.py — DuplicateCandidate
+#   app/models/duplicate_result.py — DuplicateResult (SimilarityScorer's
+#   detailed per-candidate output)
+#   app/models/duplicate_decision.py — DuplicateDecision
+#   app/core/constants.py — added DuplicateDetectionMode (OFF/WARN/BLOCK)
+#   app/exceptions/errors.py — added DuplicateDetectionException
+#   tests/models/test_{similarity_signal,duplicate_candidate,
+#   duplicate_result,duplicate_decision}.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add duplicate detection domain models (Phase 8 milestone 1/6)"
+
+# Milestone 2/6 — SimilarityScorer
+#   app/models/search.py — HybridSearchResult gained image_score/text_score
+#   app/services/vectorstore/hybrid_search_service.py — _fuse/
+#   _single_modality_result populate the two new fields
+#   app/core/settings.py — added DuplicateDetectionSettings (weights
+#   validated to sum to 1.0)
+#   backend/.env.example — documented the seven new DUPLICATE_DETECTION__ variables
+#   app/services/duplicate/similarity_scorer.py — hand-written (rapidfuzz
+#   token_sort_ratio for metadata/attribute signals; reuses hybrid
+#   search's own image_score/text_score)
+#   tests/models/test_search.py, tests/services/vectorstore/
+#   test_hybrid_search_service.py, tests/core/test_settings.py — extended
+#   tests/services/duplicate/test_similarity_scorer.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add SimilarityScorer for duplicate detection (Phase 8 milestone 2/6)"
+
+# Milestone 3/6 — DuplicateDetectionService orchestrator
+#   app/utils/text.py — build_text_representation extracted out of
+#   ProductService (shared, avoids a circular import once ProductService
+#   composes this service next milestone)
+#   app/services/duplicate/duplicate_detection_service.py — hand-written:
+#   retrieves candidates via HybridSearchService, scores each via
+#   SimilarityScorer, ranks/thresholds into a DuplicateDecision
+#   tests/utils/test_text.py, tests/services/duplicate/
+#   test_duplicate_detection_service.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add DuplicateDetectionService orchestrator (Phase 8 milestone 3/6)"
+
+# Milestone 4/6 — upload pipeline integration
+#   app/models/product.py — Product gained duplicate_decision
+#   app/services/product_service.py — composes DuplicateDetectionService,
+#   calls .detect() right after catalog intelligence enrichment;
+#   BLOCK-mode duplicates raise ConflictException before normalization/
+#   indexing
+#   app/schemas/product.py — added DuplicateInfo, UploadResponse gained duplicate
+#   app/api/products.py — maps Product.duplicate_decision onto the response
+#   tests/models/test_product.py, tests/services/test_product_service.py,
+#   tests/schemas/test_product.py, tests/api/test_products.py,
+#   tests/api/test_search.py — updated for the new required field /
+#   OFF mode in unrelated suites / new TestProcessUploadDuplicateDetection class
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: wire duplicate detection into the upload pipeline (Phase 8 milestone 4/6)"
+
+# Milestone 5/6 — duplicate-check API endpoint
+#   app/services/duplicate/duplicate_detection_service.py — detect()
+#   gained per-call top_k/threshold overrides
+#   app/services/duplicate/duplicate_check_service.py — hand-written:
+#   image processing -> catalog intelligence -> duplicate detection,
+#   without storing/indexing anything
+#   app/dependencies/duplicate.py — get_duplicate_check_service
+#   app/schemas/duplicate.py — DuplicateCandidateInfo,
+#   DuplicateSignalBreakdown, DuplicateCheckResponse
+#   app/api/products.py — POST /products/check-duplicate
+#   tests/services/duplicate/test_duplicate_check_service.py,
+#   tests/dependencies/test_duplicate.py, tests/schemas/test_duplicate.py,
+#   tests/api/test_check_duplicate.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add duplicate-check API endpoint (Phase 8 milestone 5/6)"
+
+# Milestone 6/6 — test hardening + documentation
+#   tests/services/duplicate/test_duplicate_detection_service.py —
+#   concurrent detect() calls each return their own uncontaminated
+#   decision, unicode/whitespace-only/very-long-text malformed input
+#   tests/test_application.py — extended for the new registered route
+#   backend/README.md — this section
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+uv run uvicorn app.main:app --reload   # manual smoke test: upload a
+                                        # product twice with WARN mode,
+                                        # confirm the second upload's
+                                        # "duplicate" field flags a match;
+                                        # then call
+                                        # POST /products/check-duplicate
+                                        # against the same product without
+                                        # uploading a third time
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden duplicate detection test coverage and document Phase 8 (Phase 8 milestone 6/6)"
 git push
 ```

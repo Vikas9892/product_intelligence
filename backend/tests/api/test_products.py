@@ -25,6 +25,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
+from qdrant_client import QdrantClient
 
 from app.application import create_app
 from app.core.config import settings
@@ -35,6 +36,7 @@ from app.services.embeddings.model_manager import ModelManager
 from app.services.image_processing_service import ImageProcessingService
 from app.services.product_service import ProductService
 from app.services.upload_service import UploadService
+from app.services.vectorstore.qdrant_store import QdrantVectorStore
 
 _UPLOAD_URL = f"{settings.application.api_prefix}/products/upload"
 
@@ -45,6 +47,18 @@ _UPLOAD_URL = f"{settings.application.api_prefix}/products/upload"
 # once, not once per request.
 _TINY_MODEL_NAME = "hf-internal-testing/tiny-random-CLIPModel"
 _shared_model_manager = ModelManager(device="cpu")
+
+# An in-memory Qdrant instance (the real client's own local mode, not a
+# fake) instead of a real server — these tests don't need to assert
+# anything about the vector store itself (that's `test_qdrant_store.py`'s
+# job), just that ProductService's upsert call doesn't blow up the
+# request.
+_vector_size = _shared_model_manager.get_model(_TINY_MODEL_NAME)[0].config.projection_dim
+_shared_vector_store = QdrantVectorStore(
+    client=QdrantClient(location=":memory:"),
+    collection_name="test_products",
+    vector_size=_vector_size,
+)
 
 
 def _valid_jpeg_bytes(
@@ -63,6 +77,7 @@ def _override_services(app: FastAPI, upload_dir: Path) -> None:
         embedding_service=CLIPEmbeddingService(
             model_name=_TINY_MODEL_NAME, model_manager=_shared_model_manager
         ),
+        vector_store=_shared_vector_store,
     )
 
 

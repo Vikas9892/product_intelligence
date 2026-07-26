@@ -29,21 +29,44 @@ def _store(*, collection_name: str = "test_collection") -> QdrantVectorStore:
 
 
 class TestCollectionCreation:
-    def test_creates_the_collection_if_it_does_not_exist(self) -> None:
+    def test_construction_does_not_touch_qdrant(self) -> None:
+        """Constructing a store must not require a live connection.
+
+        `ProductService`/`SearchService` build a `QdrantVectorStore` as
+        part of their own construction — if that eagerly hit Qdrant, every
+        dependency-injection unit test (and the app itself, at startup)
+        would need a running Qdrant server just to build an object graph.
+        """
         client = QdrantClient(location=":memory:")
-        assert client.collection_exists("widgets") is False
 
         QdrantVectorStore(client=client, collection_name="widgets", vector_size=_VECTOR_SIZE)
+
+        assert client.collection_exists("widgets") is False
+
+    async def test_creates_the_collection_on_first_use(self) -> None:
+        client = QdrantClient(location=":memory:")
+        store = QdrantVectorStore(
+            client=client, collection_name="widgets", vector_size=_VECTOR_SIZE
+        )
+        assert client.collection_exists("widgets") is False
+
+        await store.exists(uuid4())
 
         assert client.collection_exists("widgets") is True
 
-    def test_is_idempotent_against_an_already_existing_collection(self) -> None:
+    async def test_is_idempotent_against_an_already_existing_collection(self) -> None:
         client = QdrantClient(location=":memory:")
-        QdrantVectorStore(client=client, collection_name="widgets", vector_size=_VECTOR_SIZE)
+        store = QdrantVectorStore(
+            client=client, collection_name="widgets", vector_size=_VECTOR_SIZE
+        )
+        await store.exists(uuid4())
 
-        # Constructing a second store against the same client/collection
-        # must not raise or attempt to recreate it.
-        QdrantVectorStore(client=client, collection_name="widgets", vector_size=_VECTOR_SIZE)
+        # A second store against the same client/collection must not
+        # raise or attempt to recreate it on its own first use.
+        second_store = QdrantVectorStore(
+            client=client, collection_name="widgets", vector_size=_VECTOR_SIZE
+        )
+        await second_store.exists(uuid4())
 
         assert client.collection_exists("widgets") is True
 
@@ -123,14 +146,15 @@ class TestHealth:
 
 
 class TestErrorWrapping:
-    async def test_search_against_a_missing_collection_raises_vector_store_exception(
+    async def test_search_against_an_unreachable_client_raises_vector_store_exception(
         self,
     ) -> None:
-        client = QdrantClient(location=":memory:")
+        # An unreachable URL (not `:memory:`) so the underlying client
+        # call genuinely fails, exercising `_ensure_collection`'s
+        # error-wrapping path (`search`'s own lazy collection check runs
+        # before the search request itself).
+        client = QdrantClient(url="http://localhost:1", timeout=1)
         store = QdrantVectorStore(client=client, collection_name="real", vector_size=_VECTOR_SIZE)
-        # Force an operation against a collection this store's client
-        # never created, to exercise the error-wrapping path.
-        store._collection_name = "does-not-exist"
 
         with pytest.raises(VectorStoreException):
             await store.search([1.0, 0.0, 0.0, 0.0], top_k=5)

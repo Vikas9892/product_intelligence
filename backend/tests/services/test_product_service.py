@@ -3,6 +3,7 @@
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from PIL import Image
@@ -12,6 +13,7 @@ from app.exceptions.errors import (
     EmbeddingGenerationException,
     InvalidImageException,
     ValidationException,
+    VectorStoreException,
 )
 from app.schemas.product import ProductCreate, ProductImage
 from app.services.embeddings.base import BaseEmbeddingService
@@ -23,6 +25,7 @@ from app.services.product_service import (
     _normalize_name,
     _normalize_price,
 )
+from app.services.vectorstore.base import BaseVectorStore, VectorRecord
 
 
 class _FakeEmbeddingService(BaseEmbeddingService):
@@ -54,18 +57,59 @@ class _FakeEmbeddingService(BaseEmbeddingService):
         return [await self.generate_embedding(path) for path in image_paths]
 
 
+class _FakeVectorStore(BaseVectorStore):
+    """A deterministic, instant stand-in for `QdrantVectorStore`.
+
+    `ProductService`'s own tests care about orchestration (is the right
+    `VectorRecord` upserted?), not Qdrant behaviour itself — that's
+    `test_qdrant_store.py`'s job.
+    """
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self._fail = fail
+        self.upserted: list[VectorRecord] = []
+
+    async def upsert(self, records: list[VectorRecord]) -> None:
+        if self._fail:
+            raise VectorStoreException("fake vector store failure")
+        self.upserted.extend(records)
+
+    async def search(
+        self,
+        query_vector: list[float],
+        *,
+        top_k: int,
+        filters: dict[str, Any] | None = None,
+    ) -> list:  # type: ignore[type-arg]
+        return []
+
+    async def delete(self, product_ids: list) -> None:  # type: ignore[type-arg]
+        return None
+
+    async def exists(self, product_id) -> bool:  # type: ignore[no-untyped-def]
+        return False
+
+    async def health(self) -> bool:
+        return True
+
+
 def _build_service(
-    tmp_path: Path, *, embedding_service: BaseEmbeddingService | None = None
+    tmp_path: Path,
+    *,
+    embedding_service: BaseEmbeddingService | None = None,
+    vector_store: BaseVectorStore | None = None,
 ) -> ProductService:
     # Every test gets its own ImageProcessingService pointed at a tmp_path
-    # subdirectory — never the real settings.storage.processed_dir — and a
-    # fake embedding service instead of loading a real CLIP model.
+    # subdirectory — never the real settings.storage.processed_dir — and
+    # fake embedding/vector-store services instead of loading a real CLIP
+    # model or talking to Qdrant.
     return ProductService(
         upload_dir=tmp_path,
         image_processing_service=ImageProcessingService(processed_dir=tmp_path / "processed"),
         embedding_service=(
             embedding_service if embedding_service is not None else _FakeEmbeddingService()
         ),
+        vector_store=vector_store if vector_store is not None else _FakeVectorStore(),
     )
 
 
@@ -227,6 +271,35 @@ class TestProcessUploadEmbedding:
         service = _build_service(tmp_path, embedding_service=_FakeEmbeddingService(fail=True))
 
         with pytest.raises(EmbeddingGenerationException):
+            await service.process_upload(ProductCreate(name="Widget"), image)
+
+
+class TestProcessUploadVectorStoreUpsert:
+    async def test_upserts_a_record_matching_the_built_product(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        vector_store = _FakeVectorStore()
+        service = _build_service(tmp_path, vector_store=vector_store)
+        product_create = ProductCreate(name="Nike Widget", category="Men Tshirts", price=19.99)
+
+        product = await service.process_upload(product_create, image)
+
+        assert len(vector_store.upserted) == 1
+        record = vector_store.upserted[0]
+        assert record.product_id == product.id
+        assert record.vector == pytest.approx(product.embedding.vector)
+        assert record.metadata == {
+            "name": "Nike Widget",
+            "category": "men-tshirts",
+            "price": 19.99,
+        }
+
+    async def test_propagates_vector_store_exception(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        service = _build_service(tmp_path, vector_store=_FakeVectorStore(fail=True))
+
+        with pytest.raises(VectorStoreException):
             await service.process_upload(ProductCreate(name="Widget"), image)
 
 

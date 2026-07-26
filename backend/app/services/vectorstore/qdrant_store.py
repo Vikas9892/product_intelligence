@@ -6,13 +6,23 @@ other service in this codebase (`ImageProcessingService`,
 `CLIPEmbeddingService`, ...), each one runs inside `run_in_threadpool` so
 it never blocks the event loop.
 
-The collection is created once, at construction time, using cosine
-distance — `CLIPEmbeddingService` already L2-normalizes every embedding it
-produces specifically so cosine similarity is meaningful (see that
-module's docstring), so cosine is the only distance metric that makes
-sense to configure here.
+The collection is created lazily — on first actual use (upsert, search,
+delete, or exists), not at construction time — using the same
+double-checked-locking pattern `ModelManager` (Phase 4) uses for lazily
+loading a model exactly once. This matters for the same reason it did
+there: constructing a `QdrantVectorStore` (which `ProductService`/
+`SearchService` do as part of their own construction) must not require a
+live Qdrant connection, or every dependency-injection unit test — and the
+whole application at startup — would need a running Qdrant just to build
+an object graph, before any request ever actually needs one.
+
+Cosine distance is the only metric configured for the collection, since
+`CLIPEmbeddingService` already L2-normalizes every embedding it produces
+specifically so cosine similarity is meaningful (see that module's
+docstring).
 """
 
+import threading
 from typing import Any
 from uuid import UUID
 
@@ -48,39 +58,47 @@ class QdrantVectorStore(BaseVectorStore):
         self._vector_size = (
             vector_size if vector_size is not None else settings.vector_store.vector_size
         )
-        self._ensure_collection()
+        self._collection_ready = False
+        self._collection_lock = threading.Lock()
 
     def _ensure_collection(self) -> None:
         """Create the collection (cosine distance) if it doesn't already exist.
 
-        Runs synchronously at construction time, not lazily on first
-        request — a misconfigured connection or dimension fails fast when
-        the owning service is built, the same way `UploadService`/
-        `ImageProcessingService` eagerly `mkdir` their directories at
-        construction rather than waiting for first use.
+        Double-checked locking: an already-ready collection (the common
+        case) never contends on the lock at all, and concurrent first
+        callers only trigger one real `create_collection` call between
+        them — the exact same shape as `ModelManager.get_model`.
         """
-        try:
-            if not self._client.collection_exists(self._collection_name):
-                logger.info(
-                    "Creating Qdrant collection '%s' (size=%d, distance=cosine)",
-                    self._collection_name,
-                    self._vector_size,
-                )
-                self._client.create_collection(
-                    collection_name=self._collection_name,
-                    vectors_config=qmodels.VectorParams(
-                        size=self._vector_size, distance=qmodels.Distance.COSINE
-                    ),
-                )
-        except Exception as exc:
-            raise VectorStoreException(
-                f"Failed to ensure Qdrant collection '{self._collection_name}' exists."
-            ) from exc
+        if self._collection_ready:
+            return
+
+        with self._collection_lock:
+            if self._collection_ready:
+                return
+            try:
+                if not self._client.collection_exists(self._collection_name):
+                    logger.info(
+                        "Creating Qdrant collection '%s' (size=%d, distance=cosine)",
+                        self._collection_name,
+                        self._vector_size,
+                    )
+                    self._client.create_collection(
+                        collection_name=self._collection_name,
+                        vectors_config=qmodels.VectorParams(
+                            size=self._vector_size, distance=qmodels.Distance.COSINE
+                        ),
+                    )
+                self._collection_ready = True
+            except Exception as exc:
+                raise VectorStoreException(
+                    f"Failed to ensure Qdrant collection '{self._collection_name}' exists."
+                ) from exc
 
     async def upsert(self, records: list[VectorRecord]) -> None:
         if not records:
             return
 
+        await run_in_threadpool(self._ensure_collection)
         points = [
             qmodels.PointStruct(
                 id=str(record.product_id), vector=record.vector, payload=record.metadata
@@ -104,6 +122,7 @@ class QdrantVectorStore(BaseVectorStore):
         filters: dict[str, Any] | None = None,
     ) -> list[NearestNeighbor]:
         query_filter = _build_filter(filters) if filters else None
+        await run_in_threadpool(self._ensure_collection)
         try:
             response = await run_in_threadpool(
                 self._client.query_points,
@@ -127,6 +146,7 @@ class QdrantVectorStore(BaseVectorStore):
         if not product_ids:
             return
 
+        await run_in_threadpool(self._ensure_collection)
         try:
             await run_in_threadpool(
                 self._client.delete,
@@ -139,6 +159,7 @@ class QdrantVectorStore(BaseVectorStore):
             raise VectorStoreException("Failed to delete vectors from the vector store.") from exc
 
     async def exists(self, product_id: UUID) -> bool:
+        await run_in_threadpool(self._ensure_collection)
         try:
             records = await run_in_threadpool(
                 self._client.retrieve,

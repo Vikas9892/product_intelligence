@@ -10,11 +10,15 @@ class TestProductSearchResult:
         product_id = uuid4()
 
         result = ProductSearchResult(
-            product_id=product_id, score=0.94, metadata={"category": "shoes"}
+            product_id=product_id,
+            score=0.94,
+            matched_modalities=["image", "text"],
+            metadata={"category": "shoes"},
         )
 
         assert result.product_id == product_id
         assert result.score == 0.94
+        assert result.matched_modalities == ["image", "text"]
         assert result.metadata == {"category": "shoes"}
 
 
@@ -22,7 +26,12 @@ class TestProductSearchResponse:
     def test_round_trips_through_model_dump_and_validate(self) -> None:
         response = ProductSearchResponse(
             results=[
-                ProductSearchResult(product_id=uuid4(), score=0.9, metadata={"name": "Widget"})
+                ProductSearchResult(
+                    product_id=uuid4(),
+                    score=0.9,
+                    matched_modalities=["image"],
+                    metadata={"name": "Widget"},
+                )
             ]
         )
 

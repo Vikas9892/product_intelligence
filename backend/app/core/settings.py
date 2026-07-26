@@ -175,6 +175,43 @@ class CatalogIntelligenceSettings(BaseModel):
     quality_consistency_weight: float = Field(default=0.20, ge=0)
 
 
+class DuplicateDetectionSettings(BaseModel):
+    """Duplicate detection configuration for `DuplicateDetectionService` (Phase 8).
+
+    The phase spec lists a separate `ENABLE_DUPLICATE_DETECTION` flag
+    alongside `DUPLICATE_MODE`'s own `OFF`/`WARN`/`BLOCK` values; since
+    `OFF` already means "don't run duplicate detection," a second on/off
+    flag would just be a redundant, independently-settable way to express
+    the same disablement (and could disagree with `mode` — `enabled=True`
+    with `mode=OFF`, or vice versa). `mode` alone is the single source of
+    truth here, the same "one flag, not two disagreeing ones" reasoning
+    applied. `threshold` is the minimum `overall_similarity` a candidate
+    must reach to be treated as a match; `top_k` bounds how many
+    candidates `HybridSearchService` retrieves for scoring; the four
+    `*_weight` fields are `SimilarityScorer`'s confidence formula and are
+    required to sum to `1.0` (validated below) since they represent a
+    complete split of "how much each signal counts."
+    """
+
+    mode: constants.DuplicateDetectionMode = constants.DuplicateDetectionMode.WARN
+    threshold: float = Field(default=0.90, ge=0, le=1)
+    top_k: int = Field(default=10, gt=0)
+    image_weight: float = Field(default=0.35, ge=0)
+    text_weight: float = Field(default=0.25, ge=0)
+    metadata_weight: float = Field(default=0.20, ge=0)
+    attribute_weight: float = Field(default=0.20, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_weights_sum_to_one(self) -> "DuplicateDetectionSettings":
+        total = self.image_weight + self.text_weight + self.metadata_weight + self.attribute_weight
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                "duplicate_detection's image_weight + text_weight + metadata_weight + "
+                f"attribute_weight must sum to 1.0 (got {total})"
+            )
+        return self
+
+
 class StorageSettings(BaseModel):
     """Local/object storage for uploaded product assets."""
 
@@ -237,6 +274,9 @@ class Settings(BaseSettings):
     hybrid_search: HybridSearchSettings = Field(default_factory=HybridSearchSettings)
     catalog_intelligence: CatalogIntelligenceSettings = Field(
         default_factory=CatalogIntelligenceSettings
+    )
+    duplicate_detection: DuplicateDetectionSettings = Field(
+        default_factory=DuplicateDetectionSettings
     )
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)

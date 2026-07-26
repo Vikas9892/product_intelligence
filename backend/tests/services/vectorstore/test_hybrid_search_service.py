@@ -113,6 +113,8 @@ class TestImageOnlySearch:
         assert results[0].product_id == product_id
         assert results[0].score == 0.83
         assert results[0].matched_modalities == [SearchModality.IMAGE]
+        assert results[0].image_score == 0.83
+        assert results[0].text_score == 0.0
 
     async def test_does_not_call_the_text_search_service(self) -> None:
         text_search_service = _FakeTextSearchService()
@@ -137,6 +139,8 @@ class TestTextOnlySearch:
         assert results[0].product_id == product_id
         assert results[0].score == 0.61
         assert results[0].matched_modalities == [SearchModality.TEXT]
+        assert results[0].text_score == 0.61
+        assert results[0].image_score == 0.0
 
     async def test_does_not_call_the_image_search_service(self) -> None:
         search_service = _FakeSearchService()
@@ -166,6 +170,8 @@ class TestHybridFusion:
         assert len(results) == 1
         assert results[0].score == pytest.approx(0.7 * 1.0 + 0.3 * 0.5)
         assert set(results[0].matched_modalities) == {SearchModality.IMAGE, SearchModality.TEXT}
+        assert results[0].image_score == pytest.approx(1.0)
+        assert results[0].text_score == pytest.approx(0.5)
 
     async def test_a_product_only_in_image_results_gets_zero_text_contribution(self) -> None:
         product_id = uuid4()

@@ -4,11 +4,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.core import paths
-from app.core.constants import Environment, LogLevel
+from app.core.constants import DuplicateDetectionMode, Environment, LogLevel
 from app.core.settings import (
     AIModelSettings,
     ApplicationSettings,
     CatalogIntelligenceSettings,
+    DuplicateDetectionSettings,
     HybridSearchSettings,
     SecuritySettings,
     Settings,
@@ -139,6 +140,40 @@ class TestCatalogIntelligenceSettings:
     def test_rejects_a_negative_quality_weight(self) -> None:
         with pytest.raises(ValidationError):
             CatalogIntelligenceSettings(quality_completeness_weight=-0.1)
+
+
+class TestDuplicateDetectionSettings:
+    def test_defaults(self) -> None:
+        settings = DuplicateDetectionSettings()
+
+        assert settings.mode is DuplicateDetectionMode.WARN
+        assert settings.threshold == 0.90
+        assert settings.top_k == 10
+        assert settings.image_weight == 0.35
+        assert settings.text_weight == 0.25
+        assert settings.metadata_weight == 0.20
+        assert settings.attribute_weight == 0.20
+
+    def test_rejects_weights_that_do_not_sum_to_one(self) -> None:
+        with pytest.raises(ValidationError, match=r"must sum to 1\.0"):
+            DuplicateDetectionSettings(
+                image_weight=0.5, text_weight=0.5, metadata_weight=0.5, attribute_weight=0.5
+            )
+
+    def test_accepts_custom_weights_that_sum_to_one(self) -> None:
+        settings = DuplicateDetectionSettings(
+            image_weight=0.4, text_weight=0.3, metadata_weight=0.2, attribute_weight=0.1
+        )
+
+        assert settings.image_weight == 0.4
+
+    def test_rejects_a_threshold_above_one(self) -> None:
+        with pytest.raises(ValidationError):
+            DuplicateDetectionSettings(threshold=1.1)
+
+    def test_rejects_a_non_positive_top_k(self) -> None:
+        with pytest.raises(ValidationError):
+            DuplicateDetectionSettings(top_k=0)
 
 
 class TestSecuritySettings:

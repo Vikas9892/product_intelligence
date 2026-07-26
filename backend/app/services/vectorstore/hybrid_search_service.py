@@ -177,6 +177,8 @@ def _fuse(
             score=image_weight * entry.image_score + text_weight * entry.text_score,
             metadata=entry.metadata,
             matched_modalities=sorted(entry.modalities, key=lambda modality: modality.value),
+            image_score=entry.image_score,
+            text_score=entry.text_score,
         )
         for product_id, entry in entries.items()
     ]
@@ -191,4 +193,6 @@ def _single_modality_result(
         score=neighbor.score,
         metadata=neighbor.metadata,
         matched_modalities=[modality],
+        image_score=neighbor.score if modality is SearchModality.IMAGE else 0.0,
+        text_score=neighbor.score if modality is SearchModality.TEXT else 0.0,
     )

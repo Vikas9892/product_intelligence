@@ -98,9 +98,22 @@ class HybridSearchResult(BaseModel):
     potentially both for a hybrid one, so a caller can tell a result that
     matched on both image and text apart from one that only matched on
     one side.
+
+    `image_score`/`text_score` (Phase 8) are each modality's own raw
+    score *before* fusion — `0.0` for whichever modality wasn't queried
+    or didn't match, the same "missing modality contributes zero"
+    convention `score`'s own fusion already uses. They exist so
+    `SimilarityScorer` can reuse the per-modality similarity a hybrid
+    search already computed (the phase's own "Image: use existing hybrid
+    search image score" requirement) instead of re-running image/text
+    search itself just to get an unfused number — `HybridSearchService`
+    already tracks both internally (see `_FusionEntry`), so exposing them
+    here avoids a second, parallel computation of the same thing.
     """
 
     product_id: UUID
     score: float
     metadata: dict[str, Any] = Field(default_factory=dict)
     matched_modalities: list[SearchModality]
+    image_score: float = 0.0
+    text_score: float = 0.0

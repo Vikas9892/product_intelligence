@@ -117,12 +117,24 @@ class TestHybridSearchResult:
             score=0.87,
             metadata={"name": "Widget"},
             matched_modalities=[SearchModality.IMAGE, SearchModality.TEXT],
+            image_score=0.9,
+            text_score=0.8,
         )
 
         assert result.product_id == product_id
         assert result.score == 0.87
         assert result.metadata == {"name": "Widget"}
         assert result.matched_modalities == [SearchModality.IMAGE, SearchModality.TEXT]
+        assert result.image_score == 0.9
+        assert result.text_score == 0.8
+
+    def test_image_score_and_text_score_default_to_zero(self) -> None:
+        result = HybridSearchResult(
+            product_id=uuid4(), score=0.5, matched_modalities=[SearchModality.IMAGE]
+        )
+
+        assert result.image_score == 0.0
+        assert result.text_score == 0.0
 
     def test_metadata_defaults_to_empty_dict(self) -> None:
         result = HybridSearchResult(

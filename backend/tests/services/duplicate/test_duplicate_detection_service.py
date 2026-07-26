@@ -221,6 +221,51 @@ class TestHybridSearchWiring:
         assert top_k == 5
 
 
+class TestPerCallOverrides:
+    async def test_a_per_call_top_k_overrides_the_configured_default(self) -> None:
+        hybrid_search_service = _FakeHybridSearchService(results=[])
+        service = DuplicateDetectionService(
+            hybrid_search_service=hybrid_search_service,
+            similarity_scorer=_FakeSimilarityScorer(overall_similarity_by_product={}),
+            top_k=10,
+        )
+
+        await service.detect(
+            name="Widget",
+            brand=None,
+            category=None,
+            description=None,
+            attributes=ProductAttributes(),
+            image=_image(),
+            top_k=3,
+        )
+
+        _, _, top_k = hybrid_search_service.calls[0]
+        assert top_k == 3
+
+    async def test_a_per_call_threshold_overrides_the_configured_default(self) -> None:
+        product_id = uuid4()
+        service = DuplicateDetectionService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(product_id)]),
+            similarity_scorer=_FakeSimilarityScorer(
+                overall_similarity_by_product={product_id: 0.5}
+            ),
+            threshold=0.90,
+        )
+
+        decision = await service.detect(
+            name="Widget",
+            brand=None,
+            category=None,
+            description=None,
+            attributes=ProductAttributes(),
+            image=_image(),
+            threshold=0.3,
+        )
+
+        assert decision.is_duplicate is True
+
+
 class TestErrorWrapping:
     async def test_wraps_an_unexpected_scoring_failure(
         self, monkeypatch: pytest.MonkeyPatch

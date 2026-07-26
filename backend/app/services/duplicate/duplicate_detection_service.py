@@ -68,6 +68,8 @@ class DuplicateDetectionService:
         description: str | None,
         attributes: ProductAttributes,
         image: ProductImage,
+        top_k: int | None = None,
+        threshold: float | None = None,
     ) -> DuplicateDecision:
         """Check whether a product (not yet indexed) is likely a duplicate of an existing one.
 
@@ -75,16 +77,23 @@ class DuplicateDetectionService:
         `build_text_representation`) to build the hybrid search's text
         query — the same natural-language reasoning `ProductService`
         already applies to text embedding and catalog intelligence, not
-        the normalized/slugified fields. Raises whatever
-        `HybridSearchService` raises for candidate retrieval, or
-        `DuplicateDetectionException` if scoring the otherwise
-        successfully-retrieved candidates fails unexpectedly.
+        the normalized/slugified fields. `top_k`/`threshold` override this
+        instance's configured defaults for this call only — used by
+        `POST /products/check-duplicate` (Milestone 5), which lets a
+        caller tune both per-request; `ProductService`'s own upload
+        integration never passes them, relying on the configured
+        defaults. Raises whatever `HybridSearchService` raises for
+        candidate retrieval, or `DuplicateDetectionException` if scoring
+        the otherwise successfully-retrieved candidates fails
+        unexpectedly.
         """
         start = time.monotonic()
+        resolved_top_k = top_k if top_k is not None else self._top_k
+        resolved_threshold = threshold if threshold is not None else self._threshold
 
         text = build_text_representation(name, brand, category, description)
         candidates = await self._hybrid_search_service.search(
-            image=image, text=text, top_k=self._top_k
+            image=image, text=text, top_k=resolved_top_k
         )
         logger.info("Duplicate candidate retrieval complete: candidates=%d", len(candidates))
 
@@ -99,7 +108,7 @@ class DuplicateDetectionService:
                 )
                 for candidate in candidates
             ]
-            decision = _build_decision(results, threshold=self._threshold)
+            decision = _build_decision(results, threshold=resolved_threshold)
         except Exception as exc:
             raise DuplicateDetectionException(
                 "Failed to score candidates for duplicate detection."

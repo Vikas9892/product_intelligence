@@ -30,6 +30,7 @@ _SYSTEM_ROUTE_PATHS = {"/health", "/ready", "/version"}
 _BUSINESS_ROUTE_PATHS = {
     f"{settings.application.api_prefix}/products/upload",
     f"{settings.application.api_prefix}/products/search",
+    f"{settings.application.api_prefix}/products/check-duplicate",
 }
 
 # Expected middleware stack, outermost first — see

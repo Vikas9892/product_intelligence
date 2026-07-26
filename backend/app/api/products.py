@@ -45,8 +45,14 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 
 from app.core.logging import get_logger
+from app.dependencies.duplicate import get_duplicate_check_service
 from app.dependencies.product import get_product_service
 from app.dependencies.upload import get_upload_service
+from app.schemas.duplicate import (
+    DuplicateCandidateInfo,
+    DuplicateCheckResponse,
+    DuplicateSignalBreakdown,
+)
 from app.schemas.product import (
     DuplicateInfo,
     EmbeddingInfo,
@@ -54,6 +60,7 @@ from app.schemas.product import (
     ProductCreate,
     UploadResponse,
 )
+from app.services.duplicate.duplicate_check_service import DuplicateCheckService
 from app.services.product_service import ProductService
 from app.services.upload_service import UploadService
 
@@ -131,4 +138,83 @@ async def upload_product(
             reason=product.duplicate_decision.reason,
             matched_product=product.duplicate_decision.matched_product,
         ),
+    )
+
+
+@router.post(
+    "/check-duplicate",
+    response_model=DuplicateCheckResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Check whether a product would be a duplicate",
+    description="Accepts product metadata and a single image file and reports whether "
+    "it looks like a duplicate of an existing product. Never stores or indexes "
+    "anything (Phase 8) — for that, use POST /products/upload with "
+    "DUPLICATE_DETECTION__MODE=warn or block.",
+)
+async def check_duplicate(
+    *,
+    name: Annotated[str, Form(min_length=1, max_length=200, description="Product name.")],
+    file: Annotated[UploadFile, File(description="The product image file.")],
+    upload_service: Annotated[UploadService, Depends(get_upload_service)],
+    duplicate_check_service: Annotated[DuplicateCheckService, Depends(get_duplicate_check_service)],
+    brand: Annotated[str | None, Form(max_length=100)] = None,
+    description: Annotated[str | None, Form(max_length=2000)] = None,
+    category: Annotated[str | None, Form(max_length=100)] = None,
+    top_k: Annotated[
+        int | None, Form(gt=0, description="Overrides DUPLICATE_DETECTION__TOP_K for this call.")
+    ] = None,
+    threshold: Annotated[
+        float | None,
+        Form(ge=0, le=1, description="Overrides DUPLICATE_DETECTION__THRESHOLD for this call."),
+    ] = None,
+) -> DuplicateCheckResponse:
+    """Validate/store the image (so it can be processed), then run duplicate detection only.
+
+    Missing/invalid form fields, an unsupported file extension/MIME type,
+    or an invalid image are all handled by `UploadService`/
+    `DuplicateCheckService` (each raises the appropriate `AppException`
+    subclass) — this route stays a thin adapter, same as `upload_product`.
+    """
+    logger.info("Duplicate check requested: product_name=%s, filename=%s", name, file.filename)
+
+    image = await upload_service.save_upload(file)
+    decision = await duplicate_check_service.check(
+        name=name,
+        brand=brand,
+        category=category,
+        description=description,
+        image=image,
+        top_k=top_k,
+        threshold=threshold,
+    )
+
+    best_candidate = decision.top_candidates[0] if decision.top_candidates else None
+    signals = (
+        DuplicateSignalBreakdown(
+            image=best_candidate.image_similarity,
+            text=best_candidate.text_similarity,
+            metadata=best_candidate.metadata_similarity,
+            attribute=best_candidate.attribute_similarity,
+        )
+        if best_candidate is not None
+        else None
+    )
+
+    return DuplicateCheckResponse(
+        duplicate=decision.is_duplicate,
+        confidence=decision.confidence,
+        reason=decision.reason,
+        matched_product=decision.matched_product,
+        signals=signals,
+        top_candidates=[
+            DuplicateCandidateInfo(
+                product_id=candidate.product_id,
+                image_similarity=candidate.image_similarity,
+                text_similarity=candidate.text_similarity,
+                metadata_similarity=candidate.metadata_similarity,
+                attribute_similarity=candidate.attribute_similarity,
+                overall_similarity=candidate.overall_similarity,
+            )
+            for candidate in decision.top_candidates
+        ],
     )

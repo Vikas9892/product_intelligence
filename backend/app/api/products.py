@@ -3,7 +3,7 @@
 `POST /products/upload` (mounted under `settings.application.api_prefix`
 by `app/application.py`, so `/api/v1/products/upload`) accepts product
 metadata plus a single image file as `multipart/form-data`, and runs it
-through the full Phase 2A + 2B + 3 + 4 + 6 pipeline:
+through the full Phase 2A + 2B + 3 + 4 + 6 + 7 + 8 pipeline:
 
     UploadService.save_upload      -> validate + store the file (Phase 2A)
     ProductService.process_upload  -> checksum, image processing
@@ -11,6 +11,9 @@ through the full Phase 2A + 2B + 3 + 4 + 6 pipeline:
                                        image + text embedding generation
                                        (Phases 4 and 6, via CLIPEmbeddingService
                                        and SentenceTransformerEmbeddingService),
+                                       catalog intelligence enrichment (Phase 7),
+                                       duplicate detection (Phase 8 — may raise
+                                       ConflictException in BLOCK mode),
                                        normalize, validate, generate ID (2B)
 
 Unlike `app/api/health.py`'s system routes (deliberately unversioned),
@@ -44,7 +47,13 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from app.core.logging import get_logger
 from app.dependencies.product import get_product_service
 from app.dependencies.upload import get_upload_service
-from app.schemas.product import EmbeddingInfo, ProcessedImageInfo, ProductCreate, UploadResponse
+from app.schemas.product import (
+    DuplicateInfo,
+    EmbeddingInfo,
+    ProcessedImageInfo,
+    ProductCreate,
+    UploadResponse,
+)
 from app.services.product_service import ProductService
 from app.services.upload_service import UploadService
 
@@ -115,5 +124,11 @@ async def upload_product(
         embedding=EmbeddingInfo(
             model_name=product.embedding.model_name,
             dimension=product.embedding.embedding_dimension,
+        ),
+        duplicate=DuplicateInfo(
+            is_duplicate=product.duplicate_decision.is_duplicate,
+            confidence=product.duplicate_decision.confidence,
+            reason=product.duplicate_decision.reason,
+            matched_product=product.duplicate_decision.matched_product,
         ),
     )

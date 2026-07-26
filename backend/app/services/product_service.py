@@ -11,7 +11,11 @@ representation from the product's name/brand/category/description and
 embed it too (`BaseTextEmbeddingService`, Phase 6 — generated immediately
 after the image embedding), run catalog intelligence enrichment
 (`CatalogIntelligenceService`, Phase 7 — extracted attributes, generated
-tags, a quality score), parse internal file metadata
+tags, a quality score), evaluate the product for duplicates
+(`DuplicateDetectionService`, Phase 8 — hybrid search for similar
+existing products, scored, thresholded into a `DuplicateDecision`; a
+`BLOCK`-mode duplicate raises `ConflictException` here, before anything
+below runs), parse internal file metadata
 (`app.utils.metadata.parse_file_metadata`), normalize the submitted
 product fields (the module-level `_normalize_*` functions below),
 re-validate the normalized result (`app.validators.product_validator`),
@@ -19,8 +23,15 @@ generate a UUID4 identifier, build the `Product` domain model, and upsert
 both embeddings — now carrying the enriched attributes/tags as
 additional metadata — into their respective vector store collections
 (`BaseVectorStore`, Phases 5-6) so the product is immediately searchable
-by image or by text. No database write, no duplicate detection — see
-`backend/README.md`.
+by image or by text. No database write — see `backend/README.md`.
+
+**Why does duplicate detection run *before* normalization/validation and
+the vector store upsert, not after?** `BLOCK` mode must reject a likely
+duplicate "before persistence" (the phase's own framing) — indexing it
+first and then deciding to reject would briefly make a rejected upload
+searchable, and would need a compensating delete on rejection. Running it
+early means a blocked upload never reaches the vector store at all, no
+cleanup required.
 
 **Why does `ProductService` — not a later, separate step — upsert into
 the vector store?** `SearchService`/`TextSearchService`/`HybridSearchService`
@@ -53,13 +64,27 @@ fields have no prior meaning to preserve, so they're populated directly
 from whatever catalog intelligence resolved (which may be `None`, same as
 any other optional attribute).
 
+**How do the three `DuplicateDetectionMode`s (`OFF`/`WARN`/`BLOCK`)
+change this pipeline?** `OFF` skips `DuplicateDetectionService` entirely
+— `Product.duplicate_decision` is still always populated (mirroring
+`catalog_intelligence`'s "always present" convention), just with a
+neutral "detection is disabled" decision rather than `None`, so callers
+never have to branch on whether the field itself exists. `WARN` runs
+detection and stores the product regardless of the outcome — the
+decision is simply attached to `UploadResponse` for the caller's own
+judgment. `BLOCK` runs the exact same detection but raises
+`ConflictException` (409) instead of proceeding when `is_duplicate` is
+`True` — the upload is rejected outright, never reaching normalization,
+`Product` construction, or the vector store.
+
 Kept as an orchestrator, not a place where new validation/normalization
 *rules* get invented inline: normalization is small pure functions here
 (easy to unit test directly), validation delegates entirely to
 `app.validators.*`, image processing delegates entirely to
 `ImageProcessingService`, embedding generation delegates entirely to
 `CLIPEmbeddingService`/`BaseTextEmbeddingService`, catalog enrichment
-delegates entirely to `CatalogIntelligenceService`, and vector storage
+delegates entirely to `CatalogIntelligenceService`, duplicate detection
+delegates entirely to `DuplicateDetectionService`, and vector storage
 delegates entirely to `BaseVectorStore`. `app/api/products.py` calls this
 service and `UploadService` and nothing else — the router itself has no
 business logic.
@@ -70,8 +95,11 @@ import uuid
 from pathlib import Path
 
 from app.core.config import settings
+from app.core.constants import DuplicateDetectionMode
 from app.core.logging import get_logger
+from app.exceptions.errors import ConflictException
 from app.models.catalog_intelligence_result import CatalogIntelligenceResult
+from app.models.duplicate_decision import DuplicateDecision
 from app.models.embedding import ImageEmbedding
 from app.models.product import Product
 from app.models.product_attributes import ProductAttributes
@@ -79,6 +107,7 @@ from app.models.text_embedding import TextEmbedding
 from app.schemas.product import ProductCreate, ProductImage
 from app.services.catalog.catalog_intelligence_service import CatalogIntelligenceService
 from app.services.checksum_service import ChecksumService
+from app.services.duplicate.duplicate_detection_service import DuplicateDetectionService
 from app.services.embeddings.base import BaseEmbeddingService
 from app.services.embeddings.clip_service import CLIPEmbeddingService
 from app.services.embeddings.sentence_transformer_service import (
@@ -107,6 +136,8 @@ class ProductService:
         text_embedding_service: BaseTextEmbeddingService | None = None,
         catalog_intelligence_service: CatalogIntelligenceService | None = None,
         catalog_intelligence_enabled: bool | None = None,
+        duplicate_detection_service: DuplicateDetectionService | None = None,
+        duplicate_detection_mode: DuplicateDetectionMode | None = None,
         vector_store: BaseVectorStore | None = None,
         upload_dir: Path | None = None,
     ) -> None:
@@ -136,6 +167,16 @@ class ProductService:
             if catalog_intelligence_enabled is not None
             else settings.catalog_intelligence.enabled
         )
+        self._duplicate_detection_service = (
+            duplicate_detection_service
+            if duplicate_detection_service is not None
+            else DuplicateDetectionService()
+        )
+        self._duplicate_detection_mode = (
+            duplicate_detection_mode
+            if duplicate_detection_mode is not None
+            else settings.duplicate_detection.mode
+        )
         self._vector_store = vector_store if vector_store is not None else QdrantVectorStore()
         self._upload_dir = upload_dir if upload_dir is not None else settings.storage.upload_dir
 
@@ -147,8 +188,10 @@ class ProductService:
         that file can't be read; `InvalidImageException`,
         `UnsupportedMediaTypeException`, or `ImageTooLargeException` if it
         fails image validation/processing (see `ImageProcessingService`);
-        or `ValidationException` if the normalized product fields fail a
-        domain invariant.
+        `ValidationException` if the normalized product fields fail a
+        domain invariant; or `ConflictException` (409) if
+        `DuplicateDetectionMode.BLOCK` is configured and the product is
+        flagged as a likely duplicate.
         """
         logger.info(
             "Upload processing started: product_name=%s, filename=%s",
@@ -204,6 +247,43 @@ class ProductService:
             catalog_result.quality_score,
         )
 
+        if self._duplicate_detection_mode is DuplicateDetectionMode.OFF:
+            duplicate_decision = DuplicateDecision(
+                is_duplicate=False, confidence=0.0, reason="Duplicate detection is disabled."
+            )
+        else:
+            duplicate_decision = await self._duplicate_detection_service.detect(
+                name=product.name,
+                brand=product.brand,
+                category=product.category,
+                description=product.description,
+                attributes=catalog_result.attributes,
+                image=image,
+            )
+            logger.info(
+                "Duplicate detection complete: filename=%s, is_duplicate=%s, confidence=%.2f",
+                image.stored_filename,
+                duplicate_decision.is_duplicate,
+                duplicate_decision.confidence,
+            )
+            is_blocking = self._duplicate_detection_mode is DuplicateDetectionMode.BLOCK
+            if duplicate_decision.is_duplicate and is_blocking:
+                logger.warning(
+                    "Upload rejected as a likely duplicate: filename=%s, "
+                    "matched_product=%s, confidence=%.2f",
+                    image.stored_filename,
+                    duplicate_decision.matched_product,
+                    duplicate_decision.confidence,
+                )
+                raise ConflictException(
+                    f"This product appears to be a duplicate of an existing product "
+                    f"(confidence={duplicate_decision.confidence:.2f}).",
+                    details={
+                        "matched_product": str(duplicate_decision.matched_product),
+                        "confidence": duplicate_decision.confidence,
+                    },
+                )
+
         file_metadata = parse_file_metadata(image, checksum_sha256=checksum)
 
         normalized_name = _normalize_name(product.name)
@@ -241,6 +321,7 @@ class ProductService:
             embedding=embedding,
             text_embedding=text_embedding,
             catalog_intelligence=catalog_result,
+            duplicate_decision=duplicate_decision,
         )
 
         vector_metadata = {

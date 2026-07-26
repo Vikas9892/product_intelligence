@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from app.models.catalog_intelligence_result import CatalogIntelligenceResult
 from app.models.catalog_tags import CatalogTag, Source
+from app.models.duplicate_decision import DuplicateDecision
 from app.models.embedding import ImageEmbedding
 from app.models.image_metadata import ImageMetadata
 from app.models.product import Product
@@ -63,6 +64,12 @@ def _catalog_intelligence() -> CatalogIntelligenceResult:
     )
 
 
+def _duplicate_decision() -> DuplicateDecision:
+    return DuplicateDecision(
+        is_duplicate=False, confidence=0.1, reason="No candidates exceeded the threshold."
+    )
+
+
 class TestProduct:
     def test_constructs_with_all_fields(self) -> None:
         product_id = uuid4()
@@ -81,6 +88,7 @@ class TestProduct:
             embedding=_embedding(product_id),
             text_embedding=_text_embedding(product_id),
             catalog_intelligence=_catalog_intelligence(),
+            duplicate_decision=_duplicate_decision(),
         )
 
         assert product.id == product_id
@@ -109,6 +117,7 @@ class TestProduct:
             embedding=_embedding(product_id),
             text_embedding=_text_embedding(product_id),
             catalog_intelligence=_catalog_intelligence(),
+            duplicate_decision=_duplicate_decision(),
         )
 
         assert product.brand is None
@@ -131,6 +140,7 @@ class TestProduct:
             embedding=_embedding(product_id),
             text_embedding=_text_embedding(product_id),
             catalog_intelligence=_catalog_intelligence(),
+            duplicate_decision=_duplicate_decision(),
         )
 
         dumped = product.model_dump(mode="json")

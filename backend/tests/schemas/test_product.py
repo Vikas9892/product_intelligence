@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas.product import (
+    DuplicateInfo,
     EmbeddingInfo,
     ProcessedImageInfo,
     ProductCreate,
@@ -72,6 +73,26 @@ class TestEmbeddingInfo:
         assert info.dimension == 512
 
 
+class TestDuplicateInfo:
+    def test_constructs_with_all_fields(self) -> None:
+        matched_product = uuid4()
+
+        info = DuplicateInfo(
+            is_duplicate=True,
+            confidence=0.95,
+            reason="Overall similarity 0.95 meets the threshold.",
+            matched_product=matched_product,
+        )
+
+        assert info.is_duplicate is True
+        assert info.matched_product == matched_product
+
+    def test_matched_product_defaults_to_none(self) -> None:
+        info = DuplicateInfo(is_duplicate=False, confidence=0.1, reason="No match.")
+
+        assert info.matched_product is None
+
+
 class TestUploadResponse:
     def test_round_trips_through_model_dump_and_validate(self) -> None:
         response = UploadResponse(
@@ -89,6 +110,7 @@ class TestUploadResponse:
                 width=800, height=600, format="JPEG", color_mode="RGB"
             ),
             embedding=EmbeddingInfo(model_name="openai/clip-vit-base-patch32", dimension=512),
+            duplicate=DuplicateInfo(is_duplicate=False, confidence=0.1, reason="No match."),
         )
 
         dumped = response.model_dump(mode="json")

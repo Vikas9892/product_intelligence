@@ -24,6 +24,7 @@ from qdrant_client import QdrantClient
 
 from app.application import create_app
 from app.core.config import settings
+from app.core.constants import DuplicateDetectionMode
 from app.dependencies.hybrid_search import get_hybrid_search_service
 from app.dependencies.product import get_product_service
 from app.dependencies.upload import get_upload_service
@@ -92,6 +93,11 @@ def _override_services(app: FastAPI, upload_dir: Path, *, vector_store: QdrantVe
         image_processing_service=image_processing_service,
         embedding_service=embedding_service,
         text_embedding_service=text_embedding_service,
+        # This suite covers search itself, not duplicate detection (see
+        # tests/services/test_product_service.py and
+        # tests/services/duplicate/) — OFF avoids every seeded upload
+        # here also re-running a real hybrid search.
+        duplicate_detection_mode=DuplicateDetectionMode.OFF,
         vector_store=vector_store,
     )
     app.dependency_overrides[get_hybrid_search_service] = lambda: HybridSearchService(

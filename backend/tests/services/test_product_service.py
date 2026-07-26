@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -9,8 +10,10 @@ from typing import Any
 import pytest
 from PIL import Image
 
+from app.core.constants import DuplicateDetectionMode
 from app.exceptions.errors import (
     ChecksumException,
+    ConflictException,
     EmbeddingGenerationException,
     InvalidImageException,
     TextEmbeddingException,
@@ -18,9 +21,11 @@ from app.exceptions.errors import (
     VectorStoreException,
 )
 from app.models.catalog_intelligence_result import CatalogIntelligenceResult
+from app.models.duplicate_decision import DuplicateDecision
 from app.models.product_attributes import ProductAttributes
 from app.schemas.product import ProductCreate, ProductImage
 from app.services.catalog.catalog_intelligence_service import CatalogIntelligenceService
+from app.services.duplicate.duplicate_detection_service import DuplicateDetectionService
 from app.services.embeddings.base import BaseEmbeddingService
 from app.services.embeddings.text_base import BaseTextEmbeddingService
 from app.services.image_processing_service import ImageProcessingService
@@ -167,6 +172,41 @@ class _FakeCatalogIntelligenceService(CatalogIntelligenceService):
         return self._result
 
 
+class _FakeDuplicateDetectionService(DuplicateDetectionService):
+    """A deterministic, instant stand-in for `DuplicateDetectionService`.
+
+    Same reasoning as the other fakes here: `ProductService`'s own tests
+    care about orchestration (is the decision wired into `Product`, and
+    does `BLOCK` mode actually reject?), not the real retrieval/scoring
+    pipeline — that's `test_duplicate_detection_service.py`'s job.
+    Defaults to a non-duplicate decision so tests that don't care about
+    duplicate detection aren't affected by it.
+    """
+
+    def __init__(self, *, decision: DuplicateDecision | None = None) -> None:
+        self._decision = (
+            decision
+            if decision is not None
+            else DuplicateDecision(
+                is_duplicate=False, confidence=0.0, reason="No candidates were found."
+            )
+        )
+        self.calls: list[str] = []
+
+    async def detect(
+        self,
+        *,
+        name: str,
+        brand: str | None,
+        category: str | None,
+        description: str | None,
+        attributes: ProductAttributes,
+        image: ProductImage,
+    ) -> DuplicateDecision:
+        self.calls.append(name)
+        return self._decision
+
+
 def _build_service(
     tmp_path: Path,
     *,
@@ -174,13 +214,16 @@ def _build_service(
     text_embedding_service: BaseTextEmbeddingService | None = None,
     catalog_intelligence_service: CatalogIntelligenceService | None = None,
     catalog_intelligence_enabled: bool | None = None,
+    duplicate_detection_service: DuplicateDetectionService | None = None,
+    duplicate_detection_mode: DuplicateDetectionMode | None = None,
     vector_store: BaseVectorStore | None = None,
 ) -> ProductService:
     # Every test gets its own ImageProcessingService pointed at a tmp_path
     # subdirectory — never the real settings.storage.processed_dir — and
-    # fake embedding/catalog-intelligence/vector-store services instead of
-    # loading a real CLIP or Sentence Transformers model, running the real
-    # catalog intelligence pipeline, or talking to Qdrant.
+    # fake embedding/catalog-intelligence/duplicate-detection/vector-store
+    # services instead of loading a real CLIP or Sentence Transformers
+    # model, running the real catalog intelligence or duplicate detection
+    # pipeline, or talking to Qdrant.
     return ProductService(
         upload_dir=tmp_path,
         image_processing_service=ImageProcessingService(processed_dir=tmp_path / "processed"),
@@ -198,6 +241,12 @@ def _build_service(
             else _FakeCatalogIntelligenceService()
         ),
         catalog_intelligence_enabled=catalog_intelligence_enabled,
+        duplicate_detection_service=(
+            duplicate_detection_service
+            if duplicate_detection_service is not None
+            else _FakeDuplicateDetectionService()
+        ),
+        duplicate_detection_mode=duplicate_detection_mode,
         vector_store=vector_store if vector_store is not None else _FakeVectorStore(),
     )
 
@@ -538,6 +587,99 @@ class TestProcessUploadCatalogIntelligence:
         assert product.catalog_intelligence.attributes == ProductAttributes()
         assert product.catalog_intelligence.tags == []
         assert product.catalog_intelligence.quality_score == 0.0
+
+
+class TestProcessUploadDuplicateDetection:
+    """Orchestration tests for Phase 8's `DuplicateDetectionService` integration.
+
+    Retrieval/scoring logic itself is `test_duplicate_detection_service.py`'s
+    job; these tests only check that `ProductService` wires the decision
+    into `Product.duplicate_decision` and that the three
+    `DuplicateDetectionMode`s (`OFF`/`WARN`/`BLOCK`) behave as documented.
+    """
+
+    async def test_off_mode_never_calls_duplicate_detection(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        duplicate_detection_service = _FakeDuplicateDetectionService(
+            decision=DuplicateDecision(
+                is_duplicate=True, confidence=0.99, reason="would have matched"
+            )
+        )
+        service = _build_service(
+            tmp_path,
+            duplicate_detection_service=duplicate_detection_service,
+            duplicate_detection_mode=DuplicateDetectionMode.OFF,
+        )
+
+        product = await service.process_upload(ProductCreate(name="Widget"), image)
+
+        assert duplicate_detection_service.calls == []
+        assert product.duplicate_decision.is_duplicate is False
+        assert product.duplicate_decision.confidence == 0.0
+
+    async def test_warn_mode_stores_the_product_and_attaches_the_decision(
+        self, tmp_path: Path
+    ) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        matched_product = uuid.uuid4()
+        decision = DuplicateDecision(
+            is_duplicate=True,
+            confidence=0.95,
+            reason="Overall similarity 0.95 meets the threshold.",
+            matched_product=matched_product,
+        )
+        vector_store = _FakeVectorStore()
+        service = _build_service(
+            tmp_path,
+            vector_store=vector_store,
+            duplicate_detection_service=_FakeDuplicateDetectionService(decision=decision),
+            duplicate_detection_mode=DuplicateDetectionMode.WARN,
+        )
+
+        product = await service.process_upload(ProductCreate(name="Widget"), image)
+
+        assert product.duplicate_decision == decision
+        assert len(vector_store.upserted_image) == 1
+
+    async def test_block_mode_rejects_a_flagged_duplicate_without_indexing_it(
+        self, tmp_path: Path
+    ) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        decision = DuplicateDecision(
+            is_duplicate=True, confidence=0.95, reason="matched", matched_product=uuid.uuid4()
+        )
+        vector_store = _FakeVectorStore()
+        service = _build_service(
+            tmp_path,
+            vector_store=vector_store,
+            duplicate_detection_service=_FakeDuplicateDetectionService(decision=decision),
+            duplicate_detection_mode=DuplicateDetectionMode.BLOCK,
+        )
+
+        with pytest.raises(ConflictException):
+            await service.process_upload(ProductCreate(name="Widget"), image)
+
+        assert vector_store.upserted_image == []
+
+    async def test_block_mode_still_stores_a_non_duplicate(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        decision = DuplicateDecision(is_duplicate=False, confidence=0.2, reason="no match")
+        vector_store = _FakeVectorStore()
+        service = _build_service(
+            tmp_path,
+            vector_store=vector_store,
+            duplicate_detection_service=_FakeDuplicateDetectionService(decision=decision),
+            duplicate_detection_mode=DuplicateDetectionMode.BLOCK,
+        )
+
+        product = await service.process_upload(ProductCreate(name="Widget"), image)
+
+        assert product.duplicate_decision.is_duplicate is False
+        assert len(vector_store.upserted_image) == 1
 
 
 class TestProcessUploadValidation:

@@ -25,6 +25,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from app.models.catalog_intelligence_result import CatalogIntelligenceResult
+from app.models.duplicate_decision import DuplicateDecision
 from app.models.embedding import ImageEmbedding
 from app.models.image_metadata import ImageMetadata
 from app.models.text_embedding import TextEmbedding
@@ -64,3 +65,9 @@ class Product(BaseModel):
     #: (an empty `ProductAttributes`/no tags/zero quality score, rather
     #: than making this field itself optional).
     catalog_intelligence: CatalogIntelligenceResult
+    #: Populated by `DuplicateDetectionService` (Phase 8) — always
+    #: present, even when duplicate detection is disabled
+    #: (`DuplicateDetectionMode.OFF`) or the upload was rejected outright
+    #: (`BLOCK` mode never reaches this far — see `ProductService`), same
+    #: "always present, never `None`" convention as `catalog_intelligence`.
+    duplicate_decision: DuplicateDecision

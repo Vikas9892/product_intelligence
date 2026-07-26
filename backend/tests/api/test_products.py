@@ -29,6 +29,7 @@ from qdrant_client import QdrantClient
 
 from app.application import create_app
 from app.core.config import settings
+from app.core.constants import DuplicateDetectionMode
 from app.dependencies.product import get_product_service
 from app.dependencies.upload import get_upload_service
 from app.services.embeddings.clip_service import CLIPEmbeddingService
@@ -105,6 +106,12 @@ def _override_services(app: FastAPI, upload_dir: Path) -> None:
             model_name=_TINY_MODEL_NAME, model_manager=_shared_model_manager
         ),
         text_embedding_service=_FakeTextEmbeddingService(),
+        # This suite covers the upload pipeline itself, not duplicate
+        # detection (see tests/services/test_product_service.py's
+        # TestProcessUploadDuplicateDetection and
+        # tests/services/duplicate/) — OFF avoids every upload here also
+        # re-running a real hybrid search against `_shared_vector_store`.
+        duplicate_detection_mode=DuplicateDetectionMode.OFF,
         vector_store=_shared_vector_store,
     )
 
@@ -230,6 +237,22 @@ class TestUploadProductSuccess:
 
         assert response.status_code == 201
         assert response.json()["product"]["name"] == "Minimal Widget"
+
+    def test_returns_a_non_duplicate_result_when_detection_is_off(
+        self, upload_client: TestClient
+    ) -> None:
+        # This fixture's ProductService runs with DuplicateDetectionMode.OFF
+        # (see _override_services) — the response must still always
+        # include a `duplicate` object, just a neutral one.
+        response = upload_client.post(
+            _UPLOAD_URL,
+            data={"name": "Widget"},
+            files=_image_file(),
+        )
+
+        body = response.json()["duplicate"]
+        assert body["is_duplicate"] is False
+        assert body["matched_product"] is None
 
 
 class TestUploadIndexesBothCollections:

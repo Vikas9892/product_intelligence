@@ -86,12 +86,32 @@ class EmbeddingInfo(BaseModel):
     dimension: int
 
 
+class DuplicateInfo(BaseModel):
+    """API-safe summary of a `DuplicateDecision` (Phase 8).
+
+    Deliberately a summary, not the full internal decision: `top_candidates`
+    (every candidate's per-signal breakdown) is useful detail for the
+    dedicated `POST /products/check-duplicate` endpoint (Milestone 5),
+    where checking for duplicates *is* the request's whole purpose, but
+    would be excess detail on every single upload response. `is_duplicate`
+    is `False` with `matched_product=None` both when detection genuinely
+    found no match and when it didn't run at all
+    (`DuplicateDetectionMode.OFF`) — see `Product.duplicate_decision`'s
+    own docstring for why that field is never itself optional.
+    """
+
+    is_duplicate: bool
+    confidence: float
+    reason: str
+    matched_product: UUID | None = None
+
+
 class UploadResponse(BaseModel):
     """Response body for `POST /api/v1/products/upload`.
 
     No database row exists yet (Phase 2B processes but does not persist —
     see `backend/README.md`). `product_id`, `checksum_sha256`,
-    `processed_image`, and `embedding` all come from
+    `processed_image`, `embedding`, and `duplicate` all come from
     `app.models.product.Product`, the internal domain object
     `ProductService` builds; `product` reflects the *normalized* fields
     (trimmed, cased, sluggified, price-rounded), not the raw submitted
@@ -105,6 +125,7 @@ class UploadResponse(BaseModel):
     checksum_sha256: str
     processed_image: ProcessedImageInfo
     embedding: EmbeddingInfo
+    duplicate: DuplicateInfo
 
 
 class ProductResponse(BaseModel):

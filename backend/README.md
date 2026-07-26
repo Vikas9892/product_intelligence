@@ -1327,6 +1327,112 @@ the size/time cost of the actual default model
 (`openai/clip-vit-base-patch32`), which is only ever downloaded outside
 of tests, on first real use.
 
+## Phase 5 — Vector Search & Retrieval design decisions
+
+This phase closes the loop Phase 4 deliberately left open: an embedding
+existed per product, but nothing stored it anywhere searchable. Six
+pieces landed, in dependency order: `BaseVectorStore` (plus `NearestNeighbor`,
+built ahead of its own milestone for the same reason Phase 3/4's domain
+models were), `QdrantVectorStore`, the rest of the search domain models
+(`SearchQuery`/`SearchResult`), `SearchService` (plus wiring `ProductService`
+to upsert on upload), the `/products/search` endpoint, and a final pass
+hardening test coverage across the whole pipeline.
+
+**Why does `ProductService` upsert into the vector store, when the phase
+spec's own milestones only describe the search *query* side?** Without
+it, `SearchService` would only ever search an empty collection — the
+feature would be mechanically correct and permanently useless against
+real uploads. Upserting immediately after building a `Product`, in the
+same request, keeps "a product is uploaded" and "a product is
+searchable" one atomic-feeling step, the same way Phase 4 folded
+embedding generation into the upload flow rather than leaving it a
+separate, easy-to-forget call.
+
+**Why is `QdrantVectorStore`'s collection created lazily, on first use,
+rather than eagerly at construction — unlike, say, `UploadService`/
+`ImageProcessingService` eagerly `mkdir`-ing their directories?** Those
+`mkdir` calls are local filesystem operations with no failure mode worth
+guarding against in normal operation. A live Qdrant connection is
+different: `ProductService`/`SearchService` build a `QdrantVectorStore` as
+part of their own construction, and eager collection-creation would mean
+*constructing* either service — including in a plain dependency-injection
+unit test, or at real application startup — requires a running Qdrant
+server before any request ever actually needs one. This was caught
+directly: an initial eager implementation broke
+`tests/dependencies/test_product.py`'s "does this provider return an
+instance" test the moment it tried to build a real `ProductService`.
+Fixed by reusing `ModelManager`'s (Phase 4) exact double-checked-locking
+"lazy, load/create once" pattern instead.
+
+**Why cosine distance, non-configurable?** `CLIPEmbeddingService`
+(Phase 4) already L2-normalizes every embedding it produces specifically
+so cosine similarity — the angle between two vectors, not their raw
+magnitude — is the meaningful notion of "similar" for CLIP embeddings.
+Any other distance metric would be measuring something CLIP's embedding
+space wasn't shaped for.
+
+**Why does `BaseVectorStore` know nothing about `SearchQuery`/`SearchResult`
+(Phase 5's other domain models), only the more primitive `NearestNeighbor`?**
+`BaseVectorStore` is a general storage abstraction — `upsert`/`search`/
+`delete`/`exists`/`health` on vectors, IDs, and metadata — that has no
+inherent reason to know about "a search," specifically. `SearchQuery`/
+`SearchResult` are `SearchService`'s own vocabulary for bundling a
+resolved query and its outcome; coupling the storage interface to them
+would make `BaseVectorStore` harder to reuse for anything other than
+today's one use case (e.g. a future duplicate-detection phase that also
+needs `upsert`/`search` but has nothing to do with "a search request").
+
+**Why does `SearchService` compose `ImageProcessingService` itself
+(standardizing the query image) rather than trusting whatever the client
+uploaded?** A stored product's embedding was generated from its
+*standardized* image (Phase 4) — same orientation, color mode, and size
+every time. Embedding a raw, un-standardized query image would compare
+two embeddings produced under different preprocessing, degrading
+similarity scores for reasons that have nothing to do with the products
+actually looking different. Reusing `ImageProcessingService` (the exact
+class `ProductService` already uses) guarantees both sides of the
+comparison go through identical preprocessing.
+
+**Why does `QdrantVectorStore.search`'s `filters` parameter only support
+equality (`{"category": "shoes"}`), not richer range/comparison queries?**
+It's deliberately the smallest thing that satisfies the phase's actual
+requirement ("metadata filtering") without building a query-DSL translator
+nothing calls yet. Qdrant's own `MatchValue` filter condition (what
+`_build_filter` translates every key/value pair into) is itself
+equality-only for exactly this reason — richer filtering (numeric ranges,
+etc.) would need a different Qdrant condition type, added when a real use
+case needs it rather than speculatively now.
+
+**Why does `ProductSearchResult` (the API schema) duplicate
+`NearestNeighbor` (the internal domain model) field-for-field instead of
+returning `NearestNeighbor` directly?** Same reasoning as every other
+schema/model split in this codebase (see `app/models/product.py`'s
+docstring) — the API response is a contract this codebase controls
+independently of whatever shape happens to come back from the vector
+store internally. Today they happen to have identical fields; that's a
+coincidence of this phase, not a guarantee either type won't diverge
+later (e.g. `NearestNeighbor` gaining an internal-only field that
+shouldn't reach a client).
+
+**Why does the response only ever include `product_id`/`score`/`metadata`,
+never the raw embedding vector — for either the query image or a
+matched product?** Stated directly in the phase requirements ("Never
+expose raw embedding vectors"), and consistent with `EmbeddingInfo`
+(Phase 4) already establishing "don't return a raw float array a client
+has no way to act on."
+
+**Why do the vector-store tests run against a real
+`QdrantClient(location=":memory:")` instead of a fake?** The official
+client's own local, in-process mode gives genuine confidence that this
+codebase's actual filter/point/collection construction is compatible with
+the real `qdrant-client` API — which matters concretely: this client
+version (`1.18.0`) replaced the older `search` method with `query_points`,
+discovered by inspecting the installed library directly rather than
+trusting possibly-outdated docs, the same diagnostic approach Phase 4
+used for `get_image_features`'s `.pooler_output`. A fake would only ever
+prove this codebase's own logic was internally consistent, not that it
+actually matches Qdrant's real behavior.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -1865,4 +1971,81 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "feat: add image embedding pipeline (Phase 4)"
+```
+
+**Phase 5 (Vector Search & Retrieval)** added, from the repo root — six
+milestones, each its own commit:
+
+```bash
+cd backend
+uv add qdrant-client
+cd ..
+
+# Milestone 1 — BaseVectorStore abstraction
+#   app/models/search.py — NearestNeighbor (built ahead of Milestone 3,
+#   since BaseVectorStore.search needs it as a return type)
+#   app/services/vectorstore/base.py — BaseVectorStore, VectorRecord
+#   tests/models/test_search.py, tests/services/vectorstore/test_base.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add vector store abstraction (Phase 5 milestone 1/6)"
+
+# Milestone 2 — Qdrant integration
+#   app/core/constants.py — added DEFAULT_VECTOR_COLLECTION_NAME,
+#   DEFAULT_VECTOR_SIZE, DEFAULT_SEARCH_TOP_K, MAX_SEARCH_TOP_K
+#   app/core/settings.py — added VectorStoreSettings
+#   app/exceptions/errors.py — added VectorStoreException
+#   backend/.env.example — documented the four new VECTOR_STORE__ variables
+#   app/services/vectorstore/qdrant_store.py — QdrantVectorStore
+#   tests/core/test_settings.py, tests/services/vectorstore/test_qdrant_store.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add Qdrant vector store integration (Phase 5 milestone 2/6)"
+
+# Milestone 3 — search domain models
+#   app/models/search.py — added SearchQuery, SearchResult
+#   tests/models/test_search.py — extended
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add search domain models (Phase 5 milestone 3/6)"
+
+# Milestone 4 — SearchService + upsert-on-upload wiring
+#   app/services/vectorstore/search_service.py — SearchService
+#   app/services/product_service.py — composes BaseVectorStore, upserts
+#   after building each Product
+#   app/dependencies/search.py — get_search_service
+#   tests/services/vectorstore/test_search_service.py,
+#   tests/services/test_product_service.py, tests/dependencies/test_search.py,
+#   tests/api/test_products.py — hand-written / updated
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add SearchService and wire product uploads into the vector store (Phase 5 milestone 4/6)"
+
+# Milestone 5 — search API endpoint
+#   app/schemas/search.py — ProductSearchResult, ProductSearchResponse
+#   app/api/search.py — POST /products/search
+#   app/application.py — registers search_router
+#   tests/schemas/test_search.py, tests/api/test_search.py,
+#   tests/test_application.py — hand-written / updated
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: expose the product search API endpoint (Phase 5 milestone 5/6)"
+
+# Milestone 6 — comprehensive test hardening
+#   tests/services/vectorstore/test_qdrant_store.py — duplicate IDs, empty
+#   results, metadata filters, similarity ordering, top-k boundary,
+#   error-wrapping per method, collection-creation thread-safety
+#   tests/api/test_search.py — category filter, top_k end-to-end
+#   backend/README.md — this section
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+uv run uvicorn app.main:app --reload   # manual smoke test: upload a product,
+                                        # then search with the same image
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden vector search test coverage (Phase 5 milestone 6/6)"
 ```

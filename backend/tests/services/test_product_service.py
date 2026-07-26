@@ -26,7 +26,6 @@ from app.services.embeddings.text_base import BaseTextEmbeddingService
 from app.services.image_processing_service import ImageProcessingService
 from app.services.product_service import (
     ProductService,
-    _build_text_representation,
     _normalize_brand,
     _normalize_category,
     _normalize_description,
@@ -244,32 +243,6 @@ class TestNormalizeBrand:
 
     def test_all_whitespace_normalizes_to_none(self) -> None:
         assert _normalize_brand("   ") is None
-
-
-class TestBuildTextRepresentation:
-    def test_joins_all_parts(self) -> None:
-        text = _build_text_representation("Widget", "Nike", "Men Tshirts", "A fine shirt")
-
-        assert text == "Widget. Nike. Men Tshirts. A fine shirt"
-
-    def test_omits_missing_parts(self) -> None:
-        text = _build_text_representation("Widget", None, None, None)
-
-        assert text == "Widget"
-
-    def test_omits_blank_parts(self) -> None:
-        text = _build_text_representation("Widget", "   ", "Men Tshirts", None)
-
-        assert text == "Widget. Men Tshirts"
-
-    def test_does_not_slugify_category(self) -> None:
-        # Unlike `_normalize_category`, which slugifies for storage/
-        # filtering — the text representation is meant for a semantic
-        # embedding model, so it should stay natural language.
-        text = _build_text_representation("Widget", None, "Men Tshirts", None)
-
-        assert "Men Tshirts" in text
-        assert "men-tshirts" not in text
 
 
 class TestNormalizeDescription:

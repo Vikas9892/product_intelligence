@@ -40,7 +40,7 @@ stable, exact-match filter value; it's actively a worse input for a
 *semantic* text embedding model or a text attribute extractor, both of
 which should see natural language ("Men Tshirts"), not a URL-safe slug.
 The two normalizations serve different purposes (filtering vs. meaning)
-and are kept independent — see `_build_text_representation`'s own
+and are kept independent — see `app.utils.text.build_text_representation`'s own
 docstring.
 
 **Why does `brand`/`category` in the vector store's metadata stay the
@@ -89,6 +89,7 @@ from app.services.image_processing_service import ImageProcessingService
 from app.services.vectorstore.base import BaseVectorStore, VectorRecord
 from app.services.vectorstore.qdrant_store import QdrantVectorStore
 from app.utils.metadata import parse_file_metadata
+from app.utils.text import build_text_representation
 from app.validators.product_validator import validate_normalized_name, validate_price
 
 logger = get_logger(__name__)
@@ -174,7 +175,7 @@ class ProductService:
             len(vector),
         )
 
-        text_representation = _build_text_representation(
+        text_representation = build_text_representation(
             product.name, product.brand, product.category, product.description
         )
         text_vector = await self._text_embedding_service.embed_text(text_representation)
@@ -269,26 +270,6 @@ class ProductService:
 
         logger.info("Product processed: id=%s, name=%s", product_id, normalized_name)
         return domain_product
-
-
-def _build_text_representation(
-    name: str, brand: str | None, category: str | None, description: str | None
-) -> str:
-    """Join the product's name/brand/category/description into one natural-language string.
-
-    Deliberately uses the *raw* submitted values (only stripped of
-    surrounding whitespace), not `_normalize_category`'s slugified result
-    (`"men-tshirts"`) — a sentence embedding model should see "Men
-    Tshirts", not a URL-safe slug. Slugifying exists purely so category
-    is a stable, exact-match filter value for the vector store; it's a
-    storage/filtering concern, not a semantic-meaning one, so this
-    function intentionally doesn't call `_normalize_category`.
-    """
-    parts = [name.strip()]
-    for part in (brand, category, description):
-        if part and part.strip():
-            parts.append(part.strip())
-    return ". ".join(parts)
 
 
 def _normalize_name(name: str) -> str:

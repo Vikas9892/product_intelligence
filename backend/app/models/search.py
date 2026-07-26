@@ -28,3 +28,26 @@ class NearestNeighbor(BaseModel):
     product_id: UUID
     score: float
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchQuery(BaseModel):
+    """A fully-resolved similarity search request.
+
+    Built by `SearchService` right after it embeds the query image —
+    bundles the resolved vector together with the search parameters and
+    which model produced it, so the rest of the search pipeline (logging,
+    calling `BaseVectorStore.search`) works with one well-typed object
+    instead of several loose positional arguments.
+    """
+
+    vector: list[float]
+    model_name: str
+    top_k: int = Field(gt=0)
+    filters: dict[str, Any] | None = None
+
+
+class SearchResult(BaseModel):
+    """The outcome of one similarity search: which model was used, and what it found."""
+
+    query_model_name: str
+    neighbors: list[NearestNeighbor]

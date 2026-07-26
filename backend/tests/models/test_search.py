@@ -2,7 +2,10 @@
 
 from uuid import uuid4
 
-from app.models.search import NearestNeighbor
+import pytest
+from pydantic import ValidationError
+
+from app.models.search import NearestNeighbor, SearchQuery, SearchResult
 
 
 class TestNearestNeighbor:
@@ -29,3 +32,42 @@ class TestNearestNeighbor:
         restored = NearestNeighbor.model_validate(dumped)
 
         assert restored == neighbor
+
+
+class TestSearchQuery:
+    def test_constructs_with_all_fields(self) -> None:
+        query = SearchQuery(
+            vector=[0.1, 0.2],
+            model_name="openai/clip-vit-base-patch32",
+            top_k=5,
+            filters={"category": "shoes"},
+        )
+
+        assert query.vector == [0.1, 0.2]
+        assert query.model_name == "openai/clip-vit-base-patch32"
+        assert query.top_k == 5
+        assert query.filters == {"category": "shoes"}
+
+    def test_filters_defaults_to_none(self) -> None:
+        query = SearchQuery(vector=[0.1], model_name="fake-model", top_k=5)
+
+        assert query.filters is None
+
+    def test_rejects_a_non_positive_top_k(self) -> None:
+        with pytest.raises(ValidationError):
+            SearchQuery(vector=[0.1], model_name="fake-model", top_k=0)
+
+
+class TestSearchResult:
+    def test_constructs_with_neighbors(self) -> None:
+        neighbor = NearestNeighbor(product_id=uuid4(), score=0.9)
+
+        result = SearchResult(query_model_name="fake-model", neighbors=[neighbor])
+
+        assert result.query_model_name == "fake-model"
+        assert result.neighbors == [neighbor]
+
+    def test_accepts_an_empty_neighbor_list(self) -> None:
+        result = SearchResult(query_model_name="fake-model", neighbors=[])
+
+        assert result.neighbors == []

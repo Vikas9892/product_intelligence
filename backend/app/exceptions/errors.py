@@ -193,3 +193,19 @@ class CatalogIntelligenceException(AppException):
     status_code = 500
     code = "catalog_intelligence_error"
     message = "Failed to enrich the product with catalog intelligence."
+
+
+class DuplicateDetectionException(AppException):
+    """Duplicate detection (candidate retrieval or similarity scoring) failed unexpectedly.
+
+    An infrastructure failure in deterministic, server-side processing —
+    not a client input problem — the same reasoning as
+    `CatalogIntelligenceException`. Hence a 500. Distinct from
+    `ConflictException` (409), which is raised when duplicate detection
+    *succeeds* and the result is "this looks like an existing product" —
+    that's an expected business outcome in `BLOCK` mode, not a failure.
+    """
+
+    status_code = 500
+    code = "duplicate_detection_error"
+    message = "Failed to evaluate the product for duplicates."

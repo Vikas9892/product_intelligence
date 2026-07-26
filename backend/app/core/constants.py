@@ -33,6 +33,23 @@ class LogLevel(StrEnum):
     CRITICAL = "CRITICAL"
 
 
+class DuplicateDetectionMode(StrEnum):
+    """How `ProductService` reacts when `DuplicateDetectionService` flags a likely duplicate.
+
+    A configuration-driven vocabulary (like `LogLevel`), not a domain
+    concept in its own right — hence living here rather than under
+    `app/models/`, mirroring `LogLevel`'s own placement.
+    """
+
+    #: Duplicate detection doesn't run at all.
+    OFF = "off"
+    #: The product is still stored/indexed; `DuplicateDecision` is attached
+    #: to the response for the caller's own judgment.
+    WARN = "warn"
+    #: The upload is rejected (`ConflictException`, 409) before indexing.
+    BLOCK = "block"
+
+
 # --- API ---
 API_V1_PREFIX = "/api/v1"
 

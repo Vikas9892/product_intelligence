@@ -22,6 +22,7 @@ from app.core import constants
 from app.core.logging import get_logger
 from app.dependencies.search import get_search_service
 from app.dependencies.upload import get_upload_service
+from app.models.search import ProductFilters
 from app.schemas.search import ProductSearchResponse, ProductSearchResult
 from app.services.upload_service import UploadService
 from app.services.vectorstore.search_service import SearchService
@@ -60,7 +61,8 @@ async def search_products(
     logger.info("Search request received: filename=%s, top_k=%d", file.filename, top_k)
 
     image = await upload_service.save_upload(file)
-    result = await search_service.search_by_image(image, top_k=top_k, category=category)
+    filters = ProductFilters(category=category) if category is not None else None
+    result = await search_service.search_by_image(image, top_k=top_k, filters=filters)
 
     return ProductSearchResponse(
         results=[

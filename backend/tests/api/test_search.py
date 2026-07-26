@@ -89,8 +89,9 @@ def search_client(tmp_path: Path) -> Iterator[TestClient]:
     app = create_app()
     vector_store = QdrantVectorStore(
         client=QdrantClient(location=":memory:"),
-        collection_name="test_search_products",
-        vector_size=_vector_size,
+        image_collection_name="test_search_products_image",
+        image_vector_size=_vector_size,
+        text_collection_name="test_search_products_text",
     )
     _override_services(app, tmp_path, vector_store=vector_store)
 

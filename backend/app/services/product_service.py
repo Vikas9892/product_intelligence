@@ -147,7 +147,7 @@ class ProductService:
             embedding=embedding,
         )
 
-        await self._vector_store.upsert(
+        await self._vector_store.upsert_image(
             [
                 VectorRecord(
                     product_id=product_id,
@@ -160,7 +160,7 @@ class ProductService:
                 )
             ]
         )
-        logger.info("Product upserted into vector store: id=%s", product_id)
+        logger.info("Product image embedding upserted into vector store: id=%s", product_id)
 
         logger.info("Product processed: id=%s, name=%s", product_id, normalized_name)
         return domain_product

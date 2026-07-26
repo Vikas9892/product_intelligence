@@ -1,11 +1,12 @@
-"""Internal domain models for semantic product search (Phase 5).
+"""Internal domain models for semantic product search (Phases 5-6).
 
 Separate from `app.schemas.search` (the API contract) for the same reason
 `app.models.product.Product` is kept separate from `app.schemas.product` —
 see that module's docstring. `NearestNeighbor` is what
 `app.services.vectorstore.base.BaseVectorStore.search` returns (one hit
-from the vector store); `SearchQuery`/`SearchResult` mediate between
-`SearchService` and the vector store.
+from the vector store); `ProductFilters` is what a search can be
+restricted by; `SearchQuery`/`SearchResult` mediate between `SearchService`
+and the vector store.
 
 `NearestNeighbor` is defined here first, ahead of the phase spec's own
 milestone numbering (which lists "Search Domain Models" as Milestone 3,
@@ -30,6 +31,24 @@ class NearestNeighbor(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProductFilters(BaseModel):
+    """Metadata filters applicable to a vector search.
+
+    Equality on `brand`/`category`, range on price (`min_price`/
+    `max_price`) — replaces Phase 5's loose `filters: dict[str, Any]`
+    contract (`{"category": "shoes"}`) now that price needs a *range*
+    condition a flat equality dict can't cleanly express without
+    inventing a mini query-DSL inside dict values, which would be worse
+    than just typing the filter properly. All fields are optional; a
+    filter left as `None` doesn't restrict results at all.
+    """
+
+    brand: str | None = None
+    category: str | None = None
+    min_price: float | None = Field(default=None, ge=0)
+    max_price: float | None = Field(default=None, ge=0)
+
+
 class SearchQuery(BaseModel):
     """A fully-resolved similarity search request.
 
@@ -43,7 +62,7 @@ class SearchQuery(BaseModel):
     vector: list[float]
     model_name: str
     top_k: int = Field(gt=0)
-    filters: dict[str, Any] | None = None
+    filters: ProductFilters | None = None
 
 
 class SearchResult(BaseModel):

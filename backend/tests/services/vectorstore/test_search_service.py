@@ -18,11 +18,11 @@ import pytest
 from PIL import Image
 
 from app.exceptions.errors import InvalidImageException
-from app.models.search import NearestNeighbor
+from app.models.search import NearestNeighbor, ProductFilters
 from app.schemas.product import ProductImage
 from app.services.embeddings.base import BaseEmbeddingService
 from app.services.image_processing_service import ImageProcessingService
-from app.services.vectorstore.base import BaseVectorStore, VectorRecord
+from app.services.vectorstore.base import BaseVectorStore, VectorCollection, VectorRecord
 from app.services.vectorstore.search_service import SearchService
 
 
@@ -48,23 +48,31 @@ class _FakeVectorStore(BaseVectorStore):
         self._neighbors = neighbors if neighbors is not None else []
         self.search_calls: list[dict[str, Any]] = []
 
-    async def upsert(self, records: list[VectorRecord]) -> None:
+    async def upsert(self, collection: VectorCollection, records: list[VectorRecord]) -> None:
         return None
 
     async def search(
         self,
+        collection: VectorCollection,
         query_vector: list[float],
         *,
         top_k: int,
-        filters: dict[str, Any] | None = None,
+        filters: ProductFilters | None = None,
     ) -> list[NearestNeighbor]:
-        self.search_calls.append({"query_vector": query_vector, "top_k": top_k, "filters": filters})
+        self.search_calls.append(
+            {
+                "collection": collection,
+                "query_vector": query_vector,
+                "top_k": top_k,
+                "filters": filters,
+            }
+        )
         return self._neighbors[:top_k]
 
-    async def delete(self, product_ids: list) -> None:  # type: ignore[type-arg]
+    async def delete(self, collection: VectorCollection, product_ids: list) -> None:  # type: ignore[type-arg]
         return None
 
-    async def exists(self, product_id) -> bool:  # type: ignore[no-untyped-def]
+    async def exists(self, collection: VectorCollection, product_id) -> bool:  # type: ignore[no-untyped-def]
         return False
 
     async def health(self) -> bool:
@@ -145,17 +153,18 @@ class TestSearchByImage:
 
         assert vector_store.search_calls[0]["top_k"] == 3
 
-    async def test_category_becomes_a_metadata_filter(self, tmp_path: Path) -> None:
+    async def test_filters_are_passed_through_to_the_vector_store(self, tmp_path: Path) -> None:
         vector_store = _FakeVectorStore()
         service = _build_service(tmp_path, vector_store=vector_store)
         image = _image()
         _write_valid_image(tmp_path, image.stored_filename)
+        filters = ProductFilters(category="shoes")
 
-        await service.search_by_image(image, category="shoes")
+        await service.search_by_image(image, filters=filters)
 
-        assert vector_store.search_calls[0]["filters"] == {"category": "shoes"}
+        assert vector_store.search_calls[0]["filters"] == filters
 
-    async def test_no_category_means_no_filters(self, tmp_path: Path) -> None:
+    async def test_no_filters_means_none_is_passed_through(self, tmp_path: Path) -> None:
         vector_store = _FakeVectorStore()
         service = _build_service(tmp_path, vector_store=vector_store)
         image = _image()
@@ -164,6 +173,16 @@ class TestSearchByImage:
         await service.search_by_image(image)
 
         assert vector_store.search_calls[0]["filters"] is None
+
+    async def test_searches_the_image_collection(self, tmp_path: Path) -> None:
+        vector_store = _FakeVectorStore()
+        service = _build_service(tmp_path, vector_store=vector_store)
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+
+        await service.search_by_image(image)
+
+        assert vector_store.search_calls[0]["collection"] == VectorCollection.IMAGE
 
     async def test_embeds_the_standardized_processed_image_not_the_original_upload(
         self, tmp_path: Path

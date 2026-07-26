@@ -109,23 +109,45 @@ class AIModelSettings(BaseModel):
 
 
 class VectorStoreSettings(BaseModel):
-    """Qdrant vector store configuration for semantic product search (Phase 5).
+    """Qdrant vector store configuration for semantic product search (Phases 5-6).
 
-    `collection_name` is auto-created by `QdrantVectorStore` on first use
-    if it doesn't already exist. `vector_size` must match whatever
-    embedding model is actually configured (`ai_models.clip_model_name`)
-    — it's a separate setting rather than read from `ai_models` directly
-    because the vector store's collection shape and the embedding model's
+    Two independent collections (Phase 6) — `image_collection_name`/
+    `image_vector_size` for `CLIPEmbeddingService` output,
+    `text_collection_name`/`text_vector_size` for
+    `SentenceTransformerEmbeddingService` output — each auto-created by
+    `QdrantVectorStore` on first use if it doesn't already exist. Each
+    `*_vector_size` must match its corresponding embedding model's actual
+    output dimension (`ai_models.clip_model_name`/`ai_models.text_model_name`)
+    — kept as separate settings rather than read from `ai_models` directly,
+    because a vector store's collection shape and an embedding model's
     output shape are conceptually independent facts that only happen to
     need the same value today.
     """
 
     url: str = "http://localhost:6333"
-    collection_name: str = constants.DEFAULT_VECTOR_COLLECTION_NAME
-    vector_size: int = Field(default=constants.DEFAULT_VECTOR_SIZE, gt=0)
-    #: Default number of neighbors `SearchService` returns when a caller
-    #: doesn't specify `top_k` explicitly.
+    image_collection_name: str = constants.DEFAULT_IMAGE_COLLECTION_NAME
+    image_vector_size: int = Field(default=constants.DEFAULT_IMAGE_VECTOR_SIZE, gt=0)
+    text_collection_name: str = constants.DEFAULT_TEXT_COLLECTION_NAME
+    text_vector_size: int = Field(default=constants.DEFAULT_TEXT_VECTOR_SIZE, gt=0)
+    #: Default number of neighbors a search returns when a caller doesn't
+    #: specify `top_k` explicitly.
     default_top_k: int = Field(default=constants.DEFAULT_SEARCH_TOP_K, gt=0)
+
+
+class HybridSearchSettings(BaseModel):
+    """Score-fusion weights for `HybridSearchService` (Phase 6).
+
+    `Final Score = image_weight * ImageScore + text_weight * TextScore`,
+    with a missing modality contributing zero — see
+    `HybridSearchService`'s own docstring for the full fusion algorithm.
+    Kept as their own settings group (mirroring `VectorStoreSettings`
+    being separate from `AIModelSettings`) rather than folded into
+    `AIModelSettings`, since these are ranking/fusion behavior, not model
+    configuration.
+    """
+
+    image_weight: float = Field(default=0.7, ge=0)
+    text_weight: float = Field(default=0.3, ge=0)
 
 
 class StorageSettings(BaseModel):
@@ -187,6 +209,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     ai_models: AIModelSettings = Field(default_factory=AIModelSettings)
     vector_store: VectorStoreSettings = Field(default_factory=VectorStoreSettings)
+    hybrid_search: HybridSearchSettings = Field(default_factory=HybridSearchSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

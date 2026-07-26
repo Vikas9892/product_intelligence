@@ -25,7 +25,7 @@ from app.services.product_service import (
     _normalize_name,
     _normalize_price,
 )
-from app.services.vectorstore.base import BaseVectorStore, VectorRecord
+from app.services.vectorstore.base import BaseVectorStore, VectorCollection, VectorRecord
 
 
 class _FakeEmbeddingService(BaseEmbeddingService):
@@ -61,32 +61,37 @@ class _FakeVectorStore(BaseVectorStore):
     """A deterministic, instant stand-in for `QdrantVectorStore`.
 
     `ProductService`'s own tests care about orchestration (is the right
-    `VectorRecord` upserted?), not Qdrant behaviour itself — that's
-    `test_qdrant_store.py`'s job.
+    `VectorRecord` upserted, into the right collection?), not Qdrant
+    behaviour itself — that's `test_qdrant_store.py`'s job.
     """
 
     def __init__(self, *, fail: bool = False) -> None:
         self._fail = fail
-        self.upserted: list[VectorRecord] = []
+        self.upserted_image: list[VectorRecord] = []
+        self.upserted_text: list[VectorRecord] = []
 
-    async def upsert(self, records: list[VectorRecord]) -> None:
+    async def upsert(self, collection: VectorCollection, records: list[VectorRecord]) -> None:
         if self._fail:
             raise VectorStoreException("fake vector store failure")
-        self.upserted.extend(records)
+        if collection is VectorCollection.IMAGE:
+            self.upserted_image.extend(records)
+        else:
+            self.upserted_text.extend(records)
 
     async def search(
         self,
+        collection: VectorCollection,
         query_vector: list[float],
         *,
         top_k: int,
-        filters: dict[str, Any] | None = None,
+        filters: Any | None = None,
     ) -> list:  # type: ignore[type-arg]
         return []
 
-    async def delete(self, product_ids: list) -> None:  # type: ignore[type-arg]
+    async def delete(self, collection: VectorCollection, product_ids: list) -> None:  # type: ignore[type-arg]
         return None
 
-    async def exists(self, product_id) -> bool:  # type: ignore[no-untyped-def]
+    async def exists(self, collection: VectorCollection, product_id) -> bool:  # type: ignore[no-untyped-def]
         return False
 
     async def health(self) -> bool:
@@ -284,8 +289,8 @@ class TestProcessUploadVectorStoreUpsert:
 
         product = await service.process_upload(product_create, image)
 
-        assert len(vector_store.upserted) == 1
-        record = vector_store.upserted[0]
+        assert len(vector_store.upserted_image) == 1
+        record = vector_store.upserted_image[0]
         assert record.product_id == product.id
         assert record.vector == pytest.approx(product.embedding.vector)
         assert record.metadata == {

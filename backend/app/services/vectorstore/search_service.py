@@ -20,7 +20,7 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.models.search import SearchQuery, SearchResult
+from app.models.search import ProductFilters, SearchQuery, SearchResult
 from app.schemas.product import ProductImage
 from app.services.embeddings.base import BaseEmbeddingService
 from app.services.embeddings.clip_service import CLIPEmbeddingService
@@ -62,16 +62,16 @@ class SearchService:
         image: ProductImage,
         *,
         top_k: int | None = None,
-        category: str | None = None,
+        filters: ProductFilters | None = None,
     ) -> SearchResult:
         """Standardize, embed, and search for products visually similar to `image`.
 
         `image` must describe a file `UploadService` has already written
         under this service's `upload_dir` — the same contract
-        `ProductService.process_upload` uses. `category`, if given,
-        restricts results to products upserted with that exact category
-        metadata. Raises whatever `ImageProcessingService`,
-        `BaseEmbeddingService`, or `BaseVectorStore` raise on failure.
+        `ProductService.process_upload` uses. `filters`, if given,
+        restricts results by brand/category/price range. Raises whatever
+        `ImageProcessingService`, `BaseEmbeddingService`, or
+        `BaseVectorStore` raise on failure.
         """
         logger.info("Search requested: filename=%s", image.stored_filename)
 
@@ -83,7 +83,6 @@ class SearchService:
         vector = await self._embedding_service.generate_embedding(image_metadata.processed_path)
 
         resolved_top_k = top_k if top_k is not None else self._default_top_k
-        filters = {"category": category} if category is not None else None
         query = SearchQuery(
             vector=vector,
             model_name=self._embedding_service.model_name,
@@ -91,17 +90,17 @@ class SearchService:
             filters=filters,
         )
         logger.info(
-            "Executing search: model=%s, top_k=%d, filters=%s",
+            "Executing image search: model=%s, top_k=%d, filters=%s",
             query.model_name,
             query.top_k,
             query.filters,
         )
 
-        neighbors = await self._vector_store.search(
+        neighbors = await self._vector_store.search_image(
             query.vector, top_k=query.top_k, filters=query.filters
         )
         logger.info(
-            "Search completed: filename=%s, results=%d",
+            "Image search completed: filename=%s, results=%d",
             image.stored_filename,
             len(neighbors),
         )

@@ -8,6 +8,7 @@ from app.core.constants import Environment, LogLevel
 from app.core.settings import (
     AIModelSettings,
     ApplicationSettings,
+    HybridSearchSettings,
     SecuritySettings,
     Settings,
     StorageSettings,
@@ -74,17 +75,39 @@ class TestVectorStoreSettings:
         settings = VectorStoreSettings()
 
         assert settings.url == "http://localhost:6333"
-        assert settings.collection_name == "product_embeddings"
-        assert settings.vector_size == 512
+        assert settings.image_collection_name == "product_images"
+        assert settings.image_vector_size == 512
+        assert settings.text_collection_name == "product_text"
+        assert settings.text_vector_size == 384
         assert settings.default_top_k == 10
 
-    def test_rejects_a_non_positive_vector_size(self) -> None:
+    def test_rejects_a_non_positive_image_vector_size(self) -> None:
         with pytest.raises(ValidationError):
-            VectorStoreSettings(vector_size=0)
+            VectorStoreSettings(image_vector_size=0)
+
+    def test_rejects_a_non_positive_text_vector_size(self) -> None:
+        with pytest.raises(ValidationError):
+            VectorStoreSettings(text_vector_size=0)
 
     def test_rejects_a_non_positive_default_top_k(self) -> None:
         with pytest.raises(ValidationError):
             VectorStoreSettings(default_top_k=0)
+
+
+class TestHybridSearchSettings:
+    def test_defaults(self) -> None:
+        settings = HybridSearchSettings()
+
+        assert settings.image_weight == 0.7
+        assert settings.text_weight == 0.3
+
+    def test_rejects_a_negative_image_weight(self) -> None:
+        with pytest.raises(ValidationError):
+            HybridSearchSettings(image_weight=-0.1)
+
+    def test_rejects_a_negative_text_weight(self) -> None:
+        with pytest.raises(ValidationError):
+            HybridSearchSettings(text_weight=-0.1)
 
 
 class TestSecuritySettings:

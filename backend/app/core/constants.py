@@ -87,12 +87,16 @@ DEFAULT_CLIP_MODEL_NAME = "openai/clip-vit-base-patch32"
 DEFAULT_TEXT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 DEFAULT_TEXT_VECTOR_SIZE = 384
 
-# --- Vector search (Phase 5) ---
-DEFAULT_VECTOR_COLLECTION_NAME = "product_embeddings"
+# --- Vector search (Phase 5-6) ---
+# One collection per modality (Phase 6) — image and text embeddings come
+# from different models with different dimensions, and have no reason to
+# be compared against each other directly.
+DEFAULT_IMAGE_COLLECTION_NAME = "product_images"
 # Must match DEFAULT_CLIP_MODEL_NAME's (openai/clip-vit-base-patch32)
 # projection dimension — a mismatch fails the first upsert against a
 # freshly created collection.
-DEFAULT_VECTOR_SIZE = 512
+DEFAULT_IMAGE_VECTOR_SIZE = 512
+DEFAULT_TEXT_COLLECTION_NAME = "product_text"
 DEFAULT_SEARCH_TOP_K = 10
 MAX_SEARCH_TOP_K = 100
 

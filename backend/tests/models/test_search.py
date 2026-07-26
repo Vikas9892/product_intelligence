@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from app.models.search import NearestNeighbor, SearchQuery, SearchResult
+from app.models.search import NearestNeighbor, ProductFilters, SearchQuery, SearchResult
 
 
 class TestNearestNeighbor:
@@ -34,19 +34,47 @@ class TestNearestNeighbor:
         assert restored == neighbor
 
 
+class TestProductFilters:
+    def test_all_fields_default_to_none(self) -> None:
+        filters = ProductFilters()
+
+        assert filters.brand is None
+        assert filters.category is None
+        assert filters.min_price is None
+        assert filters.max_price is None
+
+    def test_constructs_with_all_fields(self) -> None:
+        filters = ProductFilters(brand="Nike", category="shoes", min_price=10.0, max_price=100.0)
+
+        assert filters.brand == "Nike"
+        assert filters.category == "shoes"
+        assert filters.min_price == 10.0
+        assert filters.max_price == 100.0
+
+    def test_rejects_a_negative_min_price(self) -> None:
+        with pytest.raises(ValidationError):
+            ProductFilters(min_price=-1.0)
+
+    def test_rejects_a_negative_max_price(self) -> None:
+        with pytest.raises(ValidationError):
+            ProductFilters(max_price=-1.0)
+
+
 class TestSearchQuery:
     def test_constructs_with_all_fields(self) -> None:
+        filters = ProductFilters(category="shoes")
+
         query = SearchQuery(
             vector=[0.1, 0.2],
             model_name="openai/clip-vit-base-patch32",
             top_k=5,
-            filters={"category": "shoes"},
+            filters=filters,
         )
 
         assert query.vector == [0.1, 0.2]
         assert query.model_name == "openai/clip-vit-base-patch32"
         assert query.top_k == 5
-        assert query.filters == {"category": "shoes"}
+        assert query.filters == filters
 
     def test_filters_defaults_to_none(self) -> None:
         query = SearchQuery(vector=[0.1], model_name="fake-model", top_k=5)

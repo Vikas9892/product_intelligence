@@ -52,12 +52,15 @@ _shared_model_manager = ModelManager(device="cpu")
 # fake) instead of a real server — these tests don't need to assert
 # anything about the vector store itself (that's `test_qdrant_store.py`'s
 # job), just that ProductService's upsert call doesn't blow up the
-# request.
-_vector_size = _shared_model_manager.get_model(_TINY_MODEL_NAME)[0].config.projection_dim
+# request. Only the image collection's size needs to match the tiny CLIP
+# checkpoint here — no text embedding service is wired into this file's
+# ProductService, so the text collection is never actually written to.
+_image_vector_size = _shared_model_manager.get_model(_TINY_MODEL_NAME)[0].config.projection_dim
 _shared_vector_store = QdrantVectorStore(
     client=QdrantClient(location=":memory:"),
-    collection_name="test_products",
-    vector_size=_vector_size,
+    image_collection_name="test_products_image",
+    image_vector_size=_image_vector_size,
+    text_collection_name="test_products_text",
 )
 
 

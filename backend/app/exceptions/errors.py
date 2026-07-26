@@ -132,6 +132,20 @@ class EmbeddingGenerationException(AppException):
     message = "Failed to generate an embedding for the processed image."
 
 
+class TextEmbeddingException(AppException):
+    """A text embedding could not be generated for a product's text representation.
+
+    An infrastructure failure (the model failed to load, inference
+    raised) rather than a client input problem — the text being embedded
+    is server-constructed (from already-validated product fields), the
+    same reasoning as `EmbeddingGenerationException`. Hence a 500.
+    """
+
+    status_code = 500
+    code = "text_embedding_error"
+    message = "Failed to generate a text embedding."
+
+
 class VectorStoreException(AppException):
     """A vector store operation (upsert, search, delete, or health check) failed.
 

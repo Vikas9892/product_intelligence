@@ -80,6 +80,13 @@ DEFAULT_PROCESSED_IMAGE_SIZE_PX = 1024
 # well-known, moderately-sized CLIP checkpoint appropriate as a default.
 DEFAULT_CLIP_MODEL_NAME = "openai/clip-vit-base-patch32"
 
+# --- Text embeddings (Phase 6) ---
+# BAAI/bge-small-en-v1.5's embedding dimension is 384 — a well-known,
+# small, retrieval-tuned sentence embedding checkpoint appropriate as a
+# default.
+DEFAULT_TEXT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+DEFAULT_TEXT_VECTOR_SIZE = 384
+
 # --- Vector search (Phase 5) ---
 DEFAULT_VECTOR_COLLECTION_NAME = "product_embeddings"
 # Must match DEFAULT_CLIP_MODEL_NAME's (openai/clip-vit-base-patch32)

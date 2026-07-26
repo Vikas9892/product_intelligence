@@ -64,12 +64,19 @@ class AIModelSettings(BaseModel):
     """AI provider and model configuration.
 
     `openai_api_key`/`embedding_model`/`llm_model` reserve the shape for a
-    later, OpenAI-based *text* embedding/LLM phase — no calls to them are
-    made yet. `clip_model_name`/`embedding_device`/`embedding_batch_size`
-    are Phase 4's actual, in-use *image* embedding configuration; kept as
-    distinctly-named fields rather than reusing `embedding_model`, since
-    a CLIP checkpoint name and an OpenAI text-embedding model name are
-    unrelated settings that happen to share the word "embedding".
+    later, OpenAI-based *LLM* phase — no calls to them are made yet;
+    "embedding_model" turned out to describe neither the image nor the
+    text embedding model this codebase actually ended up using, so it
+    stays reserved rather than repurposed. `clip_model_name`/
+    `embedding_device`/`embedding_batch_size` are Phase 4's actual,
+    in-use *image* embedding configuration; `text_model_name`/
+    `text_device`/`text_batch_size`/`text_normalize` are Phase 6's actual,
+    in-use *text* embedding configuration (Sentence Transformers, not
+    OpenAI). All are kept as distinctly-named fields rather than sharing
+    `embedding_model`, since a CLIP checkpoint name, a Sentence
+    Transformers checkpoint name, and an OpenAI text-embedding model name
+    are three unrelated settings that happen to share the word
+    "embedding".
     """
 
     openai_api_key: SecretStr | None = None
@@ -85,6 +92,20 @@ class AIModelSettings(BaseModel):
     #: How many images `CLIPEmbeddingService.generate_embeddings` sends
     #: through the model in a single forward pass.
     embedding_batch_size: int = Field(default=8, gt=0)
+
+    #: Hugging Face Hub model id for the Sentence Transformers text encoder.
+    text_model_name: str = constants.DEFAULT_TEXT_MODEL_NAME
+    #: Same "auto"/"cpu"/"cuda[:N]" convention as `embedding_device`.
+    text_device: str = "auto"
+    #: How many strings `SentenceTransformerEmbeddingService.embed_batch`
+    #: sends through the model in a single forward pass.
+    text_batch_size: int = Field(default=32, gt=0)
+    #: Whether text embeddings are L2-normalized so cosine similarity
+    #: reduces to a dot product — `CLIPEmbeddingService` normalizes
+    #: manually (Phase 4); Sentence Transformers normalizes natively via
+    #: `encode(normalize_embeddings=...)`, so this is a passthrough flag
+    #: rather than a fixed behavior.
+    text_normalize: bool = True
 
 
 class VectorStoreSettings(BaseModel):

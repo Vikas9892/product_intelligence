@@ -55,10 +55,18 @@ class TestAIModelSettings:
         assert settings.clip_model_name == "openai/clip-vit-base-patch32"
         assert settings.embedding_device == "auto"
         assert settings.embedding_batch_size == 8
+        assert settings.text_model_name == "BAAI/bge-small-en-v1.5"
+        assert settings.text_device == "auto"
+        assert settings.text_batch_size == 32
+        assert settings.text_normalize is True
 
     def test_rejects_a_non_positive_batch_size(self) -> None:
         with pytest.raises(ValidationError):
             AIModelSettings(embedding_batch_size=0)
+
+    def test_rejects_a_non_positive_text_batch_size(self) -> None:
+        with pytest.raises(ValidationError):
+            AIModelSettings(text_batch_size=0)
 
 
 class TestVectorStoreSettings:

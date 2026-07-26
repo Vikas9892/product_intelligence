@@ -3,14 +3,15 @@
 `POST /products/upload` (mounted under `settings.application.api_prefix`
 by `app/application.py`, so `/api/v1/products/upload`) accepts product
 metadata plus a single image file as `multipart/form-data`, and runs it
-through the full Phase 2A + 2B + 3 + 4 pipeline:
+through the full Phase 2A + 2B + 3 + 4 + 6 pipeline:
 
     UploadService.save_upload      -> validate + store the file (Phase 2A)
     ProductService.process_upload  -> checksum, image processing
                                        (Phase 3, via ImageProcessingService),
-                                       embedding generation (Phase 4, via
-                                       CLIPEmbeddingService), normalize,
-                                       validate, generate ID (2B)
+                                       image + text embedding generation
+                                       (Phases 4 and 6, via CLIPEmbeddingService
+                                       and SentenceTransformerEmbeddingService),
+                                       normalize, validate, generate ID (2B)
 
 Unlike `app/api/health.py`'s system routes (deliberately unversioned),
 this is a real, versioned business endpoint, so it belongs under the
@@ -67,6 +68,7 @@ async def upload_product(
     file: Annotated[UploadFile, File(description="The product image file.")],
     upload_service: Annotated[UploadService, Depends(get_upload_service)],
     product_service: Annotated[ProductService, Depends(get_product_service)],
+    brand: Annotated[str | None, Form(max_length=100)] = None,
     description: Annotated[str | None, Form(max_length=2000)] = None,
     category: Annotated[str | None, Form(max_length=100)] = None,
     price: Annotated[float | None, Form(ge=0)] = None,
@@ -82,7 +84,7 @@ async def upload_product(
     shape the response.
     """
     product_input = ProductCreate(
-        name=name, description=description, category=category, price=price
+        name=name, brand=brand, description=description, category=category, price=price
     )
     logger.info(
         "Upload request received: product_name=%s, filename=%s",
@@ -97,6 +99,7 @@ async def upload_product(
         product_id=product.id,
         product=ProductCreate(
             name=product.name,
+            brand=product.brand,
             description=product.description,
             category=product.category,
             price=product.price,

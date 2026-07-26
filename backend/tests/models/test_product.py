@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from app.models.embedding import ImageEmbedding
 from app.models.image_metadata import ImageMetadata
 from app.models.product import Product
+from app.models.text_embedding import TextEmbedding
 from app.utils.metadata import FileMetadata
 
 
@@ -41,6 +42,15 @@ def _embedding(product_id: UUID) -> ImageEmbedding:
     )
 
 
+def _text_embedding(product_id: UUID) -> TextEmbedding:
+    return TextEmbedding(
+        product_id=product_id,
+        model_name="BAAI/bge-small-en-v1.5",
+        embedding_dimension=3,
+        vector=[0.5, 0.6, 0.7],
+    )
+
+
 class TestProduct:
     def test_constructs_with_all_fields(self) -> None:
         product_id = uuid4()
@@ -50,22 +60,26 @@ class TestProduct:
         product = Product(
             id=product_id,
             name="Widget",
+            brand="Nike",
             description="A fine widget",
             category="men-tshirts",
             price=19.99,
             file_metadata=file_metadata,
             image_metadata=image_metadata,
             embedding=_embedding(product_id),
+            text_embedding=_text_embedding(product_id),
         )
 
         assert product.id == product_id
         assert product.name == "Widget"
+        assert product.brand == "Nike"
         assert product.description == "A fine widget"
         assert product.category == "men-tshirts"
         assert product.price == 19.99
         assert product.file_metadata == file_metadata
         assert product.image_metadata == image_metadata
         assert product.embedding.product_id == product_id
+        assert product.text_embedding.product_id == product_id
 
     def test_accepts_optional_fields_as_none(self) -> None:
         product_id = uuid4()
@@ -73,14 +87,17 @@ class TestProduct:
         product = Product(
             id=product_id,
             name="Minimal Widget",
+            brand=None,
             description=None,
             category=None,
             price=None,
             file_metadata=_file_metadata(),
             image_metadata=_image_metadata(),
             embedding=_embedding(product_id),
+            text_embedding=_text_embedding(product_id),
         )
 
+        assert product.brand is None
         assert product.description is None
         assert product.category is None
         assert product.price is None
@@ -91,12 +108,14 @@ class TestProduct:
         product = Product(
             id=product_id,
             name="Widget",
+            brand=None,
             description=None,
             category=None,
             price=None,
             file_metadata=_file_metadata(),
             image_metadata=_image_metadata(),
             embedding=_embedding(product_id),
+            text_embedding=_text_embedding(product_id),
         )
 
         dumped = product.model_dump(mode="json")

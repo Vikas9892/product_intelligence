@@ -29,6 +29,7 @@ from app.dependencies.search import get_search_service
 from app.dependencies.upload import get_upload_service
 from app.services.embeddings.clip_service import CLIPEmbeddingService
 from app.services.embeddings.model_manager import ModelManager
+from app.services.embeddings.text_base import BaseTextEmbeddingService
 from app.services.image_processing_service import ImageProcessingService
 from app.services.product_service import ProductService
 from app.services.upload_service import UploadService
@@ -41,6 +42,29 @@ _SEARCH_URL = f"{settings.application.api_prefix}/products/search"
 _TINY_MODEL_NAME = "hf-internal-testing/tiny-random-CLIPModel"
 _shared_model_manager = ModelManager(device="cpu")
 _vector_size = _shared_model_manager.get_model(_TINY_MODEL_NAME)[0].config.projection_dim
+
+
+class _FakeTextEmbeddingService(BaseTextEmbeddingService):
+    """A fast stand-in for the real Sentence Transformers service.
+
+    This file exercises the image search pipeline, not text embedding
+    quality, so uploads here don't need a real text model — just one that
+    doesn't blow up `ProductService.process_upload`'s text-indexing step.
+    """
+
+    @property
+    def model_name(self) -> str:
+        return "fake-text-model"
+
+    @property
+    def dimension(self) -> int:
+        return 4
+
+    async def embed_text(self, text: str) -> list[float]:
+        return [0.1, 0.2, 0.3, 0.4]
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [await self.embed_text(text) for text in texts]
 
 
 def _image_bytes(
@@ -74,6 +98,7 @@ def _override_services(app: FastAPI, upload_dir: Path, *, vector_store: QdrantVe
         upload_dir=upload_dir,
         image_processing_service=image_processing_service,
         embedding_service=embedding_service,
+        text_embedding_service=_FakeTextEmbeddingService(),
         vector_store=vector_store,
     )
     app.dependency_overrides[get_search_service] = lambda: SearchService(
@@ -92,6 +117,7 @@ def search_client(tmp_path: Path) -> Iterator[TestClient]:
         image_collection_name="test_search_products_image",
         image_vector_size=_vector_size,
         text_collection_name="test_search_products_text",
+        text_vector_size=4,
     )
     _override_services(app, tmp_path, vector_store=vector_store)
 
@@ -145,8 +171,10 @@ class TestSearchProducts:
         )
         assert match["metadata"] == {
             "name": "Nike Widget",
+            "brand": None,
             "category": "men-tshirts",
             "price": 19.99,
+            "description": None,
         }
 
     def test_never_returns_a_raw_vector(self, search_client: TestClient) -> None:

@@ -21,6 +21,7 @@ class TestProductCreate:
         product = ProductCreate(name="Widget")
 
         assert product.name == "Widget"
+        assert product.brand is None
         assert product.description is None
         assert product.category is None
         assert product.price is None

@@ -12,14 +12,18 @@ from app.exceptions.errors import (
     ChecksumException,
     EmbeddingGenerationException,
     InvalidImageException,
+    TextEmbeddingException,
     ValidationException,
     VectorStoreException,
 )
 from app.schemas.product import ProductCreate, ProductImage
 from app.services.embeddings.base import BaseEmbeddingService
+from app.services.embeddings.text_base import BaseTextEmbeddingService
 from app.services.image_processing_service import ImageProcessingService
 from app.services.product_service import (
     ProductService,
+    _build_text_representation,
+    _normalize_brand,
     _normalize_category,
     _normalize_description,
     _normalize_name,
@@ -55,6 +59,36 @@ class _FakeEmbeddingService(BaseEmbeddingService):
 
     async def generate_embeddings(self, image_paths: list[Path]) -> list[list[float]]:
         return [await self.generate_embedding(path) for path in image_paths]
+
+
+class _FakeTextEmbeddingService(BaseTextEmbeddingService):
+    """A deterministic, instant stand-in for `SentenceTransformerEmbeddingService`.
+
+    Same reasoning as `_FakeEmbeddingService` — orchestration, not model
+    quality, is what `ProductService`'s own tests care about.
+    """
+
+    def __init__(self, *, dimension: int = 3, fail: bool = False) -> None:
+        self._dimension = dimension
+        self._fail = fail
+        self.calls: list[str] = []
+
+    @property
+    def model_name(self) -> str:
+        return "fake-text-model"
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    async def embed_text(self, text: str) -> list[float]:
+        self.calls.append(text)
+        if self._fail:
+            raise TextEmbeddingException("fake text embedding failure")
+        return [0.2 * (i + 1) for i in range(self._dimension)]
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [await self.embed_text(text) for text in texts]
 
 
 class _FakeVectorStore(BaseVectorStore):
@@ -102,17 +136,23 @@ def _build_service(
     tmp_path: Path,
     *,
     embedding_service: BaseEmbeddingService | None = None,
+    text_embedding_service: BaseTextEmbeddingService | None = None,
     vector_store: BaseVectorStore | None = None,
 ) -> ProductService:
     # Every test gets its own ImageProcessingService pointed at a tmp_path
     # subdirectory — never the real settings.storage.processed_dir — and
     # fake embedding/vector-store services instead of loading a real CLIP
-    # model or talking to Qdrant.
+    # or Sentence Transformers model, or talking to Qdrant.
     return ProductService(
         upload_dir=tmp_path,
         image_processing_service=ImageProcessingService(processed_dir=tmp_path / "processed"),
         embedding_service=(
             embedding_service if embedding_service is not None else _FakeEmbeddingService()
+        ),
+        text_embedding_service=(
+            text_embedding_service
+            if text_embedding_service is not None
+            else _FakeTextEmbeddingService()
         ),
         vector_store=vector_store if vector_store is not None else _FakeVectorStore(),
     )
@@ -148,6 +188,43 @@ class TestNormalizeName:
 
     def test_preserves_case(self) -> None:
         assert _normalize_name("Nike") == "Nike"
+
+
+class TestNormalizeBrand:
+    def test_returns_none_for_none(self) -> None:
+        assert _normalize_brand(None) is None
+
+    def test_trims_surrounding_whitespace(self) -> None:
+        assert _normalize_brand("  Nike  ") == "Nike"
+
+    def test_all_whitespace_normalizes_to_none(self) -> None:
+        assert _normalize_brand("   ") is None
+
+
+class TestBuildTextRepresentation:
+    def test_joins_all_parts(self) -> None:
+        text = _build_text_representation("Widget", "Nike", "Men Tshirts", "A fine shirt")
+
+        assert text == "Widget. Nike. Men Tshirts. A fine shirt"
+
+    def test_omits_missing_parts(self) -> None:
+        text = _build_text_representation("Widget", None, None, None)
+
+        assert text == "Widget"
+
+    def test_omits_blank_parts(self) -> None:
+        text = _build_text_representation("Widget", "   ", "Men Tshirts", None)
+
+        assert text == "Widget. Men Tshirts"
+
+    def test_does_not_slugify_category(self) -> None:
+        # Unlike `_normalize_category`, which slugifies for storage/
+        # filtering — the text representation is meant for a semantic
+        # embedding model, so it should stay natural language.
+        text = _build_text_representation("Widget", None, "Men Tshirts", None)
+
+        assert "Men Tshirts" in text
+        assert "men-tshirts" not in text
 
 
 class TestNormalizeDescription:
@@ -279,13 +356,55 @@ class TestProcessUploadEmbedding:
             await service.process_upload(ProductCreate(name="Widget"), image)
 
 
+class TestProcessUploadTextEmbedding:
+    async def test_populates_text_embedding_from_the_text_embedding_service(
+        self, tmp_path: Path
+    ) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        fake_text_embedding_service = _FakeTextEmbeddingService(dimension=3)
+        service = _build_service(tmp_path, text_embedding_service=fake_text_embedding_service)
+
+        product = await service.process_upload(ProductCreate(name="Widget"), image)
+
+        assert product.text_embedding.product_id == product.id
+        assert product.text_embedding.model_name == "fake-text-model"
+        assert product.text_embedding.embedding_dimension == 3
+        assert product.text_embedding.vector == pytest.approx([0.2, 0.4, 0.6])
+
+    async def test_embeds_the_name_brand_category_and_description(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        fake_text_embedding_service = _FakeTextEmbeddingService()
+        service = _build_service(tmp_path, text_embedding_service=fake_text_embedding_service)
+        product_create = ProductCreate(
+            name="Widget", brand="Nike", category="Men Tshirts", description="A fine shirt"
+        )
+
+        await service.process_upload(product_create, image)
+
+        assert fake_text_embedding_service.calls == ["Widget. Nike. Men Tshirts. A fine shirt"]
+
+    async def test_propagates_text_embedding_exception(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        service = _build_service(
+            tmp_path, text_embedding_service=_FakeTextEmbeddingService(fail=True)
+        )
+
+        with pytest.raises(TextEmbeddingException):
+            await service.process_upload(ProductCreate(name="Widget"), image)
+
+
 class TestProcessUploadVectorStoreUpsert:
-    async def test_upserts_a_record_matching_the_built_product(self, tmp_path: Path) -> None:
+    async def test_upserts_an_image_record_matching_the_built_product(self, tmp_path: Path) -> None:
         image = _image()
         _write_valid_image(tmp_path, image.stored_filename)
         vector_store = _FakeVectorStore()
         service = _build_service(tmp_path, vector_store=vector_store)
-        product_create = ProductCreate(name="Nike Widget", category="Men Tshirts", price=19.99)
+        product_create = ProductCreate(
+            name="Nike Widget", brand="Nike", category="Men Tshirts", price=19.99
+        )
 
         product = await service.process_upload(product_create, image)
 
@@ -295,8 +414,33 @@ class TestProcessUploadVectorStoreUpsert:
         assert record.vector == pytest.approx(product.embedding.vector)
         assert record.metadata == {
             "name": "Nike Widget",
+            "brand": "Nike",
             "category": "men-tshirts",
             "price": 19.99,
+            "description": None,
+        }
+
+    async def test_upserts_a_text_record_matching_the_built_product(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        vector_store = _FakeVectorStore()
+        service = _build_service(tmp_path, vector_store=vector_store)
+        product_create = ProductCreate(
+            name="Nike Widget", brand="Nike", category="Men Tshirts", price=19.99
+        )
+
+        product = await service.process_upload(product_create, image)
+
+        assert len(vector_store.upserted_text) == 1
+        record = vector_store.upserted_text[0]
+        assert record.product_id == product.id
+        assert record.vector == pytest.approx(product.text_embedding.vector)
+        assert record.metadata == {
+            "name": "Nike Widget",
+            "brand": "Nike",
+            "category": "men-tshirts",
+            "price": 19.99,
+            "description": None,
         }
 
     async def test_propagates_vector_store_exception(self, tmp_path: Path) -> None:

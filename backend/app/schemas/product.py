@@ -33,6 +33,7 @@ class ProductCreate(BaseModel):
     """
 
     name: str = Field(min_length=1, max_length=200, description="Product name.")
+    brand: str | None = Field(default=None, max_length=100)
     description: str | None = Field(default=None, max_length=2000)
     category: str | None = Field(default=None, max_length=100)
     price: float | None = Field(default=None, ge=0)

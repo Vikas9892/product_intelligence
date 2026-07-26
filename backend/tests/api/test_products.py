@@ -33,6 +33,7 @@ from app.dependencies.product import get_product_service
 from app.dependencies.upload import get_upload_service
 from app.services.embeddings.clip_service import CLIPEmbeddingService
 from app.services.embeddings.model_manager import ModelManager
+from app.services.embeddings.text_base import BaseTextEmbeddingService
 from app.services.image_processing_service import ImageProcessingService
 from app.services.product_service import ProductService
 from app.services.upload_service import UploadService
@@ -48,19 +49,41 @@ _UPLOAD_URL = f"{settings.application.api_prefix}/products/upload"
 _TINY_MODEL_NAME = "hf-internal-testing/tiny-random-CLIPModel"
 _shared_model_manager = ModelManager(device="cpu")
 
+
+class _FakeTextEmbeddingService(BaseTextEmbeddingService):
+    """A fast, deterministic stand-in for the real Sentence Transformers
+    service — these tests exercise the upload *pipeline*, not text
+    embedding quality (that's `test_sentence_transformer_service.py`'s
+    job), so there's no reason to pay a real model's load cost here.
+    """
+
+    @property
+    def model_name(self) -> str:
+        return "fake-text-model"
+
+    @property
+    def dimension(self) -> int:
+        return 4
+
+    async def embed_text(self, text: str) -> list[float]:
+        return [0.1, 0.2, 0.3, 0.4]
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [await self.embed_text(text) for text in texts]
+
+
 # An in-memory Qdrant instance (the real client's own local mode, not a
 # fake) instead of a real server — these tests don't need to assert
 # anything about the vector store itself (that's `test_qdrant_store.py`'s
-# job), just that ProductService's upsert call doesn't blow up the
-# request. Only the image collection's size needs to match the tiny CLIP
-# checkpoint here — no text embedding service is wired into this file's
-# ProductService, so the text collection is never actually written to.
+# job), just that ProductService's upsert calls don't blow up the
+# request. `text_vector_size` matches `_FakeTextEmbeddingService.dimension`.
 _image_vector_size = _shared_model_manager.get_model(_TINY_MODEL_NAME)[0].config.projection_dim
 _shared_vector_store = QdrantVectorStore(
     client=QdrantClient(location=":memory:"),
     image_collection_name="test_products_image",
     image_vector_size=_image_vector_size,
     text_collection_name="test_products_text",
+    text_vector_size=4,
 )
 
 
@@ -80,6 +103,7 @@ def _override_services(app: FastAPI, upload_dir: Path) -> None:
         embedding_service=CLIPEmbeddingService(
             model_name=_TINY_MODEL_NAME, model_manager=_shared_model_manager
         ),
+        text_embedding_service=_FakeTextEmbeddingService(),
         vector_store=_shared_vector_store,
     )
 
@@ -114,7 +138,12 @@ class TestUploadProductSuccess:
     ) -> None:
         response = upload_client.post(
             _UPLOAD_URL,
-            data={"name": " Nike ", "description": "  A fine shirt  ", "category": "Men Tshirts"},
+            data={
+                "name": " Nike ",
+                "brand": "  Nike  ",
+                "description": "  A fine shirt  ",
+                "category": "Men Tshirts",
+            },
             files=_image_file(),
         )
 
@@ -122,6 +151,7 @@ class TestUploadProductSuccess:
         body = response.json()
         assert body["product"] == {
             "name": "Nike",
+            "brand": "Nike",
             "description": "A fine shirt",
             "category": "men-tshirts",
             "price": None,

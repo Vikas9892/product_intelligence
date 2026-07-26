@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from app.models.embedding import ImageEmbedding
 from app.models.image_metadata import ImageMetadata
+from app.models.text_embedding import TextEmbedding
 from app.utils.metadata import FileMetadata
 
 
@@ -42,6 +43,7 @@ class Product(BaseModel):
 
     id: UUID
     name: str
+    brand: str | None
     description: str | None
     category: str | None
     price: float | None
@@ -52,3 +54,7 @@ class Product(BaseModel):
     #: Populated by `CLIPEmbeddingService` (Phase 4) — always present,
     #: since every upload is embedded right after image processing.
     embedding: ImageEmbedding
+    #: Populated by `SentenceTransformerEmbeddingService` (Phase 6) —
+    #: always present, generated immediately after the image embedding
+    #: from the product's name/brand/category/description.
+    text_embedding: TextEmbedding

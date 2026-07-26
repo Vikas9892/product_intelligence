@@ -159,3 +159,22 @@ class VectorStoreException(AppException):
     status_code = 500
     code = "vector_store_error"
     message = "The vector store operation failed."
+
+
+class HybridSearchException(AppException):
+    """A hybrid search's score-fusion step failed unexpectedly.
+
+    `HybridSearchService` delegates image search to `SearchService`, text
+    search to `TextSearchService`, and each already raises its own
+    specific, meaningful exception on failure (`InvalidImageException`,
+    `TextEmbeddingException`, `VectorStoreException`, ...) — those
+    propagate as-is, unwrapped, since rewrapping an already-specific error
+    would only lose information. This exception exists for the merge/
+    fusion step itself: an infrastructure failure in code that has no
+    client-input component to blame, the same reasoning as
+    `VectorStoreException`. Hence a 500.
+    """
+
+    status_code = 500
+    code = "hybrid_search_error"
+    message = "Failed to combine image and text search results."

@@ -5,7 +5,14 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from app.models.search import NearestNeighbor, ProductFilters, SearchQuery, SearchResult
+from app.models.search import (
+    HybridSearchResult,
+    NearestNeighbor,
+    ProductFilters,
+    SearchModality,
+    SearchQuery,
+    SearchResult,
+)
 
 
 class TestNearestNeighbor:
@@ -99,3 +106,40 @@ class TestSearchResult:
         result = SearchResult(query_model_name="fake-model", neighbors=[])
 
         assert result.neighbors == []
+
+
+class TestHybridSearchResult:
+    def test_constructs_with_all_fields(self) -> None:
+        product_id = uuid4()
+
+        result = HybridSearchResult(
+            product_id=product_id,
+            score=0.87,
+            metadata={"name": "Widget"},
+            matched_modalities=[SearchModality.IMAGE, SearchModality.TEXT],
+        )
+
+        assert result.product_id == product_id
+        assert result.score == 0.87
+        assert result.metadata == {"name": "Widget"}
+        assert result.matched_modalities == [SearchModality.IMAGE, SearchModality.TEXT]
+
+    def test_metadata_defaults_to_empty_dict(self) -> None:
+        result = HybridSearchResult(
+            product_id=uuid4(), score=0.5, matched_modalities=[SearchModality.IMAGE]
+        )
+
+        assert result.metadata == {}
+
+    def test_round_trips_through_model_dump_and_validate(self) -> None:
+        result = HybridSearchResult(
+            product_id=uuid4(),
+            score=0.5,
+            metadata={"name": "Widget"},
+            matched_modalities=[SearchModality.TEXT],
+        )
+
+        dumped = result.model_dump(mode="json")
+        restored = HybridSearchResult.model_validate(dumped)
+
+        assert restored == result

@@ -17,6 +17,7 @@ built before the milestone that names them" reordering Phase 3/4 already
 used for their own domain models.
 """
 
+from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
@@ -70,3 +71,36 @@ class SearchResult(BaseModel):
 
     query_model_name: str
     neighbors: list[NearestNeighbor]
+
+
+class SearchModality(StrEnum):
+    """Which query type (Phase 6) contributed to a hybrid search match.
+
+    Deliberately a separate type from `app.services.vectorstore.base.VectorCollection`
+    even though both are currently just "image"/"text" — reusing
+    `VectorCollection` here would mean this module importing from
+    `app.services.vectorstore.base`, which already imports `NearestNeighbor`/
+    `ProductFilters` *from* this module; that would be a circular import.
+    The two enums also mean different things (which Qdrant collection an
+    operation targets, vs. which query modality matched a hybrid search
+    result) that only happen to share the same two values today.
+    """
+
+    IMAGE = "image"
+    TEXT = "text"
+
+
+class HybridSearchResult(BaseModel):
+    """One product found by a hybrid (or single-modality) search, with its fused score.
+
+    `matched_modalities` records which query type(s) actually found this
+    product — `["image"]`/`["text"]` for a single-modality search,
+    potentially both for a hybrid one, so a caller can tell a result that
+    matched on both image and text apart from one that only matched on
+    one side.
+    """
+
+    product_id: UUID
+    score: float
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    matched_modalities: list[SearchModality]

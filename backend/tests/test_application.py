@@ -27,7 +27,10 @@ from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.timing import TimingMiddleware
 
 _SYSTEM_ROUTE_PATHS = {"/health", "/ready", "/version"}
-_BUSINESS_ROUTE_PATHS = {f"{settings.application.api_prefix}/products/upload"}
+_BUSINESS_ROUTE_PATHS = {
+    f"{settings.application.api_prefix}/products/upload",
+    f"{settings.application.api_prefix}/products/search",
+}
 
 # Expected middleware stack, outermost first — see
 # `app.application._register_middleware` for the full ordering rationale.

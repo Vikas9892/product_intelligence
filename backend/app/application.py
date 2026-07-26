@@ -24,6 +24,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.health import router as health_router
 from app.api.products import router as products_router
+from app.api.search import router as search_router
 from app.core import constants
 from app.core.config import settings
 from app.exceptions.handlers import register_exception_handlers
@@ -54,14 +55,21 @@ def _register_routers(app: FastAPI) -> None:
     """Attach API routers to `app`.
 
     `health_router` (`/health`, `/ready`, `/version`) is deliberately
-    unversioned — see `app/api/health.py`. `products_router` is a real,
-    versioned business router, so it's mounted under
-    `settings.application.api_prefix` (`/api/v1`), giving
-    `/api/v1/products/upload`. Further business routers are added here the
-    same way, without touching application construction/metadata above.
+    unversioned — see `app/api/health.py`. `products_router` and
+    `search_router` are real, versioned business routers, so they're
+    mounted under `settings.application.api_prefix` (`/api/v1`), giving
+    `/api/v1/products/upload` and `/api/v1/products/search`. Both share
+    the same `/products` prefix declared on each router individually
+    (FastAPI merges routers with the same prefix without conflict) rather
+    than one router with two routes, since upload and search are separate
+    concerns handled by separate services (`ProductService` vs.
+    `SearchService`) — see each router module's own docstring. Further
+    business routers are added here the same way, without touching
+    application construction/metadata above.
     """
     app.include_router(health_router)
     app.include_router(products_router, prefix=settings.application.api_prefix)
+    app.include_router(search_router, prefix=settings.application.api_prefix)
 
 
 def _register_exception_handlers(app: FastAPI) -> None:

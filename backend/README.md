@@ -1650,6 +1650,191 @@ field before this phase, so adding it (optional, following the exact
 same pattern `description`/`category`/`price` already use) was necessary
 to satisfy that requirement, not a scope-creeping addition.
 
+## Phase 7 — Catalog Intelligence & Product Enrichment design decisions
+
+This phase adds a deterministic (no LLMs, no OCR, no object detection)
+enrichment step to the upload pipeline: every product now also gets a
+structured `ProductAttributes` guess (brand/category/color/material/
+gender/age_group/style/pattern/season/occasion), a list of generated
+`CatalogTag`s, and a `quality_score`, all derived from the product's own
+submitted text and its processed image. Six pieces landed, in dependency
+order: the domain models, `TextAttributeExtractionService`,
+`ImageAttributeExtractionService`, the `CatalogIntelligenceService`
+orchestrator that merges both, upload-pipeline wiring, and finally test
+hardening.
+
+### Architecture
+
+```
+                     ProductService.process_upload
+                              │
+                    (after text embedding)
+                              ▼
+                  CatalogIntelligenceService.enrich
+                              │
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+  TextAttributeExtractionService   ImageAttributeExtractionService
+  (regex/keyword matching on       (Pillow pixel analysis on the
+   name/brand/category/description) processed image: color/brightness/
+              │                     orientation/resolution)
+              ▼                               ▼
+      list[AttributePrediction]        list[AttributePrediction]
+      list[CatalogTag]                 list[CatalogTag]
+              └───────────────┬───────────────┘
+                              ▼
+                    _merge_attributes / _merge_tags
+                  (highest confidence wins; tags dedup,
+                   agreeing sources upgrade to Source.HYBRID)
+                              ▼
+                    _compute_quality_score
+                  (weighted completeness/confidence/consistency)
+                              ▼
+                    CatalogIntelligenceResult
+          (stored on Product.catalog_intelligence; color/material/
+           gender/season/style/tags added to vector store metadata)
+```
+
+Like `HybridSearchService` (Phase 6), `CatalogIntelligenceService` is a
+thin orchestrator with no extraction logic of its own — each extraction
+service is independently testable, and the orchestrator's only job is
+merge/conflict-resolution/scoring.
+
+### Text Intelligence
+
+`TextAttributeExtractionService` is deliberately **not** `async def` —
+unlike every other service in this codebase, it does zero I/O (pure
+regex/dict-lookup over the product's own already-in-memory strings), so
+wrapping it in `run_in_threadpool` or declaring it `async` would add
+overhead for no benefit. This is a documented, reasoned exception to the
+"every service method is async" convention established since Phase 3, not
+an oversight.
+
+Already-submitted structured fields (`brand`, `category`) are trusted at
+confidence `1.0` rather than re-derived from text — a caller who typed
+"Nike" as the brand shouldn't have that overridden by a lower-confidence
+keyword match. Everything else (color, material, gender, style, pattern,
+season, occasion, age_group) comes from word-boundary keyword matching
+(`\bkeyword\b`, case-insensitive) against hand-curated lookup tables —
+`_find_first_keyword` picks the earliest-occurring match for singular
+attributes (only one value can win); `_find_all_keywords` returns every
+match for tag generation (a product can genuinely have multiple relevant
+tags). An unrecognized brand is never hallucinated — it's simply not
+returned as a prediction, matching the "don't fill with a low-confidence
+guess" philosophy carried into `CatalogIntelligenceService`'s own
+threshold logic.
+
+### Image Intelligence
+
+`ImageAttributeExtractionService` runs against the *processed* image path
+(`ImageMetadata.processed_path` — the same file `CLIPEmbeddingService`
+embeds from, already standardized by Phase 3), never the raw upload.
+`extract_attributes` only proposes `color` (the one image-derived signal
+that maps onto an actual `ProductAttributes` field — analyzing a photo
+can't reliably say "gender" or "material"); `generate_tags` additionally
+tags orientation (`portrait`/`landscape`/`square`), brightness
+(`dark`/`medium`/`bright`), and resolution (`low_resolution`), always
+returning exactly four tags. Dominant color is computed from a 50×50
+downsampled thumbnail (`Image.getcolors()`) for speed, then matched to
+the nearest of eleven named colors by squared Euclidean distance in RGB
+space — deliberately coarse (a shoe that's "crimson" reads as "Red"),
+since the goal is a searchable/filterable label, not colorimetric
+precision.
+
+### Conflict Resolution & Quality Scoring
+
+Both extraction services can propose a value for the same attribute (in
+practice, only `color`). `CatalogIntelligenceService._merge_attributes`
+groups predictions by attribute name and the **highest-confidence
+candidate wins**; a winner below `ATTRIBUTE_CONFIDENCE_THRESHOLD` is
+dropped entirely rather than filled with a low-confidence guess — the
+phase's own worked example (text says "Red" at 0.95, image says "Orange"
+at 0.61) resolves to `color: "Red"`. Tags follow similar logic but aren't
+one-per-attribute: `_merge_tags` deduplicates by tag string, upgrades a
+tag proposed by *both* extraction services to `Source.HYBRID`, sorts by
+descending confidence, and caps at `MAX_GENERATED_TAGS`.
+
+`quality_score` is a configurable weighted sum:
+
+```
+quality = QUALITY_COMPLETENESS_WEIGHT * completeness
+        + QUALITY_CONFIDENCE_WEIGHT   * confidence
+        + QUALITY_CONSISTENCY_WEIGHT  * consistency
+```
+
+- **completeness** — fraction of `ProductAttributes`' fields that got filled.
+- **confidence** — mean confidence across every filled attribute.
+- **consistency** — `1 - (conflicting attributes / attributes with any candidate)`.
+
+The result is clamped to `[0, 1]` since the three weights aren't required
+to sum to exactly `1.0` (an operator may reasonably want to tune only
+one).
+
+### Upload Integration
+
+`ProductService.process_upload` calls `CatalogIntelligenceService.enrich`
+right after text embedding generation, using the same **raw** submitted
+`name`/`brand`/`category`/`description` that `_build_text_representation`
+already uses (not `_normalize_category`'s slugified form) — a keyword
+extractor should see "Men Tshirts", not "men-tshirts", for the same
+reason a sentence embedding model should. The result is stored on the new
+`Product.catalog_intelligence` field (always present — disabled via
+settings still produces an empty `ProductAttributes`/no tags/`0.0`
+quality score, rather than making the field itself optional) and its
+`color`/`material`/`gender`/`season`/`style`/`tags` are added to the
+vector store metadata dict. `brand`/`category` in that metadata
+deliberately **stay** the pre-existing normalized/slugified values rather
+than switching to catalog intelligence's own guesses — changing what
+they mean would silently break `ProductFilters` equality-matching
+(Phase 6) for anything already indexed; the five new fields have no
+prior meaning to preserve, so they're populated directly from whatever
+catalog intelligence resolved.
+
+### Configuration
+
+New settings, all under `CatalogIntelligenceSettings`
+(`app/core/settings.py`), env prefix `CATALOG_INTELLIGENCE__`:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `CATALOG_INTELLIGENCE__ENABLED` | `true` | Master switch; disabled yields an empty `CatalogIntelligenceResult` |
+| `CATALOG_INTELLIGENCE__ENABLE_TEXT_ATTRIBUTES` | `true` | Toggle the text extraction pipeline independently |
+| `CATALOG_INTELLIGENCE__ENABLE_IMAGE_ATTRIBUTES` | `true` | Toggle the image extraction pipeline independently |
+| `CATALOG_INTELLIGENCE__ATTRIBUTE_CONFIDENCE_THRESHOLD` | `0.60` | Below this, a winning attribute/tag is dropped, not guessed |
+| `CATALOG_INTELLIGENCE__MAX_GENERATED_TAGS` | `20` | Cap on tags per product after merging |
+| `CATALOG_INTELLIGENCE__QUALITY_COMPLETENESS_WEIGHT` | `0.50` | Quality score weight |
+| `CATALOG_INTELLIGENCE__QUALITY_CONFIDENCE_WEIGHT` | `0.30` | Quality score weight |
+| `CATALOG_INTELLIGENCE__QUALITY_CONSISTENCY_WEIGHT` | `0.20` | Quality score weight |
+
+### Explicitly out of scope this phase
+
+No OCR, no LLMs/GPT calls, no YOLO/SAM/object detection, no duplicate
+detection, no recommendation engine, no Redis, no background workers, no
+new databases — every attribute/tag here comes from deterministic
+regex/keyword matching or pixel-level image statistics, matching the
+phase spec's own "Do NOT Implement" list. Duplicate detection and a
+recommendation engine are explicitly future phases that will *consume*
+this phase's attributes/tags, not something this phase builds itself.
+
+### Why does `app/models/` hold these domain models instead of a new
+`app/domain/` package (as the phase's own suggested layout names it)?
+
+Same reasoning as every model added in earlier phases: `app/models/`
+is this codebase's established location for internal domain models
+(`Product`, `ImageMetadata`, `ImageEmbedding`, `TextEmbedding`, ...);
+introducing a parallel `app/domain/` package for only this phase's models
+would fragment where "the domain model" lives for no benefit, especially
+since `Product` (in `app/models/product.py`) is precisely what
+`CatalogIntelligenceResult` attaches to.
+
+### Why does `Source` (TEXT/IMAGE/HYBRID) live in `catalog_tags.py`
+rather than its own module?
+
+Both `CatalogTag` and `AttributePrediction` need it, and `catalog_tags.py`
+is where it's first needed — a dedicated `source.py` for one three-value
+enum shared by two closely-related models would be more indirection than
+the enum itself warrants.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -2379,4 +2564,96 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden text and hybrid search test coverage (Phase 6 milestone 6/6)"
+
+## Phase 7 — Catalog Intelligence & Product Enrichment (built from scratch)
+
+```bash
+# Milestone 1/6 — catalog intelligence domain models
+#   app/models/catalog_tags.py — Source enum (TEXT/IMAGE/HYBRID), CatalogTag
+#   app/models/attribute_prediction.py — AttributePrediction
+#   app/models/product_attributes.py — ProductAttributes
+#   app/models/catalog_intelligence_result.py — CatalogIntelligenceResult
+#   app/exceptions/errors.py — added CatalogIntelligenceException
+#   tests/models/test_{catalog_tags,attribute_prediction,
+#   product_attributes,catalog_intelligence_result}.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add catalog intelligence domain models (Phase 7 milestone 1/6)"
+
+# Milestone 2/6 — TextAttributeExtractionService
+#   app/services/catalog/text_attribute_service.py — hand-curated keyword
+#   lookup tables; extract_attributes (first-match wins) and
+#   generate_tags (every match, plus descriptor keywords)
+#   tests/services/catalog/test_text_attribute_service.py — hand-written,
+#   verified against the phase's own "Nike Air Zoom Pegasus" worked example
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add deterministic text attribute extraction (Phase 7 milestone 2/6)"
+
+# Milestone 3/6 — ImageAttributeExtractionService
+#   app/core/constants.py — added LOW_RESOLUTION_MAX_PIXELS,
+#   MEDIUM_RESOLUTION_MAX_PIXELS, BRIGHTNESS_DARK_MAX, BRIGHTNESS_BRIGHT_MIN
+#   app/utils/image.py — compute_dominant_color, classify_color_name,
+#   compute_brightness, classify_brightness, classify_orientation,
+#   compute_aspect_ratio, classify_resolution
+#   app/services/catalog/image_attribute_service.py — hand-written
+#   tests/utils/test_image.py — extended
+#   tests/services/catalog/test_image_attribute_service.py — hand-written,
+#   every test against a real Pillow-generated image, no mocking
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add deterministic image attribute extraction (Phase 7 milestone 3/6)"
+
+# Milestone 4/6 — CatalogIntelligenceService orchestrator
+#   app/core/settings.py — added CatalogIntelligenceSettings
+#   backend/.env.example — documented the eight new CATALOG_INTELLIGENCE__ variables
+#   app/services/catalog/catalog_intelligence_service.py — merges
+#   AttributePrediction/CatalogTag lists (highest confidence wins,
+#   agreeing sources upgrade tags to Source.HYBRID), computes a weighted
+#   quality score
+#   tests/services/catalog/test_catalog_intelligence_service.py —
+#   fake extraction-service doubles for conflict resolution / tag merging /
+#   quality score / feature flags / error wrapping
+#   tests/core/test_settings.py — extended with TestCatalogIntelligenceSettings
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add CatalogIntelligenceService orchestrator (Phase 7 milestone 4/6)"
+
+# Milestone 5/6 — upload pipeline integration
+#   app/models/product.py — Product gained catalog_intelligence
+#   app/services/product_service.py — composes CatalogIntelligenceService,
+#   calls .enrich() right after text embedding generation using the raw
+#   submitted name/brand/category/description; adds color/material/
+#   gender/season/style/tags to vector store metadata (brand/category
+#   stay the pre-existing normalized/slugified values)
+#   tests/models/test_product.py, tests/services/test_product_service.py —
+#   updated for the new required field / new TestProcessUploadCatalogIntelligence class
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: wire catalog intelligence into the upload pipeline (Phase 7 Milestone 5)"
+
+# Milestone 6/6 — test hardening + documentation
+#   tests/services/catalog/test_catalog_intelligence_service.py —
+#   TestRealPipelineIntegration: the real (non-fake) text + image
+#   extraction services composed end-to-end against the phase's own
+#   worked example, plus a malformed-metadata (unicode/whitespace-only/
+#   very long text) no-crash test
+#   tests/services/test_product_service.py — the pre-existing concurrent-
+#   uploads test now also exercises catalog intelligence in every run
+#   backend/README.md — this section
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+uv run uvicorn app.main:app --reload   # manual smoke test: upload a
+                                        # product, confirm the
+                                        # "Catalog intelligence enrichment
+                                        # applied" log line and a
+                                        # sensible tags/quality_score
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden catalog intelligence test coverage and document Phase 7 (Phase 7 milestone 6/6)"
+git push
 ```

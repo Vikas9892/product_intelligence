@@ -4,12 +4,15 @@ Composes fake `TextAttributeExtractionService`/`ImageAttributeExtractionService`
 doubles (not the real deterministic pipelines — those are already
 covered by `test_text_attribute_service.py`/`test_image_attribute_service.py`)
 so the merge/conflict-resolution/quality-score logic can be tested
-against precisely controlled inputs.
+against precisely controlled inputs. `TestRealPipelineIntegration` at the
+bottom is the exception — it wires up the real extraction services for
+genuine end-to-end confidence, matching the phase's own worked example.
 """
 
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from app.exceptions.errors import CatalogIntelligenceException
 from app.models.attribute_prediction import AttributePrediction
@@ -352,3 +355,52 @@ class TestErrorWrapping:
 
         with pytest.raises(CatalogIntelligenceException):
             await _enrich(service, tmp_path)
+
+
+class TestRealPipelineIntegration:
+    """Runs the real (non-fake) extraction services end-to-end.
+
+    Everything above uses fakes so the merge/scoring logic can be tested
+    in isolation; this class exists to prove the real
+    `TextAttributeExtractionService` + `ImageAttributeExtractionService`
+    genuinely compose through `CatalogIntelligenceService` the way the
+    phase spec's own worked example describes.
+    """
+
+    async def test_the_phase_worked_example_end_to_end(self, tmp_path: Path) -> None:
+        image_path = tmp_path / "shoe.jpg"
+        Image.new("RGB", (400, 400), (200, 30, 30)).save(image_path, format="JPEG")
+        service = CatalogIntelligenceService()
+
+        result = await service.enrich(
+            name="Nike Air Zoom Pegasus",
+            brand="Nike",
+            category="Running Shoes",
+            description="Lightweight breathable red running shoe with mesh upper",
+            image_path=image_path,
+        )
+
+        assert result.attributes.brand == "Nike"
+        assert result.attributes.category == "Running Shoes"
+        assert result.attributes.color == "Red"
+        assert result.attributes.material == "Mesh"
+        assert result.attributes.style == "Running"
+        assert "running" in {tag.tag for tag in result.tags}
+        assert 0.0 < result.quality_score <= 1.0
+        assert result.processing_time >= 0.0
+
+    async def test_malformed_metadata_does_not_crash_the_pipeline(self, tmp_path: Path) -> None:
+        image_path = tmp_path / "photo.jpg"
+        Image.new("RGB", (10, 10), (0, 0, 0)).save(image_path, format="JPEG")
+        service = CatalogIntelligenceService()
+
+        result = await service.enrich(
+            name="   \t\n  ",
+            brand="",
+            category=None,
+            description="!!! @@@ ### 日本語 emoji 🚀🚀🚀 " + ("x" * 5000),
+            image_path=image_path,
+        )
+
+        assert isinstance(result, CatalogIntelligenceResult)
+        assert 0.0 <= result.quality_score <= 1.0

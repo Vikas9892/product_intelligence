@@ -80,6 +80,15 @@ DEFAULT_PROCESSED_IMAGE_SIZE_PX = 1024
 # well-known, moderately-sized CLIP checkpoint appropriate as a default.
 DEFAULT_CLIP_MODEL_NAME = "openai/clip-vit-base-patch32"
 
+# --- Vector search (Phase 5) ---
+DEFAULT_VECTOR_COLLECTION_NAME = "product_embeddings"
+# Must match DEFAULT_CLIP_MODEL_NAME's (openai/clip-vit-base-patch32)
+# projection dimension — a mismatch fails the first upsert against a
+# freshly created collection.
+DEFAULT_VECTOR_SIZE = 512
+DEFAULT_SEARCH_TOP_K = 10
+MAX_SEARCH_TOP_K = 100
+
 # --- Pagination ---
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100

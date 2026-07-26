@@ -11,6 +11,7 @@ from app.core.settings import (
     SecuritySettings,
     Settings,
     StorageSettings,
+    VectorStoreSettings,
 )
 
 
@@ -58,6 +59,24 @@ class TestAIModelSettings:
     def test_rejects_a_non_positive_batch_size(self) -> None:
         with pytest.raises(ValidationError):
             AIModelSettings(embedding_batch_size=0)
+
+
+class TestVectorStoreSettings:
+    def test_defaults(self) -> None:
+        settings = VectorStoreSettings()
+
+        assert settings.url == "http://localhost:6333"
+        assert settings.collection_name == "product_embeddings"
+        assert settings.vector_size == 512
+        assert settings.default_top_k == 10
+
+    def test_rejects_a_non_positive_vector_size(self) -> None:
+        with pytest.raises(ValidationError):
+            VectorStoreSettings(vector_size=0)
+
+    def test_rejects_a_non_positive_default_top_k(self) -> None:
+        with pytest.raises(ValidationError):
+            VectorStoreSettings(default_top_k=0)
 
 
 class TestSecuritySettings:

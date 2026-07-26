@@ -87,6 +87,26 @@ class AIModelSettings(BaseModel):
     embedding_batch_size: int = Field(default=8, gt=0)
 
 
+class VectorStoreSettings(BaseModel):
+    """Qdrant vector store configuration for semantic product search (Phase 5).
+
+    `collection_name` is auto-created by `QdrantVectorStore` on first use
+    if it doesn't already exist. `vector_size` must match whatever
+    embedding model is actually configured (`ai_models.clip_model_name`)
+    — it's a separate setting rather than read from `ai_models` directly
+    because the vector store's collection shape and the embedding model's
+    output shape are conceptually independent facts that only happen to
+    need the same value today.
+    """
+
+    url: str = "http://localhost:6333"
+    collection_name: str = constants.DEFAULT_VECTOR_COLLECTION_NAME
+    vector_size: int = Field(default=constants.DEFAULT_VECTOR_SIZE, gt=0)
+    #: Default number of neighbors `SearchService` returns when a caller
+    #: doesn't specify `top_k` explicitly.
+    default_top_k: int = Field(default=constants.DEFAULT_SEARCH_TOP_K, gt=0)
+
+
 class StorageSettings(BaseModel):
     """Local/object storage for uploaded product assets."""
 
@@ -145,6 +165,7 @@ class Settings(BaseSettings):
     application: ApplicationSettings = Field(default_factory=ApplicationSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     ai_models: AIModelSettings = Field(default_factory=AIModelSettings)
+    vector_store: VectorStoreSettings = Field(default_factory=VectorStoreSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

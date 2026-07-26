@@ -130,3 +130,18 @@ class EmbeddingGenerationException(AppException):
     status_code = 500
     code = "embedding_generation_error"
     message = "Failed to generate an embedding for the processed image."
+
+
+class VectorStoreException(AppException):
+    """A vector store operation (upsert, search, delete, or health check) failed.
+
+    An infrastructure failure (Qdrant unreachable, a malformed collection,
+    a client-library error) rather than a client input problem — the
+    embedding being stored/searched has already been validated by the time
+    this runs. Hence a 500, the same reasoning as `ChecksumException` and
+    `EmbeddingGenerationException`.
+    """
+
+    status_code = 500
+    code = "vector_store_error"
+    message = "The vector store operation failed."

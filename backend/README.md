@@ -2029,6 +2029,226 @@ duplicate detection from needing its own parallel image-processing path.
 It's a real, accepted redundancy — the same trade-off `HybridSearchService`
 already documents for over-fetching in score fusion — not an oversight.
 
+## Phase 9 — Intelligent Recommendation Engine design decisions
+
+This phase adds a recommendation engine that finds products related to
+an *already-uploaded* one, identified only by ID — "similar products"
+and "related products," with "complementary products" reserved for a
+future phase. Five pieces landed, in dependency order: the domain models
+(plus retrieval-by-ID infrastructure the whole phase depends on),
+`RecommendationScorer`, `RecommendationEngineService` (retrieval, ranking,
+diversity), the `GET /products/{id}/recommendations` endpoint, and
+human-readable explanations.
+
+### Architecture
+
+```
+                     GET /products/{id}/recommendations
+                              │
+                              ▼
+              RecommendationEngineService.recommend
+                              │
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+   BaseVectorStore.retrieve_text     HybridSearchService.search_by_product_id
+   (target's own stored metadata)    (target's own stored vector(s) as the
+              │                       query — no re-upload needed; self
+              │                       already excluded from results)
+              │                               │
+              │                               ▼
+              │                    top-K candidates (overfetched 3x
+              │                     when diversity is enabled)
+              │                               │
+              └───────────────┬───────────────┘
+                               ▼
+                  RecommendationScorer.score (once per candidate)
+          ┌──────────┬──────────┬──────────┬──────────┐
+          ▼          ▼          ▼          ▼
+     Similarity   Attribute      Tag       Quality
+     (reused        Match       Match     (candidate's own
+      hybrid      (color/       (Jaccard   stored quality_score)
+      search      material/      overlap
+      score)      gender/...)   of tags)
+          └──────────┴──────────┴──────────┴──────────┘
+                               ▼
+                  RecommendationCandidate (final_score + reason)
+                               ▼
+                  sort by final_score, descending
+                               ▼
+                  diversity filter (round-robin by brand)
+                               ▼
+                  explanation generation (per final candidate)
+                               ▼
+                  RecommendationResult (top_k, ranked)
+```
+
+Like `DuplicateDetectionService` (Phase 8), `RecommendationEngineService`
+is a thin orchestrator — `RecommendationScorer` owns every signal
+computation, so the same scorer can be reused by a future cross-encoder
+reranker (Phase 10) or pricing intelligence phase without dragging
+retrieval/ranking/diversity logic along with it. That separation is this
+phase's own explicitly stated design goal.
+
+### Finding a Product by ID Alone
+
+`GET /products/{id}/recommendations` takes only a product ID — no image
+or text is resubmitted. Since this project still has no database (see
+"No database write" notes throughout this README), the *only* place a
+product's own data lives after upload is Qdrant itself. This phase adds
+that lookup capability:
+
+- `BaseVectorStore` gains `retrieve(collection, product_id) -> StoredPoint | None`
+  (plus `retrieve_image`/`retrieve_text` convenience wrappers) — fetches
+  a point's own stored vector *and* metadata directly by ID, distinct
+  from `search` (which finds *other* points by similarity).
+- `SearchService`/`TextSearchService` each gain `search_by_vector`
+  (search using an already-computed vector, skipping embedding
+  generation entirely) and `retrieve_by_id` (delegates to the vector
+  store's own `retrieve_image`/`retrieve_text`).
+- `HybridSearchService` gains `search_by_product_id`: fetches the
+  target's own stored vector(s), searches with them via
+  `search_by_vector`, fuses the same way `.search()` already does, and
+  **excludes the target product itself** from the results (Milestone 3's
+  "Remove Self" step) — internally requesting one extra candidate so
+  self-exclusion never silently shrinks the caller's requested `top_k`.
+
+`ProductService` also now writes `quality_score` (Phase 7's
+`CatalogIntelligenceResult.quality_score`) into vector metadata — the
+only way a candidate's quality score survives being retrieved purely by
+ID rather than freshly computed.
+
+### Scoring
+
+`RecommendationScorer.score` computes four independent signals per
+candidate and combines them:
+
+```
+final_score = SIMILARITY_WEIGHT   * similarity
+            + ATTRIBUTE_WEIGHT    * attribute_match
+            + TAG_WEIGHT          * tag_match
+            + QUALITY_WEIGHT      * quality_score
+```
+
+- **similarity** — the candidate's own fused score from hybrid
+  retrieval, reused as-is (the same "reuse what retrieval already
+  computed" reasoning `SimilarityScorer`, Phase 8, established).
+- **attribute match** — the fraction of `color`/`material`/`gender`/
+  `season`/`style` that agree (case-insensitive) between target and
+  candidate, counted only over fields present on both sides.
+  `brand`/`category` are intentionally excluded from this continuous
+  score — they get their own `shared_brand`/`shared_category` booleans
+  instead, since they're usually the single most salient fact behind
+  "why was this recommended."
+- **tag match** — Jaccard overlap (`|shared| / |union|`) between the
+  target's and candidate's tag sets.
+- **quality** — the candidate's own stored `quality_score`.
+
+Clamped to `[0, 1]`; `RecommendationSettings` validates the four weights
+sum to exactly `1.0`, the same reasoning `DuplicateDetectionSettings`
+(Phase 8) already established for its own four-weight formula. The
+scorer never ranks or compares candidates against each other — that's
+`RecommendationEngineService`'s job.
+
+### Diversity
+
+Without a diversity step, a catalog dominated by one brand would return
+five near-identical results ("Nike, Nike, Nike, Nike, Nike"). `_diversify`
+groups already-score-sorted candidates by their own `brand` metadata and
+takes one candidate per brand per round — best-scoring first — round-
+robining across brands until `top_k` is filled ("Nike, Adidas, Puma,
+Asics, Nike, ..."). This only works if there's variety to diversify
+*from*, so `RecommendationEngineService` overfetches
+(`_DIVERSITY_OVERFETCH_MULTIPLIER = 3`) candidates beyond the requested
+`top_k` whenever `RECOMMENDATION_DIVERSITY_ENABLED` is on; disabling it
+requests exactly `top_k` and returns the raw score order.
+
+### `SIMILAR` vs `RELATED`
+
+Both recommendation types use the exact same scoring formula — the phase
+spec describes one formula, not two per type. What differs is which
+stored embedding(s) anchor candidate retrieval: `SIMILAR` uses the
+target's full hybrid (image + text) profile; `RELATED` restricts
+retrieval to `SearchModality.TEXT` alone, decoupling the result from
+pure visual likeness (e.g. a shirt's "related" results lean on
+category/attributes rather than which photo looks most alike).
+`COMPLEMENTARY` ("goes well with," e.g. socks for shoes) is intentionally
+left unimplemented — it needs a different kind of relationship entirely
+(products that pair well together, not products that resemble each
+other) that neither similarity signal here can express, matching the
+phase spec's own "future-ready" framing.
+
+### Explanations
+
+`RecommendationScorer` only produces *structured* evidence
+(`RecommendationReason` — matched attribute names, shared tags, two
+booleans); `RecommendationEngineService` turns that into a plain-English
+sentence once per final, diversified recommendation — phrasing is a
+presentation concern, kept separate from *what* matched. Applicable
+clauses (similar visual appearance, same category, same brand, shared
+attributes, matching tags, high catalog quality) are joined in a fixed,
+most-salient-first order; a candidate matching on nothing specific still
+gets an honest fallback ("Related based on overall similarity.") rather
+than an empty string.
+
+### API
+
+`GET /products/{id}/recommendations` accepts optional `top_k`/
+`recommendation_type` query parameters and returns, per recommendation:
+`product_id`, `score`, a nested `reason` (`matched_attributes`,
+`matched_tags`, `shared_brand`, `shared_category`), and `explanation`.
+Never includes a raw embedding vector or `product_id` isn't found returns
+404 (`ResourceNotFoundException`) — the same "don't expose data a client
+can't act on" and not-found conventions every earlier phase's endpoints
+already establish.
+
+### Configuration
+
+New settings, all under `RecommendationSettings` (`app/core/settings.py`),
+env prefix `RECOMMENDATION__`:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `RECOMMENDATION__ENABLED` | `true` | Master switch |
+| `RECOMMENDATION__TOP_K` | `10` | Default recommendations returned (a per-request `top_k` can override) |
+| `RECOMMENDATION__DIVERSITY_ENABLED` | `true` | Round-robin-by-brand diversity filter |
+| `RECOMMENDATION__SIMILARITY_WEIGHT` | `0.55` | Final-score formula weight |
+| `RECOMMENDATION__ATTRIBUTE_WEIGHT` | `0.20` | Final-score formula weight |
+| `RECOMMENDATION__TAG_WEIGHT` | `0.15` | Final-score formula weight |
+| `RECOMMENDATION__QUALITY_WEIGHT` | `0.10` | Final-score formula weight |
+
+The four weights must sum to `1.0` (validated at settings-load time).
+
+### Explicitly out of scope this phase
+
+No collaborative filtering, no user behavior analytics, no purchase
+history, no matrix factorization, no deep learning recommenders, no
+LLM-generated recommendations, no Redis caching, no background workers,
+no cross-encoder reranking (reserved for Phase 10), no pricing
+intelligence, no frontend/UI — matching the phase spec's own "Do NOT
+Implement" list. Every signal here is deterministic (reused retrieval
+scores, rapidfuzz-free exact/Jaccard matching, a fixed weighted formula).
+
+### Why does `RecommendationEngineService` hold its own `BaseVectorStore`,
+when `HybridSearchService` already composes one indirectly?
+
+`HybridSearchService`'s own `SearchService`/`TextSearchService` are
+private to it — reaching into `hybrid_search_service._search_service`
+from outside would break encapsulation. Fetching the target product's
+own metadata (needed for the attribute/tag/quality signals) is a direct
+lookup this class needs independently of hybrid search's own retrieval,
+so it composes `BaseVectorStore` directly, the same way `ProductService`
+already does for its own reasons.
+
+### Why does `RecommendationCandidate` (Milestone 1) double as both
+`RecommendationScorer`'s return type and the unit `RecommendationEngineService`
+ranks, unlike Phase 8's `DuplicateResult`/`DuplicateCandidate` split?
+
+`similarity_score`/`quality_score`/`final_score`/`reason` already *is*
+the full detail — there's no separate "list of raw per-signal weight/
+contribution objects" this phase needs the way Phase 8's `SimilaritySignal`
+list captured. Inventing a second, structurally-identical type purely to
+mirror Phase 8's shape would be indirection without benefit.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -2955,5 +3175,98 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden duplicate detection test coverage and document Phase 8 (Phase 8 milestone 6/6)"
+git push
+```
+
+## Phase 9 — Intelligent Recommendation Engine (built from scratch)
+
+```bash
+# Milestone 1/6 — recommendation domain models + retrieval-by-ID infra
+#   app/models/recommendation_type.py — RecommendationType (SIMILAR/RELATED/COMPLEMENTARY)
+#   app/models/recommendation_reason.py — RecommendationReason
+#   app/models/recommendation_candidate.py — RecommendationCandidate
+#   app/models/recommendation_result.py — RecommendationResult
+#   app/exceptions/errors.py — added RecommendationException
+#   app/models/search.py — added StoredPoint
+#   app/services/vectorstore/base.py — added retrieve/retrieve_image/retrieve_text
+#   app/services/vectorstore/qdrant_store.py — implements retrieve()
+#   app/services/vectorstore/search_service.py, text_search_service.py —
+#   each gained search_by_vector + retrieve_by_id
+#   app/services/vectorstore/hybrid_search_service.py — added
+#   search_by_product_id (self-exclusion, +1 internal overfetch)
+#   app/services/product_service.py — vector metadata gained quality_score
+#   tests/models/test_recommendation_{type,reason,candidate,result}.py,
+#   tests/services/vectorstore/test_{base,qdrant_store,search_service,
+#   text_search_service,hybrid_search_service}.py — hand-written / extended
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add recommendation domain models and retrieval-by-ID infra (Phase 9 milestone 1/6)"
+
+# Milestone 2/6 — RecommendationScorer
+#   app/core/settings.py — added RecommendationSettings (weights validated to sum to 1.0)
+#   backend/.env.example — documented the seven new RECOMMENDATION__ variables
+#   app/services/recommendation/recommendation_scorer.py — hand-written:
+#   similarity (reused)/attribute match/tag match (Jaccard)/quality, weighted
+#   tests/core/test_settings.py — extended
+#   tests/services/recommendation/test_recommendation_scorer.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add RecommendationScorer (Phase 9 milestone 2/6)"
+
+# Milestone 3/6 — RecommendationEngineService orchestrator
+#   app/services/recommendation/recommendation_engine_service.py —
+#   hand-written: search_by_product_id retrieves candidates, scores each,
+#   sorts, diversifies (round-robin by brand, 3x overfetch)
+#   tests/services/recommendation/test_recommendation_engine_service.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add RecommendationEngineService orchestrator (Phase 9 milestone 3/6)"
+
+# Milestone 4/6 — recommendations API endpoint
+#   app/dependencies/recommendation.py — get_recommendation_engine_service
+#   app/schemas/recommendation.py — RecommendationReasonInfo, RecommendationInfo,
+#   RecommendationsResponse
+#   app/api/products.py — GET /products/{id}/recommendations
+#   tests/schemas/test_recommendation.py, tests/dependencies/test_recommendation.py,
+#   tests/api/test_recommendations.py, tests/test_application.py — hand-written / updated
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add recommendations API endpoint (Phase 9 milestone 4/6)"
+
+# Milestone 5/6 — recommendation explanations
+#   app/services/recommendation/recommendation_engine_service.py —
+#   _build_explanation: turns RecommendationReason + scores into one
+#   plain-English sentence per final, diversified recommendation
+#   tests/services/recommendation/test_recommendation_engine_service.py,
+#   tests/api/test_recommendations.py — extended
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: generate human-readable recommendation explanations (Phase 9 milestone 5/6)"
+
+# Milestone 6/6 — test hardening + documentation
+#   tests/services/recommendation/test_recommendation_scorer.py —
+#   unrelated-products, malformed-metadata (unicode, non-string values,
+#   non-list tags, non-numeric quality_score)
+#   tests/services/recommendation/test_recommendation_engine_service.py —
+#   concurrent recommend() calls each return their own uncontaminated result
+#   backend/README.md — this section
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+uv run uvicorn app.main:app --reload   # manual smoke test: upload two
+                                        # Nike products and one Adidas
+                                        # product, then GET
+                                        # /products/{id}/recommendations
+                                        # for one of the Nike products —
+                                        # confirm the other Nike product
+                                        # and the Adidas product both
+                                        # appear with populated
+                                        # reason/explanation fields
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden recommendation test coverage and document Phase 9 (Phase 9 milestone 6/6)"
 git push
 ```

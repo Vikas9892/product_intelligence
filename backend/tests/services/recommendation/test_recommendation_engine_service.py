@@ -6,6 +6,7 @@ retrieval/ranking/diversity/error-wrapping logic can be tested against
 precisely controlled inputs.
 """
 
+import asyncio
 from uuid import UUID, uuid4
 
 import pytest
@@ -478,3 +479,83 @@ class TestExplanations:
         )
 
         assert "; " in explanation
+
+
+class _RoutingFakeHybridSearchService(HybridSearchService):
+    """Returns a different candidate set per target product_id — unlike
+    `_FakeHybridSearchService`'s single fixed response, this lets a
+    concurrency test prove that concurrent `.recommend()` calls each get
+    back *their own* correct candidates, not one call's result leaking
+    into another's.
+    """
+
+    def __init__(self, results_by_product: dict[UUID, list[HybridSearchResult]]) -> None:
+        self._results_by_product = results_by_product
+
+    async def search_by_product_id(
+        self,
+        product_id: UUID,
+        *,
+        top_k: int | None = None,
+        filters: ProductFilters | None = None,
+        modality: SearchModality | None = None,
+    ) -> list[HybridSearchResult]:
+        await asyncio.sleep(0)  # yield control, widening any race window
+        return self._results_by_product[product_id]
+
+
+class _RoutingFakeVectorStore(BaseVectorStore):
+    """Returns a different target `StoredPoint` per product_id."""
+
+    def __init__(self, points_by_product: dict[UUID, StoredPoint]) -> None:
+        self._points_by_product = points_by_product
+
+    async def upsert(self, collection: VectorCollection, records: list[VectorRecord]) -> None:
+        return None
+
+    async def search(
+        self,
+        collection: VectorCollection,
+        query_vector: list[float],
+        *,
+        top_k: int,
+        filters: ProductFilters | None = None,
+    ) -> list:  # type: ignore[type-arg]
+        return []
+
+    async def delete(self, collection: VectorCollection, product_ids: list) -> None:  # type: ignore[type-arg]
+        return None
+
+    async def exists(self, collection: VectorCollection, product_id: UUID) -> bool:
+        return product_id in self._points_by_product
+
+    async def retrieve(self, collection: VectorCollection, product_id: UUID) -> StoredPoint | None:
+        await asyncio.sleep(0)  # yield control, widening any race window
+        return self._points_by_product.get(product_id)
+
+    async def health(self) -> bool:
+        return True
+
+
+class TestConcurrency:
+    async def test_concurrent_recommend_calls_each_return_their_own_result(self) -> None:
+        targets = [uuid4() for _ in range(8)]
+        candidate_by_target = {target: uuid4() for target in targets}
+        results_by_product = {
+            target: [_hybrid_result(candidate_id)]
+            for target, candidate_id in candidate_by_target.items()
+        }
+        points_by_product = {target: _target_point(target) for target in targets}
+        scores = dict.fromkeys(candidate_by_target.values(), 0.9)
+
+        service = RecommendationEngineService(
+            hybrid_search_service=_RoutingFakeHybridSearchService(results_by_product),
+            vector_store=_RoutingFakeVectorStore(points_by_product),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product=scores),
+            diversity_enabled=False,
+        )
+
+        results = await asyncio.gather(*(service.recommend(product_id=t) for t in targets))
+
+        for target, result in zip(targets, results, strict=True):
+            assert result.recommendations[0].product_id == candidate_by_target[target]

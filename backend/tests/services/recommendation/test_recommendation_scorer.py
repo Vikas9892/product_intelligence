@@ -188,3 +188,82 @@ class TestSignalShape:
 
         # default similarity_weight=0.55, everything else zero-contribution here.
         assert result.final_score == pytest.approx(0.55)
+
+
+class TestUnrelatedProducts:
+    def test_a_completely_unrelated_product_scores_low(self) -> None:
+        target_metadata = {
+            "brand": "Nike",
+            "category": "running-shoes",
+            "color": "Red",
+            "material": "Mesh",
+            "tags": ["running", "red", "lightweight"],
+            "quality_score": 0.9,
+        }
+        candidate = _candidate(
+            score=0.05,
+            metadata={
+                "brand": "Acme",
+                "category": "furniture",
+                "color": "Brown",
+                "material": "Oak",
+                "tags": ["chair", "wooden", "vintage"],
+                "quality_score": 0.9,
+            },
+        )
+        scorer = _scorer()
+
+        result = scorer.score(target_metadata=target_metadata, candidate=candidate)
+
+        assert result.final_score < 0.3
+        assert result.reason.shared_brand is False
+        assert result.reason.shared_category is False
+        assert result.reason.matched_attributes == []
+        assert result.reason.shared_tags == []
+
+
+class TestMalformedMetadata:
+    def test_unicode_and_very_long_tag_values_do_not_crash(self) -> None:
+        scorer = _scorer()
+        candidate = _candidate(metadata={"tags": ["日本語", "🚀" * 500, "  ", None, 123]})
+
+        result = scorer.score(
+            target_metadata={"tags": ["日本語"]},
+            candidate=candidate,
+        )
+
+        assert "日本語" in result.reason.shared_tags
+
+    def test_non_string_attribute_values_are_ignored_not_crashed_on(self) -> None:
+        scorer = _scorer()
+        candidate = _candidate(metadata={"color": 42, "material": None, "gender": ["Men"]})
+
+        result = scorer.score(
+            target_metadata={"color": "Red", "material": "Mesh"}, candidate=candidate
+        )
+
+        assert result.reason.matched_attributes == []
+
+    def test_a_non_list_tags_value_is_treated_as_no_tags(self) -> None:
+        scorer = _scorer()
+        candidate = _candidate(metadata={"tags": "not-a-list"})
+
+        result = scorer.score(target_metadata={"tags": ["running"]}, candidate=candidate)
+
+        assert result.reason.shared_tags == []
+
+    def test_a_non_numeric_quality_score_defaults_to_zero(self) -> None:
+        scorer = _scorer()
+        candidate = _candidate(metadata={"quality_score": "high"})
+
+        result = scorer.score(target_metadata={}, candidate=candidate)
+
+        assert result.quality_score == 0.0
+
+    def test_empty_target_and_candidate_metadata_does_not_crash(self) -> None:
+        scorer = _scorer()
+        candidate = _candidate(metadata={})
+
+        result = scorer.score(target_metadata={}, candidate=candidate)
+
+        assert 0.0 <= result.final_score <= 1.0

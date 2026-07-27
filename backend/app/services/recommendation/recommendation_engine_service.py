@@ -45,6 +45,15 @@ across brands until `top_k` is filled — the same product catalog that
 would naively return five Nike results in a row instead surfaces Nike,
 Adidas, Puma, Asics, then a second Nike, matching the phase's own worked
 example.
+
+**Explanations (Milestone 5).** `RecommendationScorer` only produces
+*structured* evidence (`RecommendationReason` — a list of attribute
+names, a list of shared tags, two booleans); turning that into a
+human-readable sentence ("Similar visual appearance; same category;
+shared attributes (color, material)") is this class's job, applied once
+per final, diversified recommendation — not the scorer's, since phrasing
+is a presentation concern independent of *what* matched. See
+`_build_explanation`.
 """
 
 import time
@@ -69,6 +78,17 @@ logger = get_logger(__name__)
 #: the diversity filter has enough variety to work with — see module
 #: docstring.
 _DIVERSITY_OVERFETCH_MULTIPLIER = 3
+
+#: A candidate's own `similarity_score`/`quality_score` above this counts
+#: as "high" for explanation purposes — a fixed threshold, not a
+#: `RecommendationSettings` field, since it governs *wording*, not
+#: scoring/ranking behavior itself.
+_HIGH_SCORE_THRESHOLD = 0.7
+
+#: At most this many shared tags are named in an explanation — a
+#: product sharing a dozen tags with the target doesn't need all twelve
+#: spelled out to make the point.
+_MAX_EXPLANATION_TAGS = 3
 
 _ScoredPair = tuple[HybridSearchResult, RecommendationCandidate]
 
@@ -157,12 +177,20 @@ class RecommendationEngineService:
             else:
                 scored_pairs = scored_pairs[:resolved_top_k]
 
-            recommendations = [candidate for _, candidate in scored_pairs]
+            recommendations = [
+                candidate.model_copy(update={"explanation": _build_explanation(candidate)})
+                for _, candidate in scored_pairs
+            ]
         except Exception as exc:
             raise RecommendationException(
                 "Failed to score or rank recommendation candidates."
             ) from exc
 
+        logger.info(
+            "Explanation generation complete: product_id=%s, count=%d",
+            product_id,
+            len(recommendations),
+        )
         processing_time = time.monotonic() - start
         logger.info(
             "Recommendations generated: product_id=%s, type=%s, count=%d, processing_time=%.4fs",
@@ -226,3 +254,36 @@ def _diversify(scored_pairs: list[_ScoredPair], *, top_k: int) -> list[_ScoredPa
         round_index += 1
 
     return diversified
+
+
+def _build_explanation(candidate: RecommendationCandidate) -> str:
+    """Turn `candidate.reason` (plus its own scores) into one human-readable sentence.
+
+    Applies whichever clauses are true for this candidate, in a fixed,
+    most-salient-first order, joined into one sentence — a candidate that
+    matches on nothing specific (no shared brand/category/attributes/tags,
+    unremarkable similarity and quality) still gets a non-empty,
+    honest fallback rather than an empty string.
+    """
+    clauses: list[str] = []
+
+    if candidate.similarity_score >= _HIGH_SCORE_THRESHOLD:
+        clauses.append("similar visual appearance")
+    if candidate.reason.shared_category:
+        clauses.append("same category")
+    if candidate.reason.shared_brand:
+        clauses.append("same brand")
+    if candidate.reason.matched_attributes:
+        attributes = ", ".join(candidate.reason.matched_attributes)
+        clauses.append(f"shared attributes ({attributes})")
+    if candidate.reason.shared_tags:
+        tags = ", ".join(candidate.reason.shared_tags[:_MAX_EXPLANATION_TAGS])
+        clauses.append(f"matching tags ({tags})")
+    if candidate.quality_score >= _HIGH_SCORE_THRESHOLD:
+        clauses.append("high catalog quality")
+
+    if not clauses:
+        return "Related based on overall similarity."
+
+    sentence = "; ".join(clauses)
+    return f"{sentence[0].upper()}{sentence[1:]}."

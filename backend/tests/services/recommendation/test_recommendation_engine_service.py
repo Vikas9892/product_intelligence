@@ -83,6 +83,17 @@ class _FakeRecommendationScorer(RecommendationScorer):
         )
 
 
+class _FixedRecommendationScorer(RecommendationScorer):
+    """Returns a pre-built `RecommendationCandidate` verbatim, for full control over
+    `similarity_score`/`quality_score`/`reason` in explanation tests."""
+
+    def __init__(self, *, candidates_by_product: dict[UUID, RecommendationCandidate]) -> None:
+        self._candidates_by_product = candidates_by_product
+
+    def score(self, *, target_metadata, candidate) -> RecommendationCandidate:  # type: ignore[no-untyped-def]
+        return self._candidates_by_product[candidate.product_id]
+
+
 def _hybrid_result(product_id: UUID, *, brand: str | None = None) -> HybridSearchResult:
     return HybridSearchResult(
         product_id=product_id,
@@ -332,3 +343,138 @@ class TestErrorWrapping:
 
         with pytest.raises(RecommendationException):
             await service.recommend(product_id=uuid4())
+
+
+class TestExplanations:
+    async def _recommend_one(self, candidate: RecommendationCandidate) -> str:
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(
+                results=[_hybrid_result(candidate.product_id)]
+            ),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FixedRecommendationScorer(
+                candidates_by_product={candidate.product_id: candidate}
+            ),
+            diversity_enabled=False,
+        )
+        result = await service.recommend(product_id=uuid4())
+        return result.recommendations[0].explanation
+
+    async def test_high_similarity_mentions_visual_appearance(self) -> None:
+        explanation = await self._recommend_one(
+            RecommendationCandidate(
+                product_id=uuid4(),
+                similarity_score=0.9,
+                quality_score=0.0,
+                final_score=0.9,
+                reason=RecommendationReason(),
+            )
+        )
+
+        assert "similar visual appearance" in explanation.lower()
+
+    async def test_shared_category_is_mentioned(self) -> None:
+        explanation = await self._recommend_one(
+            RecommendationCandidate(
+                product_id=uuid4(),
+                similarity_score=0.0,
+                quality_score=0.0,
+                final_score=0.0,
+                reason=RecommendationReason(shared_category=True),
+            )
+        )
+
+        assert "same category" in explanation.lower()
+
+    async def test_shared_brand_is_mentioned(self) -> None:
+        explanation = await self._recommend_one(
+            RecommendationCandidate(
+                product_id=uuid4(),
+                similarity_score=0.0,
+                quality_score=0.0,
+                final_score=0.0,
+                reason=RecommendationReason(shared_brand=True),
+            )
+        )
+
+        assert "same brand" in explanation.lower()
+
+    async def test_matched_attributes_are_named(self) -> None:
+        explanation = await self._recommend_one(
+            RecommendationCandidate(
+                product_id=uuid4(),
+                similarity_score=0.0,
+                quality_score=0.0,
+                final_score=0.0,
+                reason=RecommendationReason(matched_attributes=["color", "material"]),
+            )
+        )
+
+        assert "shared attributes (color, material)" in explanation.lower()
+
+    async def test_shared_tags_are_named_and_truncated(self) -> None:
+        explanation = await self._recommend_one(
+            RecommendationCandidate(
+                product_id=uuid4(),
+                similarity_score=0.0,
+                quality_score=0.0,
+                final_score=0.0,
+                reason=RecommendationReason(shared_tags=["running", "red", "blue", "green"]),
+            )
+        )
+
+        assert "matching tags (running, red, blue)" in explanation.lower()
+        assert "green" not in explanation.lower()
+
+    async def test_high_quality_is_mentioned(self) -> None:
+        explanation = await self._recommend_one(
+            RecommendationCandidate(
+                product_id=uuid4(),
+                similarity_score=0.0,
+                quality_score=0.9,
+                final_score=0.5,
+                reason=RecommendationReason(),
+            )
+        )
+
+        assert "high catalog quality" in explanation.lower()
+
+    async def test_no_matching_signals_yields_a_fallback_explanation(self) -> None:
+        explanation = await self._recommend_one(
+            RecommendationCandidate(
+                product_id=uuid4(),
+                similarity_score=0.1,
+                quality_score=0.1,
+                final_score=0.1,
+                reason=RecommendationReason(),
+            )
+        )
+
+        assert explanation == "Related based on overall similarity."
+
+    async def test_explanation_is_capitalized_and_ends_with_a_period(self) -> None:
+        explanation = await self._recommend_one(
+            RecommendationCandidate(
+                product_id=uuid4(),
+                similarity_score=0.9,
+                quality_score=0.0,
+                final_score=0.9,
+                reason=RecommendationReason(),
+            )
+        )
+
+        assert explanation[0].isupper()
+        assert explanation.endswith(".")
+
+    async def test_multiple_clauses_are_joined(self) -> None:
+        explanation = await self._recommend_one(
+            RecommendationCandidate(
+                product_id=uuid4(),
+                similarity_score=0.9,
+                quality_score=0.9,
+                final_score=0.9,
+                reason=RecommendationReason(shared_category=True, shared_brand=True),
+            )
+        )
+
+        assert "; " in explanation

@@ -202,6 +202,7 @@ class TestGetRecommendations:
         assert "matched_attributes" in recommendation["reason"]
         assert "matched_tags" in recommendation["reason"]
         assert isinstance(recommendation["explanation"], str)
+        assert recommendation["explanation"] != ""
 
     def test_respects_a_custom_top_k(self, recommendations_client: TestClient) -> None:
         target_id = _seed_product(recommendations_client, name="Nike Air Zoom", brand="Nike")

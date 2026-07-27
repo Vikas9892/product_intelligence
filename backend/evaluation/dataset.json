@@ -1,0 +1,21 @@
+[
+  {
+    "query_id": "retrieval-red-running-shoes",
+    "task_type": "retrieval",
+    "query": "red running shoes",
+    "expected_products": []
+  },
+  {
+    "query_id": "recommendation-example",
+    "task_type": "recommendation",
+    "product_id": "00000000-0000-0000-0000-000000000000",
+    "expected_products": []
+  },
+  {
+    "query_id": "duplicate-example",
+    "task_type": "duplicate",
+    "product_id": "00000000-0000-0000-0000-000000000000",
+    "expected_products": [],
+    "is_duplicate": false
+  }
+]

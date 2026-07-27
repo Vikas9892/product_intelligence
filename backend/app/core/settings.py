@@ -212,6 +212,42 @@ class DuplicateDetectionSettings(BaseModel):
         return self
 
 
+class RecommendationSettings(BaseModel):
+    """Recommendation configuration for `RecommendationEngineService` (Phase 9).
+
+    Unlike `DuplicateDetectionSettings` (which collapsed its own
+    would-be `enabled` flag into `mode`'s `OFF` value, since the two could
+    disagree), there's no separate mode enum here to collapse into —
+    `enabled` is the one on/off switch. `top_k` is the default number of
+    recommendations returned (a per-request `top_k` can still override
+    it); `diversity_enabled` toggles the round-robin-by-brand diversity
+    filter. The four `*_weight` fields are `RecommendationScorer`'s final-
+    score formula and are required to sum to `1.0` (validated below),
+    matching `DuplicateDetectionSettings`'s own reasoning: they represent
+    a complete split of "how much each signal counts."
+    """
+
+    enabled: bool = True
+    top_k: int = Field(default=10, gt=0)
+    diversity_enabled: bool = True
+    similarity_weight: float = Field(default=0.55, ge=0)
+    attribute_weight: float = Field(default=0.20, ge=0)
+    tag_weight: float = Field(default=0.15, ge=0)
+    quality_weight: float = Field(default=0.10, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_weights_sum_to_one(self) -> "RecommendationSettings":
+        total = (
+            self.similarity_weight + self.attribute_weight + self.tag_weight + self.quality_weight
+        )
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                "recommendation's similarity_weight + attribute_weight + tag_weight + "
+                f"quality_weight must sum to 1.0 (got {total})"
+            )
+        return self
+
+
 class StorageSettings(BaseModel):
     """Local/object storage for uploaded product assets."""
 
@@ -278,6 +314,7 @@ class Settings(BaseSettings):
     duplicate_detection: DuplicateDetectionSettings = Field(
         default_factory=DuplicateDetectionSettings
     )
+    recommendation: RecommendationSettings = Field(default_factory=RecommendationSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

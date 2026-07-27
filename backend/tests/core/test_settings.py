@@ -11,6 +11,7 @@ from app.core.settings import (
     CatalogIntelligenceSettings,
     DuplicateDetectionSettings,
     HybridSearchSettings,
+    RecommendationSettings,
     SecuritySettings,
     Settings,
     StorageSettings,
@@ -174,6 +175,36 @@ class TestDuplicateDetectionSettings:
     def test_rejects_a_non_positive_top_k(self) -> None:
         with pytest.raises(ValidationError):
             DuplicateDetectionSettings(top_k=0)
+
+
+class TestRecommendationSettings:
+    def test_defaults(self) -> None:
+        settings = RecommendationSettings()
+
+        assert settings.enabled is True
+        assert settings.top_k == 10
+        assert settings.diversity_enabled is True
+        assert settings.similarity_weight == 0.55
+        assert settings.attribute_weight == 0.20
+        assert settings.tag_weight == 0.15
+        assert settings.quality_weight == 0.10
+
+    def test_rejects_weights_that_do_not_sum_to_one(self) -> None:
+        with pytest.raises(ValidationError, match=r"must sum to 1\.0"):
+            RecommendationSettings(
+                similarity_weight=0.5, attribute_weight=0.5, tag_weight=0.5, quality_weight=0.5
+            )
+
+    def test_accepts_custom_weights_that_sum_to_one(self) -> None:
+        settings = RecommendationSettings(
+            similarity_weight=0.4, attribute_weight=0.3, tag_weight=0.2, quality_weight=0.1
+        )
+
+        assert settings.similarity_weight == 0.4
+
+    def test_rejects_a_non_positive_top_k(self) -> None:
+        with pytest.raises(ValidationError):
+            RecommendationSettings(top_k=0)
 
 
 class TestSecuritySettings:

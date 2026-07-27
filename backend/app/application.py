@@ -22,6 +22,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.api.evaluation import router as evaluation_router
 from app.api.health import router as health_router
 from app.api.products import router as products_router
 from app.api.search import router as search_router
@@ -70,6 +71,7 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(health_router)
     app.include_router(products_router, prefix=settings.application.api_prefix)
     app.include_router(search_router, prefix=settings.application.api_prefix)
+    app.include_router(evaluation_router, prefix=settings.application.api_prefix)
 
 
 def _register_exception_handlers(app: FastAPI) -> None:

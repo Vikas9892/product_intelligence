@@ -1,0 +1,334 @@
+"""Unit tests for `RecommendationEngineService`.
+
+Composes fake `HybridSearchService`/`BaseVectorStore`/`RecommendationScorer`
+doubles (each already covered by their own test modules) so the
+retrieval/ranking/diversity/error-wrapping logic can be tested against
+precisely controlled inputs.
+"""
+
+from uuid import UUID, uuid4
+
+import pytest
+
+from app.exceptions.errors import RecommendationException, ResourceNotFoundException
+from app.models.recommendation_candidate import RecommendationCandidate
+from app.models.recommendation_reason import RecommendationReason
+from app.models.recommendation_type import RecommendationType
+from app.models.search import HybridSearchResult, ProductFilters, SearchModality, StoredPoint
+from app.services.recommendation.recommendation_engine_service import RecommendationEngineService
+from app.services.recommendation.recommendation_scorer import RecommendationScorer
+from app.services.vectorstore.base import BaseVectorStore, VectorCollection, VectorRecord
+from app.services.vectorstore.hybrid_search_service import HybridSearchService
+
+
+class _FakeHybridSearchService(HybridSearchService):
+    def __init__(self, *, results: list[HybridSearchResult] | None = None) -> None:
+        self._results = results if results is not None else []
+        self.calls: list[dict[str, object]] = []
+
+    async def search_by_product_id(
+        self,
+        product_id: UUID,
+        *,
+        top_k: int | None = None,
+        filters: ProductFilters | None = None,
+        modality: SearchModality | None = None,
+    ) -> list[HybridSearchResult]:
+        self.calls.append({"product_id": product_id, "top_k": top_k, "modality": modality})
+        return self._results
+
+
+class _FakeVectorStore(BaseVectorStore):
+    def __init__(self, *, stored_point: StoredPoint | None = None) -> None:
+        self._stored_point = stored_point
+
+    async def upsert(self, collection: VectorCollection, records: list[VectorRecord]) -> None:
+        return None
+
+    async def search(
+        self,
+        collection: VectorCollection,
+        query_vector: list[float],
+        *,
+        top_k: int,
+        filters: ProductFilters | None = None,
+    ) -> list:  # type: ignore[type-arg]
+        return []
+
+    async def delete(self, collection: VectorCollection, product_ids: list) -> None:  # type: ignore[type-arg]
+        return None
+
+    async def exists(self, collection: VectorCollection, product_id) -> bool:  # type: ignore[no-untyped-def]
+        return self._stored_point is not None
+
+    async def retrieve(self, collection, product_id) -> StoredPoint | None:  # type: ignore[no-untyped-def]
+        return self._stored_point
+
+    async def health(self) -> bool:
+        return True
+
+
+class _FakeRecommendationScorer(RecommendationScorer):
+    def __init__(self, *, final_score_by_product: dict[UUID, float]) -> None:
+        self._final_score_by_product = final_score_by_product
+
+    def score(self, *, target_metadata, candidate) -> RecommendationCandidate:  # type: ignore[no-untyped-def]
+        final_score = self._final_score_by_product[candidate.product_id]
+        return RecommendationCandidate(
+            product_id=candidate.product_id,
+            similarity_score=final_score,
+            quality_score=final_score,
+            final_score=final_score,
+            reason=RecommendationReason(),
+        )
+
+
+def _hybrid_result(product_id: UUID, *, brand: str | None = None) -> HybridSearchResult:
+    return HybridSearchResult(
+        product_id=product_id,
+        score=0.5,
+        metadata={"brand": brand} if brand is not None else {},
+        matched_modalities=[SearchModality.IMAGE],
+    )
+
+
+def _target_point(product_id: UUID | None = None) -> StoredPoint:
+    return StoredPoint(
+        product_id=product_id if product_id is not None else uuid4(), vector=[0.1, 0.2]
+    )
+
+
+class TestTargetNotFound:
+    async def test_raises_resource_not_found_when_the_product_is_not_indexed(self) -> None:
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(),
+            vector_store=_FakeVectorStore(stored_point=None),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product={}),
+        )
+
+        with pytest.raises(ResourceNotFoundException):
+            await service.recommend(product_id=uuid4())
+
+
+class TestRanking:
+    async def test_recommendations_are_sorted_by_descending_final_score(self) -> None:
+        low, mid, high = uuid4(), uuid4(), uuid4()
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(
+                results=[_hybrid_result(low), _hybrid_result(high), _hybrid_result(mid)]
+            ),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(
+                final_score_by_product={low: 0.2, mid: 0.5, high: 0.9}
+            ),
+            diversity_enabled=False,
+        )
+
+        result = await service.recommend(product_id=uuid4())
+
+        assert [rec.product_id for rec in result.recommendations] == [high, mid, low]
+
+    async def test_results_are_capped_at_the_requested_top_k(self) -> None:
+        ids = [uuid4() for _ in range(5)]
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(
+                results=[_hybrid_result(pid) for pid in ids]
+            ),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(
+                final_score_by_product=dict.fromkeys(ids, 0.5)
+            ),
+            diversity_enabled=False,
+            top_k=2,
+        )
+
+        result = await service.recommend(product_id=uuid4())
+
+        assert len(result.recommendations) == 2
+
+    async def test_processing_time_is_recorded(self) -> None:
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product={}),
+        )
+
+        result = await service.recommend(product_id=uuid4())
+
+        assert result.processing_time >= 0.0
+
+    async def test_recommendation_type_is_carried_onto_the_result(self) -> None:
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product={}),
+        )
+
+        result = await service.recommend(
+            product_id=uuid4(), recommendation_type=RecommendationType.RELATED
+        )
+
+        assert result.recommendation_type is RecommendationType.RELATED
+
+
+class TestRecommendationTypeDispatch:
+    async def test_similar_uses_hybrid_modality(self) -> None:
+        hybrid_search_service = _FakeHybridSearchService()
+        service = RecommendationEngineService(
+            hybrid_search_service=hybrid_search_service,
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product={}),
+        )
+
+        await service.recommend(product_id=uuid4(), recommendation_type=RecommendationType.SIMILAR)
+
+        assert hybrid_search_service.calls[0]["modality"] is None
+
+    async def test_related_restricts_to_text_modality(self) -> None:
+        hybrid_search_service = _FakeHybridSearchService()
+        service = RecommendationEngineService(
+            hybrid_search_service=hybrid_search_service,
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product={}),
+        )
+
+        await service.recommend(product_id=uuid4(), recommendation_type=RecommendationType.RELATED)
+
+        assert hybrid_search_service.calls[0]["modality"] is SearchModality.TEXT
+
+
+class TestOverfetch:
+    async def test_diversity_enabled_overfetches_candidates(self) -> None:
+        hybrid_search_service = _FakeHybridSearchService()
+        service = RecommendationEngineService(
+            hybrid_search_service=hybrid_search_service,
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product={}),
+            diversity_enabled=True,
+            top_k=5,
+        )
+
+        await service.recommend(product_id=uuid4())
+
+        assert hybrid_search_service.calls[0]["top_k"] == 15
+
+    async def test_diversity_disabled_requests_exactly_top_k(self) -> None:
+        hybrid_search_service = _FakeHybridSearchService()
+        service = RecommendationEngineService(
+            hybrid_search_service=hybrid_search_service,
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product={}),
+            diversity_enabled=False,
+            top_k=5,
+        )
+
+        await service.recommend(product_id=uuid4())
+
+        assert hybrid_search_service.calls[0]["top_k"] == 5
+
+
+class TestDiversity:
+    async def test_avoids_returning_the_same_brand_repeatedly(self) -> None:
+        # Five Nike candidates score highest, then one each of three other
+        # brands score lower — the phase's own worked example: without
+        # diversity, top_k=4 would be all Nike; with it, every other
+        # brand should appear before a second Nike does.
+        nikes = [uuid4() for _ in range(5)]
+        adidas, puma, asics = uuid4(), uuid4(), uuid4()
+        results = [_hybrid_result(pid, brand="Nike") for pid in nikes] + [
+            _hybrid_result(adidas, brand="Adidas"),
+            _hybrid_result(puma, brand="Puma"),
+            _hybrid_result(asics, brand="Asics"),
+        ]
+        scores = {pid: 0.9 - i * 0.01 for i, pid in enumerate(nikes)}
+        scores.update({adidas: 0.5, puma: 0.4, asics: 0.3})
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(results=results),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product=scores),
+            diversity_enabled=True,
+            top_k=4,
+        )
+
+        result = await service.recommend(product_id=uuid4())
+
+        recommended_ids = [rec.product_id for rec in result.recommendations]
+        assert recommended_ids[0] == nikes[0]
+        assert set(recommended_ids[1:4]) == {adidas, puma, asics}
+
+    async def test_disabling_diversity_returns_the_raw_score_order(self) -> None:
+        nikes = [uuid4() for _ in range(4)]
+        results = [_hybrid_result(pid, brand="Nike") for pid in nikes]
+        scores = {pid: 0.9 - i * 0.01 for i, pid in enumerate(nikes)}
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(results=results),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product=scores),
+            diversity_enabled=False,
+            top_k=4,
+        )
+
+        result = await service.recommend(product_id=uuid4())
+
+        assert [rec.product_id for rec in result.recommendations] == nikes
+
+    async def test_requesting_more_than_available_candidates_returns_what_exists(self) -> None:
+        nike, adidas = uuid4(), uuid4()
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(
+                results=[
+                    _hybrid_result(nike, brand="Nike"),
+                    _hybrid_result(adidas, brand="Adidas"),
+                ]
+            ),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(
+                final_score_by_product={nike: 0.9, adidas: 0.8}
+            ),
+            diversity_enabled=True,
+            top_k=10,
+        )
+
+        result = await service.recommend(product_id=uuid4())
+
+        assert len(result.recommendations) == 2
+
+    async def test_a_missing_brand_is_still_handled_without_crashing(self) -> None:
+        product_id = uuid4()
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(
+                results=[_hybrid_result(product_id, brand=None)]
+            ),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(
+                final_score_by_product={product_id: 0.5}
+            ),
+            diversity_enabled=True,
+            top_k=1,
+        )
+
+        result = await service.recommend(product_id=uuid4())
+
+        assert len(result.recommendations) == 1
+
+
+class TestErrorWrapping:
+    async def test_wraps_an_unexpected_scoring_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        product_id = uuid4()
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(product_id)]),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(
+                final_score_by_product={product_id: 0.5}
+            ),
+        )
+
+        def _broken_score(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(service._recommendation_scorer, "score", _broken_score)
+
+        with pytest.raises(RecommendationException):
+            await service.recommend(product_id=uuid4())

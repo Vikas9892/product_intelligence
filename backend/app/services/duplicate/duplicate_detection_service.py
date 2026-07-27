@@ -21,17 +21,20 @@ concurrent requests — the same reasoning already established for
 
 import time
 from typing import Any
+from uuid import UUID
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.exceptions.errors import DuplicateDetectionException
+from app.exceptions.errors import DuplicateDetectionException, ResourceNotFoundException
 from app.models.duplicate_candidate import DuplicateCandidate
 from app.models.duplicate_decision import DuplicateDecision
 from app.models.duplicate_result import DuplicateResult
 from app.models.product_attributes import ProductAttributes
 from app.schemas.product import ProductImage
 from app.services.duplicate.similarity_scorer import SimilarityScorer
+from app.services.vectorstore.base import BaseVectorStore
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
+from app.services.vectorstore.qdrant_store import QdrantVectorStore
 from app.utils.text import build_text_representation
 
 logger = get_logger(__name__)
@@ -44,6 +47,7 @@ class DuplicateDetectionService:
         self,
         *,
         hybrid_search_service: HybridSearchService | None = None,
+        vector_store: BaseVectorStore | None = None,
         similarity_scorer: SimilarityScorer | None = None,
         top_k: int | None = None,
         threshold: float | None = None,
@@ -51,6 +55,14 @@ class DuplicateDetectionService:
         self._hybrid_search_service = (
             hybrid_search_service if hybrid_search_service is not None else HybridSearchService()
         )
+        #: Only used by `detect_by_product_id` (Phase 10), to fetch an
+        #: already-indexed target's own metadata — `detect()` itself never
+        #: touches the vector store directly, it only searches via
+        #: `HybridSearchService`. Composed the same way
+        #: `RecommendationEngineService` composes its own `BaseVectorStore`,
+        #: for the same reason: a direct-lookup need independent of
+        #: `HybridSearchService`'s own (private) vector store access.
+        self._vector_store = vector_store if vector_store is not None else QdrantVectorStore()
         self._similarity_scorer = (
             similarity_scorer if similarity_scorer is not None else SimilarityScorer()
         )
@@ -118,6 +130,94 @@ class DuplicateDetectionService:
         logger.info(
             "Duplicate detection complete: is_duplicate=%s, confidence=%.2f, "
             "candidates=%d, processing_time=%.4fs",
+            decision.is_duplicate,
+            decision.confidence,
+            len(candidates),
+            processing_time,
+        )
+        return decision
+
+    async def detect_by_product_id(
+        self,
+        product_id: UUID,
+        *,
+        top_k: int | None = None,
+        threshold: float | None = None,
+    ) -> DuplicateDecision:
+        """Check whether an *already-indexed* product looks like a duplicate of another.
+
+        Mirrors `detect()`, but the target is an already-uploaded product
+        identified only by ID — its own stored metadata (name/brand/
+        category/color/material/gender/style) is fetched directly and
+        candidates come from `HybridSearchService.search_by_product_id`
+        (Phase 9, which also excludes the target itself), rather than a
+        freshly submitted image/text. Reuses the exact same
+        `SimilarityScorer`/`_build_decision` logic `detect()` uses — no
+        second, parallel scoring implementation — so `RetrievalEvaluator`
+        (Phase 10) can benchmark duplicate detection against already-
+        uploaded products without needing their original files again.
+
+        Raises `ResourceNotFoundException` if `product_id` isn't indexed,
+        or `DuplicateDetectionException` if scoring fails unexpectedly.
+        """
+        start = time.monotonic()
+        resolved_top_k = top_k if top_k is not None else self._top_k
+        resolved_threshold = threshold if threshold is not None else self._threshold
+
+        target_point = await self._vector_store.retrieve_text(product_id)
+        if target_point is None:
+            target_point = await self._vector_store.retrieve_image(product_id)
+        if target_point is None:
+            raise ResourceNotFoundException(
+                f"Product '{product_id}' was not found.", resource="product"
+            )
+
+        metadata = target_point.metadata
+        name = metadata.get("name") or ""
+        brand = metadata.get("brand")
+        category = metadata.get("category")
+        attributes = ProductAttributes(
+            brand=brand if isinstance(brand, str) else None,
+            category=category if isinstance(category, str) else None,
+            color=metadata.get("color") if isinstance(metadata.get("color"), str) else None,
+            material=(
+                metadata.get("material") if isinstance(metadata.get("material"), str) else None
+            ),
+            gender=metadata.get("gender") if isinstance(metadata.get("gender"), str) else None,
+            style=metadata.get("style") if isinstance(metadata.get("style"), str) else None,
+        )
+
+        candidates = await self._hybrid_search_service.search_by_product_id(
+            product_id, top_k=resolved_top_k
+        )
+        logger.info(
+            "Duplicate candidate retrieval (by ID) complete: product_id=%s, candidates=%d",
+            product_id,
+            len(candidates),
+        )
+
+        try:
+            results = [
+                self._similarity_scorer.score(
+                    name=str(name),
+                    brand=brand if isinstance(brand, str) else None,
+                    category=category if isinstance(category, str) else None,
+                    attributes=attributes,
+                    candidate=candidate,
+                )
+                for candidate in candidates
+            ]
+            decision = _build_decision(results, threshold=resolved_threshold)
+        except Exception as exc:
+            raise DuplicateDetectionException(
+                "Failed to score candidates for duplicate detection."
+            ) from exc
+
+        processing_time = time.monotonic() - start
+        logger.info(
+            "Duplicate detection (by ID) complete: product_id=%s, is_duplicate=%s, "
+            "confidence=%.2f, candidates=%d, processing_time=%.4fs",
+            product_id,
             decision.is_duplicate,
             decision.confidence,
             len(candidates),

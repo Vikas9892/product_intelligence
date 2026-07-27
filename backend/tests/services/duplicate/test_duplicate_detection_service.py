@@ -14,15 +14,16 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.exceptions.errors import DuplicateDetectionException
+from app.exceptions.errors import DuplicateDetectionException, ResourceNotFoundException
 from app.models.duplicate_decision import DuplicateDecision
 from app.models.duplicate_result import DuplicateResult
 from app.models.product_attributes import ProductAttributes
-from app.models.search import HybridSearchResult, ProductFilters, SearchModality
+from app.models.search import HybridSearchResult, ProductFilters, SearchModality, StoredPoint
 from app.models.similarity_signal import SimilaritySignal
 from app.schemas.product import ProductImage
 from app.services.duplicate.duplicate_detection_service import DuplicateDetectionService
 from app.services.duplicate.similarity_scorer import SimilarityScorer
+from app.services.vectorstore.base import BaseVectorStore, VectorCollection, VectorRecord
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
 
 
@@ -30,6 +31,7 @@ class _FakeHybridSearchService(HybridSearchService):
     def __init__(self, *, results: list[HybridSearchResult] | None = None) -> None:
         self._results = results if results is not None else []
         self.calls: list[tuple[object, object, object]] = []
+        self.by_id_calls: list[dict[str, object]] = []
 
     async def search(
         self,
@@ -41,6 +43,47 @@ class _FakeHybridSearchService(HybridSearchService):
     ) -> list[HybridSearchResult]:
         self.calls.append((image, text, top_k))
         return self._results
+
+    async def search_by_product_id(
+        self,
+        product_id: UUID,
+        *,
+        top_k: int | None = None,
+        filters: ProductFilters | None = None,
+        modality: SearchModality | None = None,
+    ) -> list[HybridSearchResult]:
+        self.by_id_calls.append({"product_id": product_id, "top_k": top_k})
+        return self._results
+
+
+class _FakeVectorStore(BaseVectorStore):
+    def __init__(self, *, stored_point: StoredPoint | None = None) -> None:
+        self._stored_point = stored_point
+
+    async def upsert(self, collection: VectorCollection, records: list[VectorRecord]) -> None:
+        return None
+
+    async def search(
+        self,
+        collection: VectorCollection,
+        query_vector: list[float],
+        *,
+        top_k: int,
+        filters: ProductFilters | None = None,
+    ) -> list:  # type: ignore[type-arg]
+        return []
+
+    async def delete(self, collection: VectorCollection, product_ids: list) -> None:  # type: ignore[type-arg]
+        return None
+
+    async def exists(self, collection: VectorCollection, product_id: UUID) -> bool:
+        return self._stored_point is not None
+
+    async def retrieve(self, collection: VectorCollection, product_id: UUID) -> StoredPoint | None:
+        return self._stored_point
+
+    async def health(self) -> bool:
+        return True
 
 
 class _FakeSimilarityScorer(SimilarityScorer):
@@ -362,3 +405,127 @@ class TestMalformedInput:
 
         assert isinstance(decision, DuplicateDecision)
         assert 0.0 <= decision.confidence <= 1.0
+
+
+class TestDetectByProductId:
+    async def test_raises_resource_not_found_when_the_product_is_not_indexed(self) -> None:
+        service = DuplicateDetectionService(
+            hybrid_search_service=_FakeHybridSearchService(),
+            vector_store=_FakeVectorStore(stored_point=None),
+            similarity_scorer=_FakeSimilarityScorer(overall_similarity_by_product={}),
+        )
+
+        with pytest.raises(ResourceNotFoundException):
+            await service.detect_by_product_id(uuid4())
+
+    async def test_reuses_search_by_product_id_for_candidate_retrieval(self) -> None:
+        target_id = uuid4()
+        candidate_id = uuid4()
+        hybrid_search_service = _FakeHybridSearchService(results=[_hybrid_result(candidate_id)])
+        service = DuplicateDetectionService(
+            hybrid_search_service=hybrid_search_service,
+            vector_store=_FakeVectorStore(
+                stored_point=StoredPoint(product_id=target_id, vector=[0.1], metadata={})
+            ),
+            similarity_scorer=_FakeSimilarityScorer(
+                overall_similarity_by_product={candidate_id: 0.95}
+            ),
+            threshold=0.90,
+        )
+
+        decision = await service.detect_by_product_id(target_id)
+
+        assert len(hybrid_search_service.by_id_calls) == 1
+        assert hybrid_search_service.by_id_calls[0]["product_id"] == target_id
+        assert decision.is_duplicate is True
+        assert decision.matched_product == candidate_id
+
+    async def test_uses_the_targets_own_stored_metadata_for_scoring(self) -> None:
+        target_id = uuid4()
+        candidate_id = uuid4()
+
+        class _RecordingScorer(SimilarityScorer):
+            def __init__(self) -> None:
+                self.received: dict[str, object] = {}
+
+            def score(self, *, name, brand, category, attributes, candidate) -> DuplicateResult:  # type: ignore[no-untyped-def]
+                self.received = {
+                    "name": name,
+                    "brand": brand,
+                    "category": category,
+                    "attributes": attributes,
+                }
+                return DuplicateResult(product_id=candidate.product_id, overall_similarity=0.5)
+
+        scorer = _RecordingScorer()
+        service = DuplicateDetectionService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(candidate_id)]),
+            vector_store=_FakeVectorStore(
+                stored_point=StoredPoint(
+                    product_id=target_id,
+                    vector=[0.1],
+                    metadata={
+                        "name": "Nike Widget",
+                        "brand": "Nike",
+                        "category": "men-tshirts",
+                        "color": "Red",
+                        "material": "Mesh",
+                    },
+                )
+            ),
+            similarity_scorer=scorer,
+        )
+
+        await service.detect_by_product_id(target_id)
+
+        assert scorer.received["name"] == "Nike Widget"
+        assert scorer.received["brand"] == "Nike"
+        assert scorer.received["category"] == "men-tshirts"
+        attributes = scorer.received["attributes"]
+        assert isinstance(attributes, ProductAttributes)
+        assert attributes.color == "Red"
+        assert attributes.material == "Mesh"
+
+    async def test_per_call_top_k_and_threshold_override_the_configured_defaults(self) -> None:
+        target_id = uuid4()
+        candidate_id = uuid4()
+        hybrid_search_service = _FakeHybridSearchService(results=[_hybrid_result(candidate_id)])
+        service = DuplicateDetectionService(
+            hybrid_search_service=hybrid_search_service,
+            vector_store=_FakeVectorStore(
+                stored_point=StoredPoint(product_id=target_id, vector=[0.1], metadata={})
+            ),
+            similarity_scorer=_FakeSimilarityScorer(
+                overall_similarity_by_product={candidate_id: 0.5}
+            ),
+            threshold=0.90,
+            top_k=10,
+        )
+
+        decision = await service.detect_by_product_id(target_id, top_k=3, threshold=0.3)
+
+        assert hybrid_search_service.by_id_calls[0]["top_k"] == 3
+        assert decision.is_duplicate is True
+
+    async def test_wraps_an_unexpected_scoring_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target_id = uuid4()
+        candidate_id = uuid4()
+        service = DuplicateDetectionService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(candidate_id)]),
+            vector_store=_FakeVectorStore(
+                stored_point=StoredPoint(product_id=target_id, vector=[0.1], metadata={})
+            ),
+            similarity_scorer=_FakeSimilarityScorer(
+                overall_similarity_by_product={candidate_id: 0.5}
+            ),
+        )
+
+        def _broken_score(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(service._similarity_scorer, "score", _broken_score)
+
+        with pytest.raises(DuplicateDetectionException):
+            await service.detect_by_product_id(target_id)

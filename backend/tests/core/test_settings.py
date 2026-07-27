@@ -10,6 +10,7 @@ from app.core.settings import (
     ApplicationSettings,
     CatalogIntelligenceSettings,
     DuplicateDetectionSettings,
+    EvaluationSettings,
     HybridSearchSettings,
     RecommendationSettings,
     SecuritySettings,
@@ -205,6 +206,20 @@ class TestRecommendationSettings:
     def test_rejects_a_non_positive_top_k(self) -> None:
         with pytest.raises(ValidationError):
             RecommendationSettings(top_k=0)
+
+
+class TestEvaluationSettings:
+    def test_defaults(self) -> None:
+        settings = EvaluationSettings()
+
+        assert settings.enabled is True
+        assert settings.top_k == 10
+        assert settings.benchmark_output_dir == paths.REPORTS_DIR
+        assert settings.latency_metrics_enabled is True
+
+    def test_rejects_a_non_positive_top_k(self) -> None:
+        with pytest.raises(ValidationError):
+            EvaluationSettings(top_k=0)
 
 
 class TestSecuritySettings:

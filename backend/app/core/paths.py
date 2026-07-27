@@ -21,6 +21,14 @@ LOG_DIR: Path = BACKEND_DIR / "logs"
 
 DEFAULT_SQLITE_PATH: Path = STORAGE_DIR / "app.db"
 
+#: A resource directory (sample dataset + benchmark output), not part of
+#: the importable `app` package — mirrors `scripts/`/`docs/` already
+#: living outside `app/` in this project's own folder structure, since
+#: none of this is application source code.
+EVALUATION_DIR: Path = BACKEND_DIR / "evaluation"
+DEFAULT_DATASET_PATH: Path = EVALUATION_DIR / "dataset.json"
+REPORTS_DIR: Path = BACKEND_DIR / "reports"
+
 
 def ensure_runtime_directories() -> None:
     """Create directories the app writes to at runtime, if they don't exist.
@@ -30,5 +38,5 @@ def ensure_runtime_directories() -> None:
     importing this module — keeping imports side-effect-free is what lets
     the config system be unit-tested without touching the real filesystem.
     """
-    for directory in (STORAGE_DIR, UPLOAD_DIR, PROCESSED_DIR, LOG_DIR):
+    for directory in (STORAGE_DIR, UPLOAD_DIR, PROCESSED_DIR, LOG_DIR, REPORTS_DIR):
         directory.mkdir(parents=True, exist_ok=True)

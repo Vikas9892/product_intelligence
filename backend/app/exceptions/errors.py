@@ -226,3 +226,24 @@ class RecommendationException(AppException):
     status_code = 500
     code = "recommendation_error"
     message = "Failed to generate recommendations."
+
+
+class EvaluationException(AppException):
+    """Evaluation/benchmark execution failed unexpectedly.
+
+    Covers both a malformed evaluation dataset (structurally invalid
+    JSON, an entry that fails `EvaluationQuery` validation) and a failure
+    while running an evaluated system (`HybridSearchService`,
+    `DuplicateDetectionService`, `RecommendationEngineService`) or
+    computing metrics. A 500 either way: the dataset is server-side
+    fixture data, not per-request client input (unlike a malformed
+    request body, which raises the existing `ValidationException`), and
+    an evaluated system's own failure is exactly the same "infrastructure
+    failure in deterministic, server-side processing" reasoning
+    `RecommendationException`/`DuplicateDetectionException` already
+    establish.
+    """
+
+    status_code = 500
+    code = "evaluation_error"
+    message = "Failed to run the evaluation."

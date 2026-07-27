@@ -248,6 +248,22 @@ class RecommendationSettings(BaseModel):
         return self
 
 
+class EvaluationSettings(BaseModel):
+    """Offline evaluation/benchmark configuration for `RetrievalEvaluator` (Phase 10).
+
+    `top_k` is the default cutoff used when an evaluation query doesn't
+    specify its own; `benchmark_output_dir` is where `scripts/benchmark.py`
+    writes `benchmark.json`/`benchmark.md`. `latency_metrics_enabled` lets
+    an operator turn off per-query latency measurement (still cheap, but
+    not free) without disabling evaluation entirely.
+    """
+
+    enabled: bool = True
+    top_k: int = Field(default=10, gt=0)
+    benchmark_output_dir: Path = paths.REPORTS_DIR
+    latency_metrics_enabled: bool = True
+
+
 class StorageSettings(BaseModel):
     """Local/object storage for uploaded product assets."""
 
@@ -315,6 +331,7 @@ class Settings(BaseSettings):
         default_factory=DuplicateDetectionSettings
     )
     recommendation: RecommendationSettings = Field(default_factory=RecommendationSettings)
+    evaluation: EvaluationSettings = Field(default_factory=EvaluationSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

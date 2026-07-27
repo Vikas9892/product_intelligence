@@ -17,6 +17,8 @@ def test_derived_paths_are_nested_correctly() -> None:
     assert paths.PROCESSED_DIR == paths.STORAGE_DIR / "processed"
     assert paths.DEFAULT_SQLITE_PATH == paths.STORAGE_DIR / "app.db"
     assert paths.ENV_FILE == paths.BACKEND_DIR / ".env"
+    assert paths.DEFAULT_DATASET_PATH == paths.EVALUATION_DIR / "dataset.json"
+    assert paths.REPORTS_DIR == paths.BACKEND_DIR / "reports"
 
 
 def test_ensure_runtime_directories_creates_missing_dirs(
@@ -26,10 +28,12 @@ def test_ensure_runtime_directories_creates_missing_dirs(
     upload_dir = storage_dir / "uploads"
     processed_dir = storage_dir / "processed"
     log_dir = tmp_path / "logs"
+    reports_dir = tmp_path / "reports"
     monkeypatch.setattr(paths, "STORAGE_DIR", storage_dir)
     monkeypatch.setattr(paths, "UPLOAD_DIR", upload_dir)
     monkeypatch.setattr(paths, "PROCESSED_DIR", processed_dir)
     monkeypatch.setattr(paths, "LOG_DIR", log_dir)
+    monkeypatch.setattr(paths, "REPORTS_DIR", reports_dir)
 
     assert not storage_dir.exists()
 
@@ -39,6 +43,7 @@ def test_ensure_runtime_directories_creates_missing_dirs(
     assert upload_dir.is_dir()
     assert processed_dir.is_dir()
     assert log_dir.is_dir()
+    assert reports_dir.is_dir()
 
 
 def test_ensure_runtime_directories_is_idempotent(
@@ -49,6 +54,7 @@ def test_ensure_runtime_directories_is_idempotent(
     monkeypatch.setattr(paths, "UPLOAD_DIR", storage_dir / "uploads")
     monkeypatch.setattr(paths, "PROCESSED_DIR", storage_dir / "processed")
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(paths, "REPORTS_DIR", tmp_path / "reports")
 
     paths.ensure_runtime_directories()
     paths.ensure_runtime_directories()  # must not raise on the second call

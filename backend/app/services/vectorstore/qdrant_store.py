@@ -32,7 +32,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.exceptions.errors import VectorStoreException
-from app.models.search import NearestNeighbor, ProductFilters
+from app.models.search import NearestNeighbor, ProductFilters, StoredPoint
 from app.services.vectorstore.base import BaseVectorStore, VectorCollection, VectorRecord
 
 logger = get_logger(__name__)
@@ -198,6 +198,34 @@ class QdrantVectorStore(BaseVectorStore):
             raise VectorStoreException(f"Failed to check '{name}' for an existing record.") from exc
 
         return len(records) > 0
+
+    async def retrieve(self, collection: VectorCollection, product_id: UUID) -> StoredPoint | None:
+        name = self._collection_names[collection]
+        await run_in_threadpool(self._ensure_collection, collection)
+        try:
+            records = await run_in_threadpool(
+                self._client.retrieve,
+                collection_name=name,
+                ids=[str(product_id)],
+                with_payload=True,
+                with_vectors=True,
+            )
+        except Exception as exc:
+            raise VectorStoreException(f"Failed to retrieve a record from '{name}'.") from exc
+
+        if not records:
+            return None
+
+        record = records[0]
+        vector = record.vector
+        # This codebase only ever configures one unnamed vector per
+        # collection (see `_ensure_collection`) — a dict/named-vector
+        # response would mean the collection was created outside this
+        # class's own control, which can't happen through this class's
+        # own API.
+        assert isinstance(vector, list)
+
+        return StoredPoint(product_id=product_id, vector=vector, metadata=record.payload or {})
 
     async def health(self) -> bool:
         """Return whether Qdrant is reachable — never raises, unlike every other method.

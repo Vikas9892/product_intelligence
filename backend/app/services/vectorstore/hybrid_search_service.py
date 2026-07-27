@@ -38,7 +38,11 @@ from uuid import UUID
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.exceptions.errors import HybridSearchException, ValidationException
+from app.exceptions.errors import (
+    HybridSearchException,
+    ResourceNotFoundException,
+    ValidationException,
+)
 from app.models.search import HybridSearchResult, NearestNeighbor, ProductFilters, SearchModality
 from app.schemas.product import ProductImage
 from app.services.vectorstore.search_service import SearchService
@@ -136,6 +140,103 @@ class HybridSearchService:
             min(len(fused), resolved_top_k),
         )
         return fused[:resolved_top_k]
+
+    async def search_by_product_id(
+        self,
+        product_id: UUID,
+        *,
+        top_k: int | None = None,
+        filters: ProductFilters | None = None,
+        modality: SearchModality | None = None,
+    ) -> list[HybridSearchResult]:
+        """Find products similar to an already-indexed product, identified by ID (Phase 9).
+
+        Unlike `.search()` (which embeds a freshly submitted image/text
+        query), this reuses `product_id`'s own already-stored embedding(s)
+        — no image file or text string needs to be resubmitted.
+        `modality` restricts which stored embedding(s) to search from:
+        `None` uses both and fuses them the same way `.search()` does;
+        `SearchModality.IMAGE`/`SearchModality.TEXT` restrict to just that
+        one. `RecommendationEngineService` uses `None` for "similar"
+        recommendations and `SearchModality.TEXT` for "related" ones
+        (category/attribute-driven, decoupled from pure visual likeness).
+
+        The target product itself is always excluded from the returned
+        results. Raises `ResourceNotFoundException` if `product_id` isn't
+        indexed in the collection(s) `modality` requires, or
+        `HybridSearchException` if fusing (hybrid mode only) fails
+        unexpectedly.
+        """
+        want_image = modality is not SearchModality.TEXT
+        want_text = modality is not SearchModality.IMAGE
+
+        image_point = await self._search_service.retrieve_by_id(product_id) if want_image else None
+        text_point = (
+            await self._text_search_service.retrieve_by_id(product_id) if want_text else None
+        )
+        if want_image and image_point is None:
+            raise ResourceNotFoundException(
+                f"Product '{product_id}' is not indexed.", resource="product"
+            )
+        if want_text and text_point is None:
+            raise ResourceNotFoundException(
+                f"Product '{product_id}' is not indexed.", resource="product"
+            )
+
+        # Requests one extra candidate internally so excluding the target
+        # product itself (below) never silently shrinks the caller's
+        # requested `top_k`.
+        resolved_top_k = top_k if top_k is not None else settings.vector_store.default_top_k
+        internal_top_k = resolved_top_k + 1
+
+        if modality is SearchModality.TEXT:
+            assert text_point is not None
+            result = await self._text_search_service.search_by_vector(
+                text_point.vector, top_k=internal_top_k, filters=filters
+            )
+            results = [
+                _single_modality_result(neighbor, SearchModality.TEXT)
+                for neighbor in result.neighbors
+            ]
+        elif modality is SearchModality.IMAGE:
+            assert image_point is not None
+            result = await self._search_service.search_by_vector(
+                image_point.vector, top_k=internal_top_k, filters=filters
+            )
+            results = [
+                _single_modality_result(neighbor, SearchModality.IMAGE)
+                for neighbor in result.neighbors
+            ]
+        else:
+            assert image_point is not None
+            assert text_point is not None
+            image_result = await self._search_service.search_by_vector(
+                image_point.vector, top_k=internal_top_k, filters=filters
+            )
+            text_result = await self._text_search_service.search_by_vector(
+                text_point.vector, top_k=internal_top_k, filters=filters
+            )
+            try:
+                results = _fuse(
+                    image_result.neighbors,
+                    text_result.neighbors,
+                    image_weight=self._image_weight,
+                    text_weight=self._text_weight,
+                )
+            except Exception as exc:
+                raise HybridSearchException(
+                    "Failed to combine image and text search results."
+                ) from exc
+            results.sort(key=lambda result: result.score, reverse=True)
+
+        results = [result for result in results if result.product_id != product_id]
+        logger.info(
+            "Hybrid search-by-id completed: product_id=%s, modality=%s, results=%d",
+            product_id,
+            modality.value if modality is not None else "hybrid",
+            min(len(results), resolved_top_k),
+        )
+        return results[:resolved_top_k]
 
 
 @dataclass

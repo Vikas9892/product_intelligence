@@ -56,13 +56,17 @@ docstring.
 
 **Why does `brand`/`category` in the vector store's metadata stay the
 already-established normalized/slugified values, while `color`/
-`material`/`gender`/`season`/`style`/`tags` come straight from
-`CatalogIntelligenceResult`?** Changing what `brand`/`category` mean in
-already-indexed metadata would silently break `ProductFilters` equality
-matching (Phase 6) for anything indexed before this phase; the five new
-fields have no prior meaning to preserve, so they're populated directly
-from whatever catalog intelligence resolved (which may be `None`, same as
-any other optional attribute).
+`material`/`gender`/`season`/`style`/`tags`/`quality_score` come straight
+from `CatalogIntelligenceResult`?** Changing what `brand`/`category` mean
+in already-indexed metadata would silently break `ProductFilters`
+equality matching (Phase 6) for anything indexed before this phase; the
+newer fields have no prior meaning to preserve, so they're populated
+directly from whatever catalog intelligence resolved (which may be
+`None`, same as any other optional attribute). `quality_score` (Phase 9)
+is what `RecommendationScorer` reads back out of a candidate's metadata
+for its own "Catalog Quality" signal — it's the only place a candidate's
+quality score is available once retrieval happens via `HybridSearchService`
+rather than a fresh `CatalogIntelligenceResult`.
 
 **How do the three `DuplicateDetectionMode`s (`OFF`/`WARN`/`BLOCK`)
 change this pipeline?** `OFF` skips `DuplicateDetectionService` entirely
@@ -336,6 +340,7 @@ class ProductService:
             "season": catalog_result.attributes.season,
             "style": catalog_result.attributes.style,
             "tags": [tag.tag for tag in catalog_result.tags],
+            "quality_score": catalog_result.quality_score,
         }
         await self._vector_store.upsert_image(
             [VectorRecord(product_id=product_id, vector=embedding.vector, metadata=vector_metadata)]

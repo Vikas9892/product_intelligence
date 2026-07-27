@@ -236,6 +236,46 @@ class TestUpsertAndExists:
         assert matches[0].metadata == {"name": "New"}
 
 
+class TestRetrieve:
+    async def test_retrieves_the_stored_vector_and_metadata(self) -> None:
+        store = _store()
+        product_id = uuid4()
+        await store.upsert(
+            VectorCollection.IMAGE,
+            [
+                VectorRecord(
+                    product_id=product_id,
+                    vector=[1.0, 0.0, 0.0, 0.0],
+                    metadata={"brand": "Nike"},
+                )
+            ],
+        )
+
+        point = await store.retrieve(VectorCollection.IMAGE, product_id)
+
+        assert point is not None
+        assert point.product_id == product_id
+        assert point.vector == [1.0, 0.0, 0.0, 0.0]
+        assert point.metadata == {"brand": "Nike"}
+
+    async def test_returns_none_for_an_absent_product(self) -> None:
+        store = _store()
+
+        point = await store.retrieve(VectorCollection.IMAGE, uuid4())
+
+        assert point is None
+
+    async def test_retrieve_is_isolated_per_collection(self) -> None:
+        store = _store()
+        product_id = uuid4()
+        await store.upsert(
+            VectorCollection.IMAGE,
+            [VectorRecord(product_id=product_id, vector=[1.0, 0.0, 0.0, 0.0])],
+        )
+
+        assert await store.retrieve(VectorCollection.TEXT, product_id) is None
+
+
 class TestSearch:
     async def test_finds_the_closest_match_first(self) -> None:
         store = _store()
@@ -525,6 +565,13 @@ class TestErrorWrapping:
 
         with pytest.raises(VectorStoreException):
             await store.exists(VectorCollection.IMAGE, uuid4())
+
+    async def test_retrieve_wraps_a_client_failure(self) -> None:
+        broken = _BrokenClient(QdrantClient(location=":memory:"), fail_method="retrieve")
+        store = _store(client=cast(QdrantClient, broken))
+
+        with pytest.raises(VectorStoreException):
+            await store.retrieve(VectorCollection.IMAGE, uuid4())
 
 
 class TestThreadSafety:

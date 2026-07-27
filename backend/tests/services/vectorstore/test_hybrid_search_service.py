@@ -12,8 +12,18 @@ from uuid import uuid4
 
 import pytest
 
-from app.exceptions.errors import HybridSearchException, ValidationException
-from app.models.search import NearestNeighbor, ProductFilters, SearchModality, SearchResult
+from app.exceptions.errors import (
+    HybridSearchException,
+    ResourceNotFoundException,
+    ValidationException,
+)
+from app.models.search import (
+    NearestNeighbor,
+    ProductFilters,
+    SearchModality,
+    SearchResult,
+    StoredPoint,
+)
 from app.schemas.product import ProductImage
 from app.services.vectorstore import hybrid_search_service as hybrid_search_service_module
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
@@ -26,23 +36,51 @@ class _FakeSearchService(SearchService):
     about `HybridSearchService`'s dispatch/fusion, not image processing.
     """
 
-    def __init__(self, *, neighbors: list[NearestNeighbor] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        neighbors: list[NearestNeighbor] | None = None,
+        stored_point: StoredPoint | None = None,
+    ) -> None:
         self._neighbors = neighbors if neighbors is not None else []
+        self._stored_point = stored_point
         self.calls: list[dict[str, object]] = []
+        self.vector_calls: list[dict[str, object]] = []
 
     async def search_by_image(self, image, *, top_k=None, filters=None) -> SearchResult:  # type: ignore[no-untyped-def]
         self.calls.append({"image": image, "top_k": top_k, "filters": filters})
         return SearchResult(query_model_name="fake-clip-model", neighbors=self._neighbors)
 
+    async def search_by_vector(self, vector, *, top_k=None, filters=None) -> SearchResult:  # type: ignore[no-untyped-def]
+        self.vector_calls.append({"vector": vector, "top_k": top_k, "filters": filters})
+        return SearchResult(query_model_name="fake-clip-model", neighbors=self._neighbors)
+
+    async def retrieve_by_id(self, product_id) -> StoredPoint | None:  # type: ignore[no-untyped-def]
+        return self._stored_point
+
 
 class _FakeTextSearchService(TextSearchService):
-    def __init__(self, *, neighbors: list[NearestNeighbor] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        neighbors: list[NearestNeighbor] | None = None,
+        stored_point: StoredPoint | None = None,
+    ) -> None:
         self._neighbors = neighbors if neighbors is not None else []
+        self._stored_point = stored_point
         self.calls: list[dict[str, object]] = []
+        self.vector_calls: list[dict[str, object]] = []
 
     async def search_by_text(self, query, *, top_k=None, filters=None) -> SearchResult:  # type: ignore[no-untyped-def]
         self.calls.append({"query": query, "top_k": top_k, "filters": filters})
         return SearchResult(query_model_name="fake-text-model", neighbors=self._neighbors)
+
+    async def search_by_vector(self, vector, *, top_k=None, filters=None) -> SearchResult:  # type: ignore[no-untyped-def]
+        self.vector_calls.append({"vector": vector, "top_k": top_k, "filters": filters})
+        return SearchResult(query_model_name="fake-text-model", neighbors=self._neighbors)
+
+    async def retrieve_by_id(self, product_id) -> StoredPoint | None:  # type: ignore[no-untyped-def]
+        return self._stored_point
 
 
 class _RoutingFakeTextSearchService(TextSearchService):
@@ -283,3 +321,172 @@ class TestConcurrency:
 
         for query, result in zip(neighbors_by_query, results, strict=True):
             assert result[0].product_id == neighbors_by_query[query].product_id
+
+
+class TestSearchByProductId:
+    async def test_raises_when_the_product_is_not_indexed_in_either_collection(self) -> None:
+        service = HybridSearchService(
+            search_service=_FakeSearchService(stored_point=None),
+            text_search_service=_FakeTextSearchService(stored_point=None),
+        )
+
+        with pytest.raises(ResourceNotFoundException):
+            await service.search_by_product_id(uuid4())
+
+    async def test_raises_when_missing_from_the_image_collection_for_image_modality(self) -> None:
+        service = HybridSearchService(
+            search_service=_FakeSearchService(stored_point=None),
+            text_search_service=_FakeTextSearchService(
+                stored_point=StoredPoint(product_id=uuid4(), vector=[0.1])
+            ),
+        )
+
+        with pytest.raises(ResourceNotFoundException):
+            await service.search_by_product_id(uuid4(), modality=SearchModality.IMAGE)
+
+    async def test_raises_when_missing_from_the_text_collection_for_text_modality(self) -> None:
+        service = HybridSearchService(
+            search_service=_FakeSearchService(
+                stored_point=StoredPoint(product_id=uuid4(), vector=[0.1])
+            ),
+            text_search_service=_FakeTextSearchService(stored_point=None),
+        )
+
+        with pytest.raises(ResourceNotFoundException):
+            await service.search_by_product_id(uuid4(), modality=SearchModality.TEXT)
+
+    async def test_hybrid_mode_searches_using_both_stored_vectors(self) -> None:
+        target_id = uuid4()
+        image_point = StoredPoint(product_id=target_id, vector=[0.9, 0.1])
+        text_point = StoredPoint(product_id=target_id, vector=[0.2, 0.8])
+        other_id = uuid4()
+        search_service = _FakeSearchService(
+            neighbors=[NearestNeighbor(product_id=other_id, score=0.8)], stored_point=image_point
+        )
+        text_search_service = _FakeTextSearchService(
+            neighbors=[NearestNeighbor(product_id=other_id, score=0.6)], stored_point=text_point
+        )
+        service = HybridSearchService(
+            search_service=search_service, text_search_service=text_search_service
+        )
+
+        results = await service.search_by_product_id(target_id)
+
+        assert [result.product_id for result in results] == [other_id]
+        assert search_service.vector_calls[0]["vector"] == [0.9, 0.1]
+        assert text_search_service.vector_calls[0]["vector"] == [0.2, 0.8]
+
+    async def test_image_modality_only_searches_the_image_collection(self) -> None:
+        target_id = uuid4()
+        other_id = uuid4()
+        image_point = StoredPoint(product_id=target_id, vector=[0.9, 0.1])
+        search_service = _FakeSearchService(
+            neighbors=[NearestNeighbor(product_id=other_id, score=0.8)], stored_point=image_point
+        )
+        text_search_service = _FakeTextSearchService(stored_point=None)
+        service = HybridSearchService(
+            search_service=search_service, text_search_service=text_search_service
+        )
+
+        results = await service.search_by_product_id(target_id, modality=SearchModality.IMAGE)
+
+        assert [result.product_id for result in results] == [other_id]
+        assert text_search_service.vector_calls == []
+
+    async def test_text_modality_only_searches_the_text_collection(self) -> None:
+        target_id = uuid4()
+        other_id = uuid4()
+        text_point = StoredPoint(product_id=target_id, vector=[0.2, 0.8])
+        search_service = _FakeSearchService(stored_point=None)
+        text_search_service = _FakeTextSearchService(
+            neighbors=[NearestNeighbor(product_id=other_id, score=0.6)], stored_point=text_point
+        )
+        service = HybridSearchService(
+            search_service=search_service, text_search_service=text_search_service
+        )
+
+        results = await service.search_by_product_id(target_id, modality=SearchModality.TEXT)
+
+        assert [result.product_id for result in results] == [other_id]
+        assert search_service.vector_calls == []
+
+    async def test_the_target_product_itself_is_excluded_from_results(self) -> None:
+        target_id = uuid4()
+        other_id = uuid4()
+        image_point = StoredPoint(product_id=target_id, vector=[0.9, 0.1])
+        text_point = StoredPoint(product_id=target_id, vector=[0.2, 0.8])
+        service = HybridSearchService(
+            search_service=_FakeSearchService(
+                neighbors=[
+                    NearestNeighbor(product_id=target_id, score=1.0),
+                    NearestNeighbor(product_id=other_id, score=0.8),
+                ],
+                stored_point=image_point,
+            ),
+            text_search_service=_FakeTextSearchService(
+                neighbors=[
+                    NearestNeighbor(product_id=target_id, score=1.0),
+                    NearestNeighbor(product_id=other_id, score=0.6),
+                ],
+                stored_point=text_point,
+            ),
+        )
+
+        results = await service.search_by_product_id(target_id)
+
+        assert target_id not in [result.product_id for result in results]
+
+    async def test_requests_one_extra_candidate_internally_to_offset_self_exclusion(self) -> None:
+        target_id = uuid4()
+        image_point = StoredPoint(product_id=target_id, vector=[0.9, 0.1])
+        text_point = StoredPoint(product_id=target_id, vector=[0.2, 0.8])
+        search_service = _FakeSearchService(stored_point=image_point)
+        text_search_service = _FakeTextSearchService(stored_point=text_point)
+        service = HybridSearchService(
+            search_service=search_service, text_search_service=text_search_service
+        )
+
+        await service.search_by_product_id(target_id, top_k=5)
+
+        assert search_service.vector_calls[0]["top_k"] == 6
+        assert text_search_service.vector_calls[0]["top_k"] == 6
+
+    async def test_results_are_capped_at_the_requested_top_k(self) -> None:
+        target_id = uuid4()
+        image_point = StoredPoint(product_id=target_id, vector=[0.9, 0.1])
+        text_point = StoredPoint(product_id=target_id, vector=[0.2, 0.8])
+        other_ids = [uuid4() for _ in range(5)]
+        service = HybridSearchService(
+            search_service=_FakeSearchService(
+                neighbors=[
+                    NearestNeighbor(product_id=oid, score=0.9 - i * 0.01)
+                    for i, oid in enumerate(other_ids)
+                ],
+                stored_point=image_point,
+            ),
+            text_search_service=_FakeTextSearchService(stored_point=text_point),
+        )
+
+        results = await service.search_by_product_id(target_id, top_k=2)
+
+        assert len(results) == 2
+
+    async def test_wraps_an_unexpected_fusion_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _broken_fuse(*args: object, **kwargs: object) -> list:  # type: ignore[type-arg]
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(hybrid_search_service_module, "_fuse", _broken_fuse)
+        target_id = uuid4()
+        service = HybridSearchService(
+            search_service=_FakeSearchService(
+                stored_point=StoredPoint(product_id=target_id, vector=[0.1])
+            ),
+            text_search_service=_FakeTextSearchService(
+                stored_point=StoredPoint(product_id=target_id, vector=[0.2])
+            ),
+        )
+
+        with pytest.raises(HybridSearchException):
+            await service.search_by_product_id(target_id)

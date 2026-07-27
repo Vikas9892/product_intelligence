@@ -12,9 +12,11 @@ composing two single-responsibility services than by growing
 `SearchService` a second, unrelated job.
 """
 
+from uuid import UUID
+
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.models.search import ProductFilters, SearchQuery, SearchResult
+from app.models.search import ProductFilters, SearchQuery, SearchResult, StoredPoint
 from app.services.embeddings.sentence_transformer_service import (
     SentenceTransformerEmbeddingService,
 )
@@ -64,7 +66,22 @@ class TextSearchService:
         logger.info("Text search requested: query_length=%d", len(query))
 
         vector = await self._text_embedding_service.embed_text(query)
+        return await self.search_by_vector(vector, top_k=top_k, filters=filters)
 
+    async def search_by_vector(
+        self,
+        vector: list[float],
+        *,
+        top_k: int | None = None,
+        filters: ProductFilters | None = None,
+    ) -> SearchResult:
+        """Search for products whose text embedding is closest to an already-computed `vector`.
+
+        Unlike `search_by_text`, this never runs embedding generation —
+        used by `HybridSearchService.search_by_product_id` (Phase 9) with
+        an existing product's own already-indexed vector (see
+        `retrieve_by_id`).
+        """
         resolved_top_k = top_k if top_k is not None else self._default_top_k
         search_query = SearchQuery(
             vector=vector,
@@ -85,3 +102,7 @@ class TextSearchService:
         logger.info("Text search completed: results=%d", len(neighbors))
 
         return SearchResult(query_model_name=search_query.model_name, neighbors=neighbors)
+
+    async def retrieve_by_id(self, product_id: UUID) -> StoredPoint | None:
+        """Fetch `product_id`'s own stored text vector + metadata, or `None` if not indexed."""
+        return await self._vector_store.retrieve_text(product_id)

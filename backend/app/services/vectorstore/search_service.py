@@ -17,10 +17,11 @@ logic and never talks to the vector store directly.
 """
 
 from pathlib import Path
+from uuid import UUID
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.models.search import ProductFilters, SearchQuery, SearchResult
+from app.models.search import ProductFilters, SearchQuery, SearchResult, StoredPoint
 from app.schemas.product import ProductImage
 from app.services.embeddings.base import BaseEmbeddingService
 from app.services.embeddings.clip_service import CLIPEmbeddingService
@@ -81,7 +82,23 @@ class SearchService:
         )
 
         vector = await self._embedding_service.generate_embedding(image_metadata.processed_path)
+        return await self.search_by_vector(vector, top_k=top_k, filters=filters)
 
+    async def search_by_vector(
+        self,
+        vector: list[float],
+        *,
+        top_k: int | None = None,
+        filters: ProductFilters | None = None,
+    ) -> SearchResult:
+        """Search for products whose image embedding is closest to an already-computed `vector`.
+
+        Unlike `search_by_image`, this never touches a file or runs
+        embedding generation — used by `HybridSearchService.search_by_product_id`
+        (Phase 9) with an existing product's own already-indexed vector
+        (see `retrieve_by_id`), so a caller never needs to resubmit an
+        image just to find products similar to one already in the catalog.
+        """
         resolved_top_k = top_k if top_k is not None else self._default_top_k
         query = SearchQuery(
             vector=vector,
@@ -99,10 +116,10 @@ class SearchService:
         neighbors = await self._vector_store.search_image(
             query.vector, top_k=query.top_k, filters=query.filters
         )
-        logger.info(
-            "Image search completed: filename=%s, results=%d",
-            image.stored_filename,
-            len(neighbors),
-        )
+        logger.info("Image search completed: results=%d", len(neighbors))
 
         return SearchResult(query_model_name=query.model_name, neighbors=neighbors)
+
+    async def retrieve_by_id(self, product_id: UUID) -> StoredPoint | None:
+        """Fetch `product_id`'s own stored image vector + metadata, or `None` if not indexed."""
+        return await self._vector_store.retrieve_image(product_id)

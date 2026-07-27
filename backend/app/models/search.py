@@ -32,6 +32,24 @@ class NearestNeighbor(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class StoredPoint(BaseModel):
+    """One already-indexed point fetched directly by `product_id` (Phase 9).
+
+    Distinct from `NearestNeighbor`: that's a *search result* (found by
+    similarity, always carries a `score`); this is a *direct lookup* (found
+    by ID, carries the point's own stored `vector` instead — there's no
+    "how similar" to score against itself). `RecommendationEngineService`
+    uses this to find a target product's own embedding/metadata without
+    needing to resubmit its original image or text, then searches with
+    that vector directly via `SearchService.search_by_vector`/
+    `TextSearchService.search_by_vector`.
+    """
+
+    product_id: UUID
+    vector: list[float]
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class ProductFilters(BaseModel):
     """Metadata filters applicable to a vector search.
 

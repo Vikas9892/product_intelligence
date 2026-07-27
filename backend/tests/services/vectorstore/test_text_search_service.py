@@ -8,7 +8,7 @@ strategy `test_search_service.py` uses for `SearchService`.
 from typing import Any
 from uuid import uuid4
 
-from app.models.search import NearestNeighbor, ProductFilters
+from app.models.search import NearestNeighbor, ProductFilters, StoredPoint
 from app.services.embeddings.text_base import BaseTextEmbeddingService
 from app.services.vectorstore.base import BaseVectorStore, VectorCollection, VectorRecord
 from app.services.vectorstore.text_search_service import TextSearchService
@@ -36,8 +36,14 @@ class _FakeTextEmbeddingService(BaseTextEmbeddingService):
 
 
 class _FakeVectorStore(BaseVectorStore):
-    def __init__(self, *, neighbors: list[NearestNeighbor] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        neighbors: list[NearestNeighbor] | None = None,
+        stored_point: StoredPoint | None = None,
+    ) -> None:
         self._neighbors = neighbors if neighbors is not None else []
+        self._stored_point = stored_point
         self.search_calls: list[dict[str, Any]] = []
 
     async def upsert(self, collection: VectorCollection, records: list[VectorRecord]) -> None:
@@ -66,6 +72,9 @@ class _FakeVectorStore(BaseVectorStore):
 
     async def exists(self, collection: VectorCollection, product_id) -> bool:  # type: ignore[no-untyped-def]
         return False
+
+    async def retrieve(self, collection: VectorCollection, product_id) -> StoredPoint | None:  # type: ignore[no-untyped-def]
+        return self._stored_point
 
     async def health(self) -> bool:
         return True
@@ -146,3 +155,22 @@ class TestSearchByText:
         await service.search_by_text("query")
 
         assert vector_store.search_calls[0]["filters"] is None
+
+
+class TestRetrieveById:
+    async def test_returns_the_stored_point_from_the_text_collection(self) -> None:
+        product_id = uuid4()
+        stored_point = StoredPoint(
+            product_id=product_id, vector=[0.1, 0.2, 0.3, 0.4], metadata={"brand": "Nike"}
+        )
+        vector_store = _FakeVectorStore(stored_point=stored_point)
+        service = _build_service(vector_store=vector_store)
+
+        point = await service.retrieve_by_id(product_id)
+
+        assert point == stored_point
+
+    async def test_returns_none_when_not_indexed(self) -> None:
+        service = _build_service(vector_store=_FakeVectorStore())
+
+        assert await service.retrieve_by_id(uuid4()) is None

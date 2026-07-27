@@ -209,3 +209,20 @@ class DuplicateDetectionException(AppException):
     status_code = 500
     code = "duplicate_detection_error"
     message = "Failed to evaluate the product for duplicates."
+
+
+class RecommendationException(AppException):
+    """Recommendation generation (candidate retrieval, scoring, or diversity filtering)
+    failed unexpectedly.
+
+    An infrastructure failure in deterministic, server-side processing —
+    not a client input problem — the same reasoning as
+    `DuplicateDetectionException`. Hence a 500. Distinct from
+    `ResourceNotFoundException` (404), which is raised when the *target*
+    product itself isn't indexed — that's a client-addressable "this ID
+    doesn't exist," not a processing failure.
+    """
+
+    status_code = 500
+    code = "recommendation_error"
+    message = "Failed to generate recommendations."

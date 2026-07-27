@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.models.search import NearestNeighbor, ProductFilters
+from app.models.search import NearestNeighbor, ProductFilters, StoredPoint
 from app.services.vectorstore.base import BaseVectorStore, VectorCollection, VectorRecord
 
 
@@ -60,6 +60,14 @@ class _FakeVectorStore(BaseVectorStore):
     async def exists(self, collection: VectorCollection, product_id: UUID) -> bool:
         return str(product_id) in self._records[collection]
 
+    async def retrieve(self, collection: VectorCollection, product_id: UUID) -> StoredPoint | None:
+        record = self._records[collection].get(str(product_id))
+        if record is None:
+            return None
+        return StoredPoint(
+            product_id=record.product_id, vector=record.vector, metadata=record.metadata
+        )
+
     async def health(self) -> bool:
         return True
 
@@ -84,6 +92,28 @@ class TestBaseVectorStore:
 
         await store.delete(VectorCollection.IMAGE, [product_id])
         assert await store.exists(VectorCollection.IMAGE, product_id) is False
+
+    async def test_retrieve_returns_the_stored_point(self) -> None:
+        store = _FakeVectorStore()
+        product_id = uuid4()
+        await store.upsert(
+            VectorCollection.IMAGE,
+            [VectorRecord(product_id=product_id, vector=[1.0, 0.0], metadata={"brand": "Nike"})],
+        )
+
+        point = await store.retrieve(VectorCollection.IMAGE, product_id)
+
+        assert point is not None
+        assert point.product_id == product_id
+        assert point.vector == [1.0, 0.0]
+        assert point.metadata == {"brand": "Nike"}
+
+    async def test_retrieve_returns_none_for_an_absent_product(self) -> None:
+        store = _FakeVectorStore()
+
+        point = await store.retrieve(VectorCollection.IMAGE, uuid4())
+
+        assert point is None
 
     def test_a_subclass_missing_a_method_cannot_be_instantiated(self) -> None:
         class _IncompleteVectorStore(BaseVectorStore):
@@ -133,3 +163,23 @@ class TestPerModalityConvenienceMethods:
         await store.search_text([1.0, 0.0], top_k=5)
 
         assert store.search_calls == [VectorCollection.TEXT]
+
+    async def test_retrieve_image_targets_the_image_collection(self) -> None:
+        store = _FakeVectorStore()
+        product_id = uuid4()
+        await store.upsert_image([VectorRecord(product_id=product_id, vector=[1.0, 0.0])])
+
+        point = await store.retrieve_image(product_id)
+
+        assert point is not None
+        assert await store.retrieve_text(product_id) is None
+
+    async def test_retrieve_text_targets_the_text_collection(self) -> None:
+        store = _FakeVectorStore()
+        product_id = uuid4()
+        await store.upsert_text([VectorRecord(product_id=product_id, vector=[1.0, 0.0])])
+
+        point = await store.retrieve_text(product_id)
+
+        assert point is not None
+        assert await store.retrieve_image(product_id) is None

@@ -32,7 +32,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.models.search import NearestNeighbor, ProductFilters
+from app.models.search import NearestNeighbor, ProductFilters, StoredPoint
 
 
 class VectorCollection(StrEnum):
@@ -95,6 +95,19 @@ class BaseVectorStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def retrieve(self, collection: VectorCollection, product_id: UUID) -> StoredPoint | None:
+        """Fetch `product_id`'s own stored vector + metadata from `collection`, or `None`.
+
+        Unlike `search` (finds *other* points similar to a query vector),
+        this looks up one specific point directly by ID — Phase 9's
+        `SearchService.retrieve_by_id`/`TextSearchService.retrieve_by_id`
+        use it to find an already-indexed product's own embedding so
+        `RecommendationEngineService` can search from it without needing
+        the original image file or text again.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def health(self) -> bool:
         """Return whether the underlying store is currently reachable and usable."""
         raise NotImplementedError
@@ -126,3 +139,11 @@ class BaseVectorStore(ABC):
     ) -> list[NearestNeighbor]:
         """Search the text collection for `query_vector`'s nearest neighbors."""
         return await self.search(VectorCollection.TEXT, query_vector, top_k=top_k, filters=filters)
+
+    async def retrieve_image(self, product_id: UUID) -> StoredPoint | None:
+        """Fetch `product_id`'s own stored image vector + metadata, or `None`."""
+        return await self.retrieve(VectorCollection.IMAGE, product_id)
+
+    async def retrieve_text(self, product_id: UUID) -> StoredPoint | None:
+        """Fetch `product_id`'s own stored text vector + metadata, or `None`."""
+        return await self.retrieve(VectorCollection.TEXT, product_id)

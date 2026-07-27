@@ -136,6 +136,9 @@ class _FakeVectorStore(BaseVectorStore):
     async def exists(self, collection: VectorCollection, product_id) -> bool:  # type: ignore[no-untyped-def]
         return False
 
+    async def retrieve(self, collection: VectorCollection, product_id):  # type: ignore[no-untyped-def]
+        return None
+
     async def health(self) -> bool:
         return True
 
@@ -493,6 +496,7 @@ class TestProcessUploadVectorStoreUpsert:
             "season": None,
             "style": None,
             "tags": [],
+            "quality_score": 0.0,
         }
 
     async def test_upserts_a_text_record_matching_the_built_product(self, tmp_path: Path) -> None:
@@ -522,6 +526,7 @@ class TestProcessUploadVectorStoreUpsert:
             "season": None,
             "style": None,
             "tags": [],
+            "quality_score": 0.0,
         }
 
     async def test_propagates_vector_store_exception(self, tmp_path: Path) -> None:

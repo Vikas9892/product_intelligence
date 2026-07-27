@@ -2249,6 +2249,180 @@ contribution objects" this phase needs the way Phase 8's `SimilaritySignal`
 list captured. Inventing a second, structurally-identical type purely to
 mirror Phase 8's shape would be indirection without benefit.
 
+## Phase 10 — Retrieval Evaluation Framework design decisions
+
+This phase adds an offline benchmark harness that measures how well the
+existing retrieval systems — hybrid search, recommendations, duplicate
+detection — actually perform, using standard information-retrieval
+metrics against a labeled dataset. It computes nothing new about
+products; it only judges what the earlier phases' own services already
+return.
+
+### Architecture
+
+```
+             evaluation/dataset.json (or a caller-selected subset)
+                              │
+                              ▼
+                     DatasetLoader.load()
+                              │
+                              ▼
+                RetrievalEvaluator.evaluate(queries)
+                              │
+              per query, dispatch by task_type
+     ┌────────────────────────┼────────────────────────┐
+     ▼                        ▼                        ▼
+RETRIEVAL              RECOMMENDATION               DUPLICATE
+HybridSearchService     RecommendationEngineService  DuplicateDetectionService
+.search(text=...)       .recommend(SIMILAR)          .detect_by_product_id(...)
+     └────────────────────────┼────────────────────────┘
+                              ▼
+              ranked product IDs vs. query.ground_truth
+                              │
+                              ▼
+        Precision@K / Recall@K / MRR / NDCG@K / Hit Rate@K / latency
+                     (K = 1, 5, 10; per-query, then averaged per task_type)
+                              │
+                              ▼
+                        BenchmarkReport
+                    ┌─────────┴─────────┐
+                    ▼                   ▼
+         POST /evaluation/run    scripts/benchmark.py
+         (JSON response)         (benchmark.json + benchmark.md on disk)
+```
+
+Like `RecommendationEngineService`/`DuplicateDetectionService` before it,
+`RetrievalEvaluator` is deliberately thin: it computes metrics (pure
+functions of "what came back" vs. "what should have"), never similarity
+or ranking itself — every ranked list it judges comes from a system an
+earlier phase already built and tested. No new retrieval logic exists
+anywhere in this phase.
+
+### Dataset Format
+
+`evaluation/dataset.json` (a genuine top-level resource directory,
+alongside `scripts/`/`docs/` — not part of the importable `app` package,
+the same reasoning `app/core/paths.py` already documents for those) is a
+flat JSON array, kept deliberately minimal per the phase spec's own
+literal example:
+
+```json
+{"query": "red running shoes", "expected_products": ["<uuid>", ...]}
+```
+
+Every other field is optional per entry — a bare `{"query": ...,
+"expected_products": [...]}` is a `RETRIEVAL` query by default;
+`RECOMMENDATION`/`DUPLICATE` entries add `"task_type"` and `"product_id"`
+instead of `"query"`. One flat file describes all three evaluation
+tasks — no separate dataset file per task type. `DatasetLoader` validates
+every entry through `EvaluationQuery` itself, naming the offending
+index/ID in the raised `EvaluationException` rather than silently
+skipping malformed data.
+
+### Metrics
+
+Five metrics, each computed at `K = 1, 5, 10`, binary relevance (a
+product either is or isn't in `ground_truth.expected_products`):
+
+- **Precision@K** — fraction of the top-K *actually returned* results
+  that are relevant. Divides by how many results were actually returned,
+  not by K itself, so a system with legitimately fewer than K candidates
+  (a small catalog) isn't unfairly penalized for not padding its list.
+- **Recall@K** — fraction of all relevant products found in the top-K.
+- **Hit Rate@K** — `1.0` if any relevant product appears in the top-K,
+  else `0.0`.
+- **MRR** (Mean Reciprocal Rank) — `1 / rank` of the first relevant hit,
+  averaged across queries.
+- **NDCG@K** (Normalized Discounted Cumulative Gain) — rank-weighted
+  relevance, normalized against the ideal ordering so the result always
+  falls in `[0, 1]` regardless of how many relevant products exist.
+
+All five are pure, stateless module-level functions, unit-tested against
+hand-computed expected values independent of any live system. An empty
+`expected_products` set yields `0.0` for every metric (a conservative
+choice — treating "nothing was labeled relevant" as vacuously perfect
+would make an unlabeled query look like a flawless one).
+
+### Per-Query Failure Isolation
+
+One query's failure — a stale `product_id` the dataset still references,
+a system it evaluates raising — is caught and recorded on that query's
+own `EvaluationQueryResult.error`, the same "don't let one bad entry sink
+the batch" reasoning `DuplicateDetectionService`'s per-candidate handling
+and `ProductService`'s per-item batch processing already established. A
+failed query is excluded from its task type's aggregate averages (so a
+few bad product IDs don't silently drag down an otherwise-healthy
+system's reported quality) but still counted in `failure_count` and
+`query_results`, so it's visible rather than hidden. `evaluate()` itself
+only raises `EvaluationException` for failures outside any single
+query — the default dataset failing to load, or aggregation itself
+failing unexpectedly.
+
+### Benchmark Execution
+
+Two ways to run the same evaluation:
+
+- `POST /evaluation/run` — thin router, no evaluation logic of its own:
+  loads the dataset, narrows it to the request's `query_ids`/`limit`
+  subset (a request-shaping concern that lives in the router, the same
+  way `ProductFilters` narrows a search request before
+  `HybridSearchService` ever sees it — not inside `RetrievalEvaluator`),
+  calls `RetrievalEvaluator.evaluate`, and shapes the response. Never
+  omitting a body at all runs the full configured dataset.
+- `scripts/benchmark.py` — a standalone CLI (mirroring `scripts/`'s
+  existing purpose; not part of `app`), writing both `benchmark.json`
+  (the full `BenchmarkReport`) and a human-readable `benchmark.md`
+  (throughput, a per-task-type metrics table, and a "## Failures"
+  section) to `EVALUATION__BENCHMARK_OUTPUT` (`reports/` by default) —
+  the reproducible, offline artifact the phase spec asks for.
+
+Neither path logs embeddings or raw vectors, matching every earlier
+phase's own logging conventions.
+
+### Configuration
+
+New settings, all under `EvaluationSettings` (`app/core/settings.py`),
+env prefix `EVALUATION__`:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `EVALUATION__ENABLED` | `true` | Master switch |
+| `EVALUATION__TOP_K` | `10` | Default K passed to each evaluated system when a query doesn't set its own `top_k` |
+| `EVALUATION__BENCHMARK_OUTPUT` | `reports/` | Where `scripts/benchmark.py` writes `benchmark.json`/`benchmark.md` |
+| `EVALUATION__LATENCY_METRICS_ENABLED` | `true` | Whether per-query wall-clock latency is measured and reported |
+
+### Explicitly out of scope this phase
+
+No cross-encoder reranking, no LLM-judge scoring, no human evaluation, no
+online A/B testing, no Redis, no Celery/background workers, no UI
+dashboards, no model training — matching the phase spec's own "Do NOT
+Implement" list. Every metric here is a deterministic function of a
+labeled dataset and whatever the systems under test already return.
+
+### Why does `EvaluationQuery` accept `image_path` when `RetrievalEvaluator` doesn't dispatch it yet?
+
+The domain model is future-ready per the phase spec's own framing — the
+same "accept the field now, implement the dispatch later" pattern
+`RecommendationType.COMPLEMENTARY` (Phase 9) already established. A
+`RETRIEVAL` query with only `image_path` and no `text` fails as its own
+per-query error today (image-based dispatch isn't implemented), not a
+crash — consistent with how every other unsupported or malformed entry
+in the dataset is handled.
+
+### Why does duplicate-detection evaluation need a new `DuplicateDetectionService.detect_by_product_id` method?
+
+`EvaluationQuery` only carries a `product_id` for `DUPLICATE`/
+`RECOMMENDATION` queries — but `DuplicateDetectionService.detect()`
+(Phase 8) expects a freshly-uploaded image/text/attributes, not a
+product ID alone. Rather than duplicate `SimilarityScorer`/decision logic
+inside `RetrievalEvaluator` itself (explicitly disallowed by this phase's
+"no duplicated retrieval logic" requirement), `DuplicateDetectionService`
+gained `detect_by_product_id`: it reconstructs a `ProductAttributes` from
+the target's own stored vector metadata (the same `retrieve_text`/
+`retrieve_image` infrastructure Phase 9 built for recommendations) and
+reuses the exact same `SimilarityScorer`/`_build_decision` path
+`detect()` already uses.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -3268,5 +3442,90 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden recommendation test coverage and document Phase 9 (Phase 9 milestone 6/6)"
+git push
+```
+
+## Phase 10 — Retrieval Evaluation Framework (built from scratch)
+
+```bash
+# Milestone 1/6 — evaluation domain models
+#   app/core/paths.py — added EVALUATION_DIR, DEFAULT_DATASET_PATH,
+#   REPORTS_DIR; ensure_runtime_directories() also creates REPORTS_DIR
+#   app/core/settings.py — added EvaluationSettings
+#   backend/.env.example — documented the four new EVALUATION__ variables
+#   app/exceptions/errors.py — added EvaluationException
+#   app/models/evaluation_query.py — EvaluationTaskType, GroundTruth, EvaluationQuery
+#   app/models/retrieval_metrics.py — RetrievalMetrics
+#   app/models/evaluation_result.py — EvaluationQueryResult
+#   app/models/benchmark_report.py — BenchmarkReport
+#   tests/core/test_paths.py, test_settings.py — extended
+#   tests/models/test_evaluation_query.py, test_retrieval_metrics.py,
+#   test_evaluation_result.py, test_benchmark_report.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add evaluation domain models (Phase 10 milestone 1/6)"
+
+# Milestone 2/6 — evaluation dataset + loader
+#   backend/evaluation/dataset.json — checked-in 3-entry sample (one per task type)
+#   app/services/evaluation/dataset_loader.py — hand-written: reads/validates
+#   the flat JSON array into EvaluationQuery objects
+#   tests/services/evaluation/test_dataset_loader.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add evaluation dataset and loader (Phase 10 milestone 2/6)"
+
+# Milestone 3/6 — RetrievalEvaluator
+#   app/services/duplicate/duplicate_detection_service.py — extended:
+#   added detect_by_product_id (reuses SimilarityScorer/_build_decision,
+#   no duplicated logic)
+#   app/services/evaluation/retrieval_evaluator.py — hand-written:
+#   Precision@K/Recall@K/MRR/NDCG@K/Hit Rate@K as pure functions, dispatch
+#   by task_type, per-query failure isolation, aggregation by task_type
+#   tests/services/duplicate/test_duplicate_detection_service.py — extended
+#   tests/services/evaluation/test_retrieval_evaluator.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add RetrievalEvaluator (Phase 10 milestone 3/6)"
+
+# Milestone 4/6 — benchmark runner script
+#   scripts/benchmark.py — hand-written: run_benchmark() + render_markdown()
+#   write benchmark.json/benchmark.md to EVALUATION__BENCHMARK_OUTPUT; CLI
+#   entry point with --dataset/--output args
+#   tests/scripts/test_benchmark.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+uv run python scripts/benchmark.py --output /tmp/benchmark_smoke   # manual
+    # smoke test: confirmed graceful per-query failure isolation and
+    # correct report file generation with Qdrant not running locally
+git add -A
+git commit -m "feat: add benchmark runner script (Phase 10 milestone 4/6)"
+
+# Milestone 5/6 — evaluation API endpoint
+#   app/dependencies/evaluation.py — get_dataset_loader, get_retrieval_evaluator
+#   app/schemas/evaluation.py — EvaluationRunRequest, EvaluationMetricsInfo,
+#   EvaluationQueryResultInfo, EvaluationRunResponse
+#   app/api/evaluation.py — POST /evaluation/run (query_ids/limit subset filtering)
+#   app/application.py — registered evaluation_router
+#   tests/dependencies/test_evaluation.py, tests/schemas/test_evaluation.py,
+#   tests/api/test_evaluation.py, tests/test_application.py — hand-written / updated
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add evaluation API endpoint (Phase 10 milestone 5/6)"
+
+# Milestone 6/6 — test hardening + documentation
+#   tests/services/evaluation/test_retrieval_evaluator.py — added
+#   TestConcurrency: concurrent evaluate() calls each return their own
+#   uncontaminated result (metric correctness, malformed datasets, empty
+#   datasets, benchmark generation, and latency reporting were already
+#   covered by Milestones 1-5's own tests)
+#   backend/README.md — this section
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden evaluation test coverage and document Phase 10 (Phase 10 milestone 6/6)"
 git push
 ```

@@ -7,6 +7,7 @@ aggregation/error-isolation logic can be tested against precisely
 controlled inputs.
 """
 
+import asyncio
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -51,6 +52,26 @@ class _FakeHybridSearchService(HybridSearchService):
     ) -> list[HybridSearchResult]:
         self.calls.append({"text": text, "top_k": top_k})
         return self._results
+
+
+class _RoutingFakeHybridSearchService(HybridSearchService):
+    """Routes each `search` call to the result registered for its query `text`,
+    so concurrent `evaluate()` calls can be asserted to each get back their
+    own result rather than one another's (or a shared/last-write-wins one)."""
+
+    def __init__(self, results_by_text: dict[str, HybridSearchResult]) -> None:
+        self._results_by_text = results_by_text
+
+    async def search(
+        self,
+        *,
+        image: ProductImage | None = None,
+        text: str | None = None,
+        top_k: int | None = None,
+        filters: ProductFilters | None = None,
+    ) -> list[HybridSearchResult]:
+        assert text is not None
+        return [self._results_by_text[text]]
 
 
 class _FakeDuplicateDetectionService(DuplicateDetectionService):
@@ -551,3 +572,29 @@ class TestLatencyMetrics:
         report = await evaluator.evaluate([query])
 
         assert report.query_results[0].latency_seconds == 0.0
+
+
+class TestConcurrency:
+    async def test_concurrent_evaluate_calls_each_return_their_own_result(self) -> None:
+        texts = [f"query-{i}" for i in range(8)]
+        expected_by_text = {text: uuid4() for text in texts}
+        results_by_text = {
+            text: _hybrid_result(product_id) for text, product_id in expected_by_text.items()
+        }
+        evaluator = _evaluator(
+            hybrid_search_service=_RoutingFakeHybridSearchService(results_by_text)
+        )
+        queries = [
+            EvaluationQuery(
+                query_id=text,
+                text=text,
+                ground_truth=GroundTruth(expected_products=[expected_by_text[text]]),
+            )
+            for text in texts
+        ]
+
+        reports = await asyncio.gather(*(evaluator.evaluate([query]) for query in queries))
+
+        for text, report in zip(texts, reports, strict=True):
+            assert report.query_results[0].query_id == text
+            assert report.query_results[0].retrieved_products == [expected_by_text[text]]

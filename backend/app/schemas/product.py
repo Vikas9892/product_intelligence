@@ -128,6 +128,24 @@ class UploadResponse(BaseModel):
     duplicate: DuplicateInfo
 
 
+class UploadAcceptedResponse(BaseModel):
+    """Response body for `POST /api/v1/products/upload` when the async pipeline is enabled (Phase 12).
+
+    Returned with `202 Accepted` instead of `UploadResponse`'s `201
+    Created` — processing hasn't happened yet, only been queued.
+    `status` is always `"pending"` at this point (the job was just
+    created); `status_url` is the exact `GET /products/{id}/status` path
+    a client can poll (also reachable via `GET /jobs/{job_id}` using
+    `job_id` instead), so a caller doesn't have to construct either URL
+    itself.
+    """
+
+    product_id: UUID
+    job_id: UUID
+    status: str
+    status_url: str
+
+
 class ProductResponse(BaseModel):
     """A persisted product, as it will be returned once storage exists.
 

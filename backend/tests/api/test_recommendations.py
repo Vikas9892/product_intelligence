@@ -10,12 +10,14 @@ endpoint (duplicate detection OFF, since it isn't this suite's concern),
 then requests recommendations for one of the seeded products.
 """
 
+import asyncio
 import io
 from collections.abc import Iterator
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
+from fakeredis import aioredis as fake_aioredis
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -25,8 +27,16 @@ from app.application import create_app
 from app.core.config import settings
 from app.core.constants import DuplicateDetectionMode
 from app.dependencies.product import get_product_service
-from app.dependencies.recommendation import get_recommendation_engine_service
+from app.dependencies.recommendation import (
+    get_recommendation_cache_repository,
+    get_recommendation_engine_service,
+)
 from app.dependencies.upload import get_upload_service
+from app.models.recommendation_candidate import RecommendationCandidate
+from app.models.recommendation_reason import RecommendationReason
+from app.models.recommendation_result import RecommendationResult
+from app.models.recommendation_type import RecommendationType
+from app.repositories.recommendation_cache_repository import RecommendationCacheRepository
 from app.services.embeddings.base import BaseEmbeddingService
 from app.services.embeddings.clip_service import CLIPEmbeddingService
 from app.services.embeddings.model_manager import ModelManager
@@ -81,6 +91,7 @@ def _override_services(
     embedding_service: BaseEmbeddingService,
     text_embedding_service: BaseTextEmbeddingService,
     vector_store: QdrantVectorStore,
+    cache_repository: RecommendationCacheRepository,
 ) -> None:
     image_processing_service = ImageProcessingService(processed_dir=upload_dir / "processed")
     hybrid_search_service = HybridSearchService(
@@ -111,10 +122,30 @@ def _override_services(
             hybrid_search_service=hybrid_search_service, vector_store=vector_store
         )
     )
+    # fakeredis (no real Redis needed) — one shared instance per test (not
+    # a fresh one per request) so a test can pre-populate it and actually
+    # observe a cache hit.
+    app.dependency_overrides[get_recommendation_cache_repository] = lambda: cache_repository
 
 
 @pytest.fixture
-def recommendations_client(tmp_path: Path) -> Iterator[TestClient]:
+def recommendation_cache() -> RecommendationCacheRepository:
+    return RecommendationCacheRepository(
+        redis_client=fake_aioredis.FakeRedis(decode_responses=True)
+    )
+
+
+@pytest.fixture
+def recommendations_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recommendation_cache: RecommendationCacheRepository,
+) -> Iterator[TestClient]:
+    # This suite seeds products via the real /products/upload endpoint and
+    # expects the pre-Phase-12 synchronous 201 response — the async
+    # pipeline (Phase 12, on by default) would instead queue the upload
+    # for a worker that never runs in these tests.
+    monkeypatch.setattr(settings.async_pipeline, "enabled", False)
     app = create_app()
     vector_store = QdrantVectorStore(
         client=QdrantClient(location=":memory:"),
@@ -132,6 +163,7 @@ def recommendations_client(tmp_path: Path) -> Iterator[TestClient]:
         embedding_service=embedding_service,
         text_embedding_service=_FakeTextEmbeddingService(),
         vector_store=vector_store,
+        cache_repository=recommendation_cache,
     )
 
     with TestClient(app) as client:
@@ -247,3 +279,70 @@ class TestGetRecommendations:
         )
 
         assert response.status_code == 422
+
+
+class TestRecommendationCache:
+    """Phase 12: a plain default request (SIMILAR, no top_k) should be served from a
+    worker-precomputed cache entry when one exists, instead of computed live."""
+
+    def test_a_cached_entry_is_returned_instead_of_computed_live(
+        self,
+        recommendations_client: TestClient,
+        recommendation_cache: RecommendationCacheRepository,
+    ) -> None:
+        target_id = _seed_product(recommendations_client, name="Nike Air Zoom", brand="Nike")
+        cached_product_id = uuid4()
+        cached_result = RecommendationResult(
+            recommendations=[
+                RecommendationCandidate(
+                    product_id=cached_product_id,
+                    similarity_score=0.42,
+                    quality_score=0.42,
+                    final_score=0.42,
+                    reason=RecommendationReason(),
+                    explanation="From the cache.",
+                )
+            ],
+            processing_time=0.0,
+            recommendation_type=RecommendationType.SIMILAR,
+        )
+        asyncio.run(recommendation_cache.set(UUID(target_id), cached_result))
+
+        response = recommendations_client.get(
+            f"{settings.application.api_prefix}/products/{target_id}/recommendations"
+        )
+
+        assert response.status_code == 200
+        recommended_ids = [rec["product_id"] for rec in response.json()["recommendations"]]
+        assert recommended_ids == [str(cached_product_id)]
+
+    def test_a_custom_top_k_bypasses_the_cache(
+        self,
+        recommendations_client: TestClient,
+        recommendation_cache: RecommendationCacheRepository,
+    ) -> None:
+        target_id = _seed_product(recommendations_client, name="Nike Air Zoom", brand="Nike")
+        other_id = _seed_product(recommendations_client, name="Nike Pegasus", brand="Nike")
+        cached_result = RecommendationResult(
+            recommendations=[
+                RecommendationCandidate(
+                    product_id=uuid4(),
+                    similarity_score=0.42,
+                    quality_score=0.42,
+                    final_score=0.42,
+                    reason=RecommendationReason(),
+                )
+            ],
+            processing_time=0.0,
+            recommendation_type=RecommendationType.SIMILAR,
+        )
+        asyncio.run(recommendation_cache.set(UUID(target_id), cached_result))
+
+        response = recommendations_client.get(
+            f"{settings.application.api_prefix}/products/{target_id}/recommendations",
+            params={"top_k": 1},
+        )
+
+        assert response.status_code == 200
+        recommended_ids = [rec["product_id"] for rec in response.json()["recommendations"]]
+        assert other_id in recommended_ids

@@ -114,7 +114,12 @@ def _override_services(app: FastAPI, upload_dir: Path, *, vector_store: QdrantVe
 
 
 @pytest.fixture
-def search_client(tmp_path: Path) -> Iterator[TestClient]:
+def search_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    # This suite seeds products via the real /products/upload endpoint and
+    # expects the pre-Phase-12 synchronous 201 response — the async
+    # pipeline (Phase 12, on by default) would instead queue the upload
+    # for a worker that never runs in these tests.
+    monkeypatch.setattr(settings.async_pipeline, "enabled", False)
     app = create_app()
     vector_store = QdrantVectorStore(
         client=QdrantClient(location=":memory:"),

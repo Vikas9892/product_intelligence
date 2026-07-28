@@ -13,6 +13,7 @@ from app.schemas.product import (
     ProductCreate,
     ProductImage,
     ProductResponse,
+    UploadAcceptedResponse,
     UploadResponse,
 )
 
@@ -115,6 +116,21 @@ class TestUploadResponse:
 
         dumped = response.model_dump(mode="json")
         restored = UploadResponse.model_validate(dumped)
+
+        assert restored == response
+
+
+class TestUploadAcceptedResponse:
+    def test_round_trips_through_model_dump_and_validate(self) -> None:
+        response = UploadAcceptedResponse(
+            product_id=uuid4(),
+            job_id=uuid4(),
+            status="pending",
+            status_url="/api/v1/products/00000000-0000-0000-0000-000000000000/status",
+        )
+
+        dumped = response.model_dump(mode="json")
+        restored = UploadAcceptedResponse.model_validate(dumped)
 
         assert restored == response
 

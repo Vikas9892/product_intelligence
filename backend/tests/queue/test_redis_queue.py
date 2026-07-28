@@ -95,6 +95,17 @@ class TestEnqueueDequeue:
         assert first is not None and second is not None
         assert first.job_id == second.job_id == job.job_id
 
+    async def test_dequeue_handles_a_pending_id_whose_record_was_deleted(self) -> None:
+        # Defensive: a job's own record can vanish out from under a still-
+        # pending ID (a manual deletion, a TTL policy, ...) — dequeue()
+        # must drop it gracefully rather than raise.
+        queue = _queue()
+        job = _job()
+        await queue.enqueue(job)
+        await queue._redis.delete(f"job:{job.job_id}")
+
+        assert await queue.dequeue() is None
+
 
 class TestAck:
     async def test_ack_removes_the_job_from_in_flight_tracking(self) -> None:
@@ -258,6 +269,22 @@ class TestCrashRecovery:
         queue = _queue()
 
         assert await queue.requeue_stale_jobs(older_than_seconds=0) == 0
+
+    async def test_cleans_up_a_stale_entry_whose_record_was_deleted(self) -> None:
+        # Same defensive scenario as dequeue()'s own test: the job record
+        # backing a "processing" entry can vanish out from under it.
+        queue = _queue()
+        job = _job()
+        await queue.enqueue(job)
+        dequeued = await queue.dequeue()
+        assert dequeued is not None
+        await queue._redis.delete(f"job:{job.job_id}")
+
+        requeued_count = await queue.requeue_stale_jobs(older_than_seconds=0)
+
+        assert requeued_count == 0
+        in_flight = await queue._redis.hgetall(queue._processing_key)
+        assert in_flight == {}
 
 
 class TestConcurrentWorkers:

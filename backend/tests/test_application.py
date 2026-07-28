@@ -32,8 +32,10 @@ _BUSINESS_ROUTE_PATHS = {
     f"{settings.application.api_prefix}/products/search",
     f"{settings.application.api_prefix}/products/check-duplicate",
     f"{settings.application.api_prefix}/products/{{product_id}}/recommendations",
+    f"{settings.application.api_prefix}/products/{{product_id}}/status",
     f"{settings.application.api_prefix}/evaluation/run",
     f"{settings.application.api_prefix}/evaluation/compare-reranking",
+    f"{settings.application.api_prefix}/jobs/{{job_id}}",
 }
 
 # Expected middleware stack, outermost first — see

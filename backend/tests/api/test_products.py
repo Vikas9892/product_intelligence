@@ -117,7 +117,12 @@ def _override_services(app: FastAPI, upload_dir: Path) -> None:
 
 
 @pytest.fixture
-def upload_client(tmp_path: Path) -> Iterator[TestClient]:
+def upload_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    # This suite exercises the full pre-Phase-12 synchronous pipeline
+    # through a real HTTP request — the async pipeline (Phase 12, on by
+    # default) is covered separately (tests/api/test_upload_async.py),
+    # since it needs a queue fake, not a real embedding/vector-store stack.
+    monkeypatch.setattr(settings.async_pipeline, "enabled", False)
     app = create_app()
     _override_services(app, tmp_path)
 

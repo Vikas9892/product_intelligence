@@ -14,6 +14,7 @@ from pathlib import Path
 from app.models.benchmark_report import BenchmarkReport
 from app.models.evaluation_query import EvaluationTaskType
 from app.models.evaluation_result import EvaluationQueryResult
+from app.models.rerank_comparison_report import RerankComparisonReport
 from app.models.retrieval_metrics import RetrievalMetrics
 from scripts import benchmark
 
@@ -94,6 +95,101 @@ class TestRenderMarkdown:
         assert "## Failures" in markdown
         assert "bad-query" in markdown
         assert "Product not found." in markdown
+
+
+def _metrics_report(*, mrr: float) -> BenchmarkReport:
+    return BenchmarkReport(
+        generated_at=datetime.now(UTC),
+        dataset_size=3,
+        overall_metrics={
+            "retrieval": RetrievalMetrics(
+                precision_at_k={1: 1.0},
+                recall_at_k={1: 0.2},
+                ndcg_at_k={1: 1.0},
+                hit_rate_at_k={1: 1.0},
+                mrr=mrr,
+                average_latency_seconds=0.01,
+                query_count=3,
+            )
+        },
+        total_duration_seconds=0.5,
+        failure_count=0,
+    )
+
+
+def _comparison_report(
+    *, mrr_before: float = 0.81, mrr_after: float = 0.90
+) -> RerankComparisonReport:
+    return RerankComparisonReport(
+        without_reranking=_metrics_report(mrr=mrr_before),
+        with_reranking=_metrics_report(mrr=mrr_after),
+        improvement={
+            "retrieval": {
+                "mrr": mrr_after - mrr_before,
+                "precision_at_1": 0.0,
+                "recall_at_1": 0.0,
+                "ndcg_at_1": 0.0,
+                "hit_rate_at_1": 0.0,
+                "average_latency_seconds": 0.0,
+            }
+        },
+    )
+
+
+class TestRenderComparisonMarkdown:
+    def test_includes_the_header(self) -> None:
+        markdown = benchmark.render_comparison_markdown(_comparison_report())
+
+        assert "# Reranking Comparison Report" in markdown
+
+    def test_includes_a_per_task_type_before_after_delta_table(self) -> None:
+        markdown = benchmark.render_comparison_markdown(_comparison_report())
+
+        assert "## Retrieval" in markdown
+        assert "| MRR | 0.8100 | 0.9000 | +0.0900 |" in markdown
+
+    def test_empty_improvement_yields_an_explanatory_note(self) -> None:
+        comparison = RerankComparisonReport(
+            without_reranking=_report(), with_reranking=_report(), improvement={}
+        )
+
+        markdown = benchmark.render_comparison_markdown(comparison)
+
+        assert "No task type produced metrics" in markdown
+
+
+class TestRunRerankComparison:
+    async def test_writes_rerank_comparison_json_and_markdown_for_an_empty_dataset(
+        self, tmp_path: Path
+    ) -> None:
+        dataset_path = tmp_path / "dataset.json"
+        dataset_path.write_text("[]", encoding="utf-8")
+        output_dir = tmp_path / "reports"
+
+        comparison = await benchmark.run_rerank_comparison(
+            dataset_path=dataset_path, output_dir=output_dir
+        )
+
+        assert comparison.without_reranking.dataset_size == 0
+        assert comparison.with_reranking.dataset_size == 0
+        json_path = output_dir / "rerank_comparison.json"
+        markdown_path = output_dir / "rerank_comparison.md"
+        assert json_path.is_file()
+        assert markdown_path.is_file()
+
+        dumped = json.loads(json_path.read_text(encoding="utf-8"))
+        assert dumped["without_reranking"]["dataset_size"] == 0
+        assert "# Reranking Comparison Report" in markdown_path.read_text(encoding="utf-8")
+
+    async def test_creates_the_output_directory_if_missing(self, tmp_path: Path) -> None:
+        dataset_path = tmp_path / "dataset.json"
+        dataset_path.write_text("[]", encoding="utf-8")
+        output_dir = tmp_path / "nested" / "reports"
+        assert not output_dir.exists()
+
+        await benchmark.run_rerank_comparison(dataset_path=dataset_path, output_dir=output_dir)
+
+        assert output_dir.is_dir()
 
 
 class TestRunBenchmark:

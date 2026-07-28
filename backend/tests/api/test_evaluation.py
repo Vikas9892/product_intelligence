@@ -21,11 +21,13 @@ from app.dependencies.evaluation import get_dataset_loader, get_retrieval_evalua
 from app.models.benchmark_report import BenchmarkReport
 from app.models.evaluation_query import EvaluationQuery, GroundTruth
 from app.models.evaluation_result import EvaluationQueryResult
+from app.models.rerank_comparison_report import RerankComparisonReport
 from app.models.retrieval_metrics import RetrievalMetrics
 from app.services.evaluation.dataset_loader import DatasetLoader
 from app.services.evaluation.retrieval_evaluator import RetrievalEvaluator
 
 _RUN_URL = f"{settings.application.api_prefix}/evaluation/run"
+_COMPARE_URL = f"{settings.application.api_prefix}/evaluation/compare-reranking"
 
 
 def _query(query_id: str) -> EvaluationQuery:
@@ -46,15 +48,22 @@ class _EchoingFakeRetrievalEvaluator(RetrievalEvaluator):
 
     def __init__(self) -> None:
         self.received: list[EvaluationQuery] | None = None
+        self.compare_received: list[EvaluationQuery] | None = None
 
-    async def evaluate(self, queries: list[EvaluationQuery] | None = None) -> BenchmarkReport:
+    async def evaluate(
+        self,
+        queries: list[EvaluationQuery] | None = None,
+        *,
+        reranking_enabled: bool | None = None,
+    ) -> BenchmarkReport:
         self.received = queries
         resolved = queries if queries is not None else []
+        mrr = 0.90 if reranking_enabled else 0.81
         return BenchmarkReport(
             generated_at=datetime.now(UTC),
             dataset_size=len(resolved),
             overall_metrics=(
-                {"retrieval": RetrievalMetrics(mrr=1.0, query_count=len(resolved))}
+                {"retrieval": RetrievalMetrics(mrr=mrr, query_count=len(resolved))}
                 if resolved
                 else {}
             ),
@@ -69,6 +78,30 @@ class _EchoingFakeRetrievalEvaluator(RetrievalEvaluator):
             ],
             total_duration_seconds=0.02,
             failure_count=0,
+        )
+
+    async def compare_reranking(
+        self, queries: list[EvaluationQuery] | None = None
+    ) -> RerankComparisonReport:
+        self.compare_received = queries
+        without_reranking = await self.evaluate(queries, reranking_enabled=False)
+        with_reranking = await self.evaluate(queries, reranking_enabled=True)
+        improvement = (
+            {
+                "retrieval": {
+                    "mrr": (
+                        with_reranking.overall_metrics["retrieval"].mrr
+                        - without_reranking.overall_metrics["retrieval"].mrr
+                    )
+                }
+            }
+            if without_reranking.overall_metrics
+            else {}
+        )
+        return RerankComparisonReport(
+            without_reranking=without_reranking,
+            with_reranking=with_reranking,
+            improvement=improvement,
         )
 
 
@@ -153,7 +186,7 @@ class TestRunEvaluation:
 
         body = response.json()
         assert "queries evaluated" in body["summary"]
-        assert body["overall_metrics"]["retrieval"]["mrr"] == 1.0
+        assert body["overall_metrics"]["retrieval"]["mrr"] == pytest.approx(0.81)
         assert body["average_latency_seconds"] == pytest.approx(0.01)
         assert len(body["query_results"]) == 3
 
@@ -163,6 +196,54 @@ class TestRunEvaluation:
         client, _evaluator = evaluation_client
 
         response = client.post(_RUN_URL)
+
+        assert "vector" not in response.text
+        assert "embedding" not in response.text
+
+
+class TestCompareReranking:
+    def test_an_empty_body_runs_the_full_dataset(
+        self, evaluation_client: tuple[TestClient, _EchoingFakeRetrievalEvaluator]
+    ) -> None:
+        client, evaluator = evaluation_client
+
+        response = client.post(_COMPARE_URL)
+
+        assert response.status_code == 200
+        assert evaluator.compare_received is not None
+        assert len(evaluator.compare_received) == 3
+
+    def test_query_ids_filters_to_a_subset(
+        self, evaluation_client: tuple[TestClient, _EchoingFakeRetrievalEvaluator]
+    ) -> None:
+        client, evaluator = evaluation_client
+
+        response = client.post(_COMPARE_URL, json={"query_ids": ["q1", "q3"]})
+
+        assert response.status_code == 200
+        assert evaluator.compare_received is not None
+        assert {q.query_id for q in evaluator.compare_received} == {"q1", "q3"}
+
+    def test_response_includes_both_reports_and_the_improvement(
+        self, evaluation_client: tuple[TestClient, _EchoingFakeRetrievalEvaluator]
+    ) -> None:
+        client, _evaluator = evaluation_client
+
+        response = client.post(_COMPARE_URL)
+
+        body = response.json()
+        assert body["without_reranking"]["overall_metrics"]["retrieval"]["mrr"] == pytest.approx(
+            0.81
+        )
+        assert body["with_reranking"]["overall_metrics"]["retrieval"]["mrr"] == pytest.approx(0.90)
+        assert body["improvement"]["retrieval"]["mrr"] == pytest.approx(0.09)
+
+    def test_never_returns_a_raw_vector_or_embedding(
+        self, evaluation_client: tuple[TestClient, _EchoingFakeRetrievalEvaluator]
+    ) -> None:
+        client, _evaluator = evaluation_client
+
+        response = client.post(_COMPARE_URL)
 
         assert "vector" not in response.text
         assert "embedding" not in response.text

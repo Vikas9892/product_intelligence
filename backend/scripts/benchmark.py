@@ -3,6 +3,7 @@
 Usage:
 
     uv run python scripts/benchmark.py [--dataset PATH] [--output DIR]
+    uv run python scripts/benchmark.py --compare-reranking [--dataset PATH] [--output DIR]
 
 Not part of the importable `app` package — a one-off/maintenance
 entrypoint, matching `scripts/`'s own established purpose (see
@@ -13,7 +14,11 @@ defaults to `EvaluationSettings.benchmark_output_dir` (`reports/`).
 
 Reuses `RetrievalEvaluator` entirely — this script does no evaluation
 logic of its own, only report rendering (`benchmark.md`'s Markdown) and
-file I/O around it.
+file I/O around it. `--compare-reranking` (Phase 11) runs the dataset
+with reranking forced off, then forced on, writing
+`rerank_comparison.json`/`rerank_comparison.md` instead of the plain
+benchmark reports — the reproducible "before vs. after" artifact the
+phase spec's own worked example (MRR 0.81 -> 0.90) asks for.
 """
 
 import argparse
@@ -31,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import settings
 from app.models.benchmark_report import BenchmarkReport
+from app.models.rerank_comparison_report import RerankComparisonReport
 from app.services.evaluation.dataset_loader import DatasetLoader
 from app.services.evaluation.retrieval_evaluator import RetrievalEvaluator
 
@@ -78,6 +84,73 @@ def render_markdown(report: BenchmarkReport) -> str:
     return "\n".join(lines)
 
 
+def render_comparison_markdown(comparison: RerankComparisonReport) -> str:
+    """Render `comparison` (reranking disabled vs. enabled) as a human-readable Markdown summary."""
+    lines = ["# Reranking Comparison Report", ""]
+
+    for task_type in sorted(comparison.improvement):
+        before = comparison.without_reranking.overall_metrics[task_type]
+        after = comparison.with_reranking.overall_metrics[task_type]
+        deltas = comparison.improvement[task_type]
+        lines.append(f"## {task_type.title()}")
+        lines.append("")
+        lines.append("| Metric | Before | After | Delta |")
+        lines.append("|---|---|---|---|")
+        lines.append(f"| MRR | {before.mrr:.4f} | {after.mrr:.4f} | {deltas['mrr']:+.4f} |")
+        for k in sorted(set(before.precision_at_k) & set(after.precision_at_k)):
+            lines.append(
+                f"| Precision@{k} | {before.precision_at_k[k]:.4f} | {after.precision_at_k[k]:.4f} "
+                f"| {deltas[f'precision_at_{k}']:+.4f} |"
+            )
+        for k in sorted(set(before.recall_at_k) & set(after.recall_at_k)):
+            lines.append(
+                f"| Recall@{k} | {before.recall_at_k[k]:.4f} | {after.recall_at_k[k]:.4f} "
+                f"| {deltas[f'recall_at_{k}']:+.4f} |"
+            )
+        for k in sorted(set(before.ndcg_at_k) & set(after.ndcg_at_k)):
+            lines.append(
+                f"| NDCG@{k} | {before.ndcg_at_k[k]:.4f} | {after.ndcg_at_k[k]:.4f} "
+                f"| {deltas[f'ndcg_at_{k}']:+.4f} |"
+            )
+        for k in sorted(set(before.hit_rate_at_k) & set(after.hit_rate_at_k)):
+            lines.append(
+                f"| Hit Rate@{k} | {before.hit_rate_at_k[k]:.4f} | {after.hit_rate_at_k[k]:.4f} "
+                f"| {deltas[f'hit_rate_at_{k}']:+.4f} |"
+            )
+        lines.append(
+            f"| Avg latency (s) | {before.average_latency_seconds:.4f} "
+            f"| {after.average_latency_seconds:.4f} "
+            f"| {deltas['average_latency_seconds']:+.4f} |"
+        )
+        lines.append("")
+
+    if not comparison.improvement:
+        lines.append("No task type produced metrics under both configurations to compare.")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+async def run_rerank_comparison(
+    *, dataset_path: Path | None, output_dir: Path
+) -> RerankComparisonReport:
+    """Evaluate the dataset with reranking forced off, then on, and write comparison reports."""
+    dataset_loader = (
+        DatasetLoader(dataset_path=dataset_path) if dataset_path is not None else DatasetLoader()
+    )
+    evaluator = RetrievalEvaluator(dataset_loader=dataset_loader)
+    comparison = await evaluator.compare_reranking()
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "rerank_comparison.json").write_text(
+        json.dumps(comparison.model_dump(mode="json"), indent=2), encoding="utf-8"
+    )
+    (output_dir / "rerank_comparison.md").write_text(
+        render_comparison_markdown(comparison), encoding="utf-8"
+    )
+    return comparison
+
+
 async def run_benchmark(*, dataset_path: Path | None, output_dir: Path) -> BenchmarkReport:
     """Evaluate the dataset at `dataset_path` (or the configured default) and write reports to `output_dir`."""
     dataset_loader = (
@@ -106,14 +179,34 @@ def main() -> None:
         "--output",
         type=Path,
         default=None,
-        help="Directory to write benchmark.json/benchmark.md to "
+        help="Directory to write reports to "
         "(defaults to EVALUATION__BENCHMARK_OUTPUT_DIR, i.e. reports/).",
+    )
+    parser.add_argument(
+        "--compare-reranking",
+        action="store_true",
+        help="Run the dataset with reranking forced off, then on, and write "
+        "rerank_comparison.json/rerank_comparison.md instead of the plain benchmark reports.",
     )
     args = parser.parse_args()
 
     output_dir = (
         args.output if args.output is not None else settings.evaluation.benchmark_output_dir
     )
+
+    if args.compare_reranking:
+        comparison = asyncio.run(
+            run_rerank_comparison(dataset_path=args.dataset, output_dir=output_dir)
+        )
+        print(
+            f"Reranking comparison complete: {comparison.without_reranking.dataset_size} queries."
+        )
+        print(
+            f"Reports written to {output_dir / 'rerank_comparison.json'} "
+            f"and {output_dir / 'rerank_comparison.md'}"
+        )
+        return
+
     report = asyncio.run(run_benchmark(dataset_path=args.dataset, output_dir=output_dir))
 
     print(

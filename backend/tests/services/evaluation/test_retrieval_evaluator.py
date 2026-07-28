@@ -8,12 +8,14 @@ controlled inputs.
 """
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
 from app.exceptions.errors import EvaluationException, ResourceNotFoundException
+from app.models.benchmark_report import BenchmarkReport
 from app.models.duplicate_candidate import DuplicateCandidate
 from app.models.duplicate_decision import DuplicateDecision
 from app.models.evaluation_query import EvaluationQuery, EvaluationTaskType, GroundTruth
@@ -21,12 +23,14 @@ from app.models.recommendation_candidate import RecommendationCandidate
 from app.models.recommendation_reason import RecommendationReason
 from app.models.recommendation_result import RecommendationResult
 from app.models.recommendation_type import RecommendationType
+from app.models.retrieval_metrics import RetrievalMetrics
 from app.models.search import HybridSearchResult, ProductFilters, SearchModality
 from app.schemas.product import ProductImage
 from app.services.duplicate.duplicate_detection_service import DuplicateDetectionService
 from app.services.evaluation.dataset_loader import DatasetLoader
 from app.services.evaluation.retrieval_evaluator import (
     RetrievalEvaluator,
+    _compute_improvement,
     _hit_rate_at_k,
     _ndcg_at_k,
     _precision_at_k,
@@ -580,6 +584,155 @@ class TestLatencyMetrics:
         report = await evaluator.evaluate([query])
 
         assert report.query_results[0].latency_seconds == 0.0
+
+
+class _RerankAwareFakeHybridSearchService(HybridSearchService):
+    """Returns a different top result depending on whether reranking was
+    requested for this call — lets a test prove `compare_reranking` actually
+    forces each run's `reranking_enabled` rather than reusing one cached result."""
+
+    def __init__(self, *, product_without: UUID, product_with: UUID) -> None:
+        self._product_without = product_without
+        self._product_with = product_with
+        self.reranking_enabled_calls: list[bool | None] = []
+
+    async def search(
+        self,
+        *,
+        image: ProductImage | None = None,
+        text: str | None = None,
+        top_k: int | None = None,
+        filters: ProductFilters | None = None,
+        reranking_enabled: bool | None = None,
+    ) -> list[HybridSearchResult]:
+        self.reranking_enabled_calls.append(reranking_enabled)
+        product_id = self._product_with if reranking_enabled else self._product_without
+        return [_hybrid_result(product_id)]
+
+
+class TestRerankComparison:
+    async def test_forces_reranking_off_then_on_across_the_two_runs(self) -> None:
+        without_id, with_id = uuid4(), uuid4()
+        hybrid_search_service = _RerankAwareFakeHybridSearchService(
+            product_without=without_id, product_with=with_id
+        )
+        evaluator = _evaluator(hybrid_search_service=hybrid_search_service)
+        query = EvaluationQuery(
+            query_id="q1", text="shoes", ground_truth=GroundTruth(expected_products=[with_id])
+        )
+
+        comparison = await evaluator.compare_reranking([query])
+
+        assert hybrid_search_service.reranking_enabled_calls == [False, True]
+        assert comparison.without_reranking.query_results[0].retrieved_products == [without_id]
+        assert comparison.with_reranking.query_results[0].retrieved_products == [with_id]
+
+    async def test_computes_a_positive_mrr_improvement_matching_the_phase_spec_example(
+        self,
+    ) -> None:
+        without_id, with_id = uuid4(), uuid4()
+        hybrid_search_service = _RerankAwareFakeHybridSearchService(
+            product_without=without_id, product_with=with_id
+        )
+        evaluator = _evaluator(hybrid_search_service=hybrid_search_service)
+        query = EvaluationQuery(
+            query_id="q1", text="shoes", ground_truth=GroundTruth(expected_products=[with_id])
+        )
+
+        comparison = await evaluator.compare_reranking([query])
+
+        assert comparison.without_reranking.overall_metrics["retrieval"].mrr == 0.0
+        assert comparison.with_reranking.overall_metrics["retrieval"].mrr == 1.0
+        assert comparison.improvement["retrieval"]["mrr"] == pytest.approx(1.0)
+
+    async def test_uses_the_configured_dataset_loader_when_no_queries_are_given(self) -> None:
+        product_id = uuid4()
+        dataset_loader = _FakeDatasetLoader(
+            queries=[
+                EvaluationQuery(
+                    query_id="q1",
+                    text="shoes",
+                    ground_truth=GroundTruth(expected_products=[product_id]),
+                )
+            ]
+        )
+        evaluator = _evaluator(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(product_id)]),
+            dataset_loader=dataset_loader,
+        )
+
+        comparison = await evaluator.compare_reranking()
+
+        assert comparison.without_reranking.dataset_size == 1
+        assert comparison.with_reranking.dataset_size == 1
+
+
+class TestComputeImprovement:
+    def test_diffs_only_shared_task_types(self) -> None:
+        without = BenchmarkReport(
+            generated_at=datetime.now(UTC),
+            dataset_size=1,
+            overall_metrics={
+                "retrieval": RetrievalMetrics(mrr=0.5, query_count=1),
+                "duplicate": RetrievalMetrics(mrr=0.2, query_count=1),
+            },
+            total_duration_seconds=0.01,
+            failure_count=0,
+        )
+        with_ = BenchmarkReport(
+            generated_at=datetime.now(UTC),
+            dataset_size=1,
+            overall_metrics={"retrieval": RetrievalMetrics(mrr=0.8, query_count=1)},
+            total_duration_seconds=0.01,
+            failure_count=0,
+        )
+
+        improvement = _compute_improvement(without, with_)
+
+        assert "duplicate" not in improvement
+        assert improvement["retrieval"]["mrr"] == pytest.approx(0.3)
+
+    def test_diffs_precision_recall_ndcg_hit_rate_and_latency(self) -> None:
+        without = BenchmarkReport(
+            generated_at=datetime.now(UTC),
+            dataset_size=1,
+            overall_metrics={
+                "retrieval": RetrievalMetrics(
+                    precision_at_k={10: 0.4},
+                    recall_at_k={10: 0.3},
+                    ndcg_at_k={10: 0.2},
+                    hit_rate_at_k={10: 0.1},
+                    average_latency_seconds=0.05,
+                    query_count=1,
+                )
+            },
+            total_duration_seconds=0.01,
+            failure_count=0,
+        )
+        with_ = BenchmarkReport(
+            generated_at=datetime.now(UTC),
+            dataset_size=1,
+            overall_metrics={
+                "retrieval": RetrievalMetrics(
+                    precision_at_k={10: 0.6},
+                    recall_at_k={10: 0.5},
+                    ndcg_at_k={10: 0.4},
+                    hit_rate_at_k={10: 0.3},
+                    average_latency_seconds=0.08,
+                    query_count=1,
+                )
+            },
+            total_duration_seconds=0.01,
+            failure_count=0,
+        )
+
+        improvement = _compute_improvement(without, with_)["retrieval"]
+
+        assert improvement["precision_at_10"] == pytest.approx(0.2)
+        assert improvement["recall_at_10"] == pytest.approx(0.2)
+        assert improvement["ndcg_at_10"] == pytest.approx(0.2)
+        assert improvement["hit_rate_at_10"] == pytest.approx(0.2)
+        assert improvement["average_latency_seconds"] == pytest.approx(0.03)
 
 
 class TestConcurrency:

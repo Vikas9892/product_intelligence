@@ -76,3 +76,20 @@ class EvaluationRunResponse(BaseModel):
     failure_count: int
     overall_metrics: dict[str, EvaluationMetricsInfo] = Field(default_factory=dict)
     query_results: list[EvaluationQueryResultInfo] = Field(default_factory=list)
+
+
+class RerankComparisonResponse(BaseModel):
+    """Response body for `POST /api/v1/evaluation/compare-reranking` (Phase 11).
+
+    `without_reranking`/`with_reranking` are each shaped exactly like
+    `EvaluationRunResponse` (the same dataset, evaluated once with
+    reranking forced off and once forced on) so a caller can reuse
+    whatever it already does with a normal run's response; `improvement`
+    is the `after - before` delta per task type/metric, the phase spec's
+    own worked example ("MRR: Before 0.81, After 0.90") made explicit
+    rather than requiring the caller to diff the two reports itself.
+    """
+
+    without_reranking: EvaluationRunResponse
+    with_reranking: EvaluationRunResponse
+    improvement: dict[str, dict[str, float]] = Field(default_factory=dict)

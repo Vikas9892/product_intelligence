@@ -44,6 +44,7 @@ from app.models.benchmark_report import BenchmarkReport
 from app.models.evaluation_query import EvaluationQuery, EvaluationTaskType
 from app.models.evaluation_result import EvaluationQueryResult
 from app.models.recommendation_type import RecommendationType
+from app.models.rerank_comparison_report import RerankComparisonReport
 from app.models.retrieval_metrics import RetrievalMetrics
 from app.services.duplicate.duplicate_detection_service import DuplicateDetectionService
 from app.services.evaluation.dataset_loader import DatasetLoader
@@ -91,8 +92,19 @@ class RetrievalEvaluator:
             else settings.evaluation.latency_metrics_enabled
         )
 
-    async def evaluate(self, queries: list[EvaluationQuery] | None = None) -> BenchmarkReport:
+    async def evaluate(
+        self,
+        queries: list[EvaluationQuery] | None = None,
+        *,
+        reranking_enabled: bool | None = None,
+    ) -> BenchmarkReport:
         """Evaluate `queries` (or the full configured dataset when omitted).
+
+        `reranking_enabled` (Phase 11) forces every evaluated system's own
+        reranking on or off for this run, overriding each service's
+        configured default — `None` (the default) leaves each service's
+        own configuration untouched. See `compare_reranking` for running
+        both ways at once and diffing the result.
 
         Raises `EvaluationException` if loading the default dataset fails
         (only relevant when `queries` is omitted) or if aggregating the
@@ -103,7 +115,10 @@ class RetrievalEvaluator:
         start = time.monotonic()
         resolved_queries = queries if queries is not None else self._dataset_loader.load()
 
-        query_results = [await self._evaluate_one(query) for query in resolved_queries]
+        query_results = [
+            await self._evaluate_one(query, reranking_enabled=reranking_enabled)
+            for query in resolved_queries
+        ]
 
         try:
             overall_metrics = _aggregate(query_results, k_values=self._k_values)
@@ -127,10 +142,33 @@ class RetrievalEvaluator:
             failure_count=failure_count,
         )
 
-    async def _evaluate_one(self, query: EvaluationQuery) -> EvaluationQueryResult:
+    async def compare_reranking(
+        self, queries: list[EvaluationQuery] | None = None
+    ) -> RerankComparisonReport:
+        """Evaluate the same `queries` with reranking forced off, then forced on, and diff the metrics.
+
+        The phase's own worked example ("MRR: Before 0.81, After 0.90")
+        — this is what produces that comparison. The dataset is loaded
+        once (if `queries` is omitted) so both runs evaluate the exact
+        same queries; `RERANKER__*` settings still control *how*
+        reranking behaves, only whether it runs at all is overridden
+        here. Raises whatever either `evaluate()` call raises.
+        """
+        resolved_queries = queries if queries is not None else self._dataset_loader.load()
+        without_reranking = await self.evaluate(resolved_queries, reranking_enabled=False)
+        with_reranking = await self.evaluate(resolved_queries, reranking_enabled=True)
+        return RerankComparisonReport(
+            without_reranking=without_reranking,
+            with_reranking=with_reranking,
+            improvement=_compute_improvement(without_reranking, with_reranking),
+        )
+
+    async def _evaluate_one(
+        self, query: EvaluationQuery, *, reranking_enabled: bool | None = None
+    ) -> EvaluationQueryResult:
         start = time.monotonic()
         try:
-            retrieved = await self._retrieve(query)
+            retrieved = await self._retrieve(query, reranking_enabled=reranking_enabled)
         except Exception as exc:
             logger.warning(
                 "Evaluation query failed: query_id=%s, task_type=%s, error=%s",
@@ -157,7 +195,9 @@ class RetrievalEvaluator:
             reciprocal_rank=_reciprocal_rank(retrieved, expected),
         )
 
-    async def _retrieve(self, query: EvaluationQuery) -> list[UUID]:
+    async def _retrieve(
+        self, query: EvaluationQuery, *, reranking_enabled: bool | None = None
+    ) -> list[UUID]:
         """Dispatch `query` to the system its `task_type` names, returning ranked product IDs."""
         resolved_top_k = query.top_k if query.top_k is not None else settings.evaluation.top_k
 
@@ -168,7 +208,7 @@ class RetrievalEvaluator:
                     "yet supported (see EvaluationQuery.image_path's own docstring)."
                 )
             results = await self._hybrid_search_service.search(
-                text=query.text, top_k=resolved_top_k
+                text=query.text, top_k=resolved_top_k, reranking_enabled=reranking_enabled
             )
             return [result.product_id for result in results]
 
@@ -178,6 +218,7 @@ class RetrievalEvaluator:
                 product_id=query.product_id,
                 recommendation_type=RecommendationType.SIMILAR,
                 top_k=resolved_top_k,
+                reranking_enabled=reranking_enabled,
             )
             return [
                 recommendation.product_id
@@ -187,7 +228,7 @@ class RetrievalEvaluator:
         # DUPLICATE
         assert query.product_id is not None  # validated by EvaluationQuery
         decision = await self._duplicate_detection_service.detect_by_product_id(
-            query.product_id, top_k=resolved_top_k
+            query.product_id, top_k=resolved_top_k, reranking_enabled=reranking_enabled
         )
         return [candidate.product_id for candidate in decision.top_candidates]
 
@@ -227,6 +268,38 @@ def _aggregate(
 def _mean(values: Iterable[float]) -> float:
     resolved = list(values)
     return sum(resolved) / len(resolved) if resolved else 0.0
+
+
+def _compute_improvement(
+    without: BenchmarkReport, with_: BenchmarkReport
+) -> dict[str, dict[str, float]]:
+    """Diff two reports' `overall_metrics`, per shared task type: `after - before`.
+
+    A task type present in only one report (e.g. every one of its
+    queries failed under one configuration but not the other)
+    contributes no delta — there's nothing meaningful to compare it
+    against. `K` values are diffed for whichever cutoffs both sides
+    actually share, so this works regardless of how `k_values` is
+    configured.
+    """
+    improvement: dict[str, dict[str, float]] = {}
+    for task_type in sorted(set(without.overall_metrics) & set(with_.overall_metrics)):
+        before = without.overall_metrics[task_type]
+        after = with_.overall_metrics[task_type]
+        deltas: dict[str, float] = {"mrr": after.mrr - before.mrr}
+        for label, before_at_k, after_at_k in (
+            ("precision", before.precision_at_k, after.precision_at_k),
+            ("recall", before.recall_at_k, after.recall_at_k),
+            ("ndcg", before.ndcg_at_k, after.ndcg_at_k),
+            ("hit_rate", before.hit_rate_at_k, after.hit_rate_at_k),
+        ):
+            for k in sorted(set(before_at_k) & set(after_at_k)):
+                deltas[f"{label}_at_{k}"] = after_at_k[k] - before_at_k[k]
+        deltas["average_latency_seconds"] = (
+            after.average_latency_seconds - before.average_latency_seconds
+        )
+        improvement[task_type] = deltas
+    return improvement
 
 
 # --- Metrics (binary relevance: a product is either in `expected` or not) ---

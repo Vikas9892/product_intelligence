@@ -1,4 +1,4 @@
-"""Job status endpoint (Phase 12).
+"""Job status and dead-letter-queue endpoints (Phase 12).
 
 `GET /jobs/{job_id}` (mounted under `settings.application.api_prefix` by
 `app/application.py`, so `/api/v1/jobs/{job_id}`) looks up a background
@@ -6,11 +6,20 @@ job's current status/progress/current_stage directly by ID — the
 counterpart to `GET /products/{id}/status` (`app/api/products.py`),
 which looks the same record up by `product_id` instead. Both return the
 identical `JobStatusResponse` shape (see that module's own docstring for
-why) — this route stays a thin adapter, same as every other route in
-this codebase: parse the request, delegate to `QueueManager`, shape the
+why). `GET /jobs/dead-letter` (Milestone 5's own "never lose a job"
+requirement) lists every job that exhausted its retries, so an operator
+can inspect *what* failed and *why* (`JobStatusResponse.error`) rather
+than it silently disappearing — registered *before* `/{job_id}` so
+`"dead-letter"` is never mistaken for a job ID (Starlette matches routes
+in registration order; a later `/{job_id}` would otherwise 422 on it
+first).
+
+Both routes stay thin adapters, same as every other route in this
+codebase: parse the request, delegate to `QueueManager`, shape the
 response.
 """
 
+import asyncio
 from typing import Annotated
 from uuid import UUID
 
@@ -25,6 +34,25 @@ from app.schemas.job import JobStatusResponse
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+@router.get(
+    "/dead-letter",
+    response_model=list[JobStatusResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List every job that exhausted its retries",
+    description="Returns the current status of every job in the dead-letter queue — "
+    "jobs that failed enough times to stop being retried automatically.",
+)
+async def get_dead_letter_jobs(
+    queue_manager: Annotated[QueueManager, Depends(get_queue_manager)],
+) -> list[JobStatusResponse]:
+    """List every dead-lettered job's current record, oldest first."""
+    job_ids = await queue_manager.get_dead_letter_job_ids()
+    jobs = await asyncio.gather(*(queue_manager.get(job_id) for job_id in job_ids))
+
+    logger.info("Dead-letter queue listed: count=%d", len(job_ids))
+    return [JobStatusResponse.from_job(job) for job in jobs if job is not None]
 
 
 @router.get(

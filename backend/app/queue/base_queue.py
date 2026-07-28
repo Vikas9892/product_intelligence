@@ -75,3 +75,14 @@ class BaseQueue(ABC):
         list (pending/processing/delayed/dead-letter) `job` is in.
         """
         raise NotImplementedError
+
+    @abstractmethod
+    async def get_dead_letter_job_ids(self) -> list[UUID]:
+        """Return every job ID currently in the dead-letter queue, oldest first.
+
+        Milestone 5's own "never lose a job" requirement means a job that
+        exhausted its retries must stay inspectable, not just silently
+        marked `FAILED` — this is what `GET /jobs/dead-letter`
+        (`app/api/jobs.py`) reads from.
+        """
+        raise NotImplementedError

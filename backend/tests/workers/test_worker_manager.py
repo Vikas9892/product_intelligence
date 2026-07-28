@@ -85,6 +85,9 @@ class _FakeQueueWithRecovery(BaseQueue):
     async def update(self, job: Job) -> None:
         raise NotImplementedError
 
+    async def get_dead_letter_job_ids(self) -> list[UUID]:
+        return []
+
     async def requeue_stale_jobs(self, *, older_than_seconds: float) -> int:
         self.recovery_calls.append(older_than_seconds)
         if self._error is not None:

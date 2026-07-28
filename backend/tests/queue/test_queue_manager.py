@@ -15,12 +15,13 @@ from app.queue.redis_queue import RedisQueue
 
 
 class _FakeQueue(BaseQueue):
-    def __init__(self) -> None:
+    def __init__(self, *, dead_letter_ids: list[UUID] | None = None) -> None:
         self.enqueued: list[Job] = []
         self.acked: list[Job] = []
         self.retried: list[tuple[Job, str]] = []
         self.updated: list[Job] = []
         self._by_id: dict[UUID, Job] = {}
+        self._dead_letter_ids = dead_letter_ids if dead_letter_ids is not None else []
 
     async def enqueue(self, job: Job) -> None:
         self.enqueued.append(job)
@@ -44,6 +45,9 @@ class _FakeQueue(BaseQueue):
     async def update(self, job: Job) -> None:
         self.updated.append(job)
         self._by_id[job.job_id] = job
+
+    async def get_dead_letter_job_ids(self) -> list[UUID]:
+        return self._dead_letter_ids
 
 
 class _FakeQueueWithRecovery(_FakeQueue):
@@ -122,6 +126,13 @@ class TestQueueManagerDelegation:
         await manager.update(job)
 
         assert fake_queue.updated == [job]
+
+    async def test_get_dead_letter_job_ids_delegates_to_the_underlying_queue(self) -> None:
+        job_id = uuid4()
+        fake_queue = _FakeQueue(dead_letter_ids=[job_id])
+        manager = QueueManager(queue=fake_queue)
+
+        assert await manager.get_dead_letter_job_ids() == [job_id]
 
 
 class TestRequeueStaleJobs:

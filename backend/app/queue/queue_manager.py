@@ -46,6 +46,9 @@ class QueueManager:
     async def update(self, job: Job) -> None:
         await self._queue.update(job)
 
+    async def get_dead_letter_job_ids(self) -> list[UUID]:
+        return await self._queue.get_dead_letter_job_ids()
+
     async def requeue_stale_jobs(self, *, older_than_seconds: float) -> int:
         """Recover jobs a crashed worker left stuck in-flight — see `RedisQueue`'s own docstring.
 

@@ -41,6 +41,7 @@ class _FakeQueue(BaseQueue):
 
     def __init__(self) -> None:
         self.enqueued: list[Job] = []
+        self.dead_letter_ids: list[UUID] = []
 
     async def enqueue(self, job: Job) -> None:
         self.enqueued.append(job)
@@ -64,6 +65,9 @@ class _FakeQueue(BaseQueue):
         for index, existing in enumerate(self.enqueued):
             if existing.job_id == job.job_id:
                 self.enqueued[index] = job
+
+    async def get_dead_letter_job_ids(self) -> list[UUID]:
+        return self.dead_letter_ids
 
 
 def _image_file() -> dict[str, tuple[str, io.BytesIO, str]]:
@@ -207,3 +211,39 @@ class TestJobStatus:
 
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "resource_not_found"
+
+
+class TestDeadLetterQueue:
+    def test_returns_an_empty_list_when_nothing_is_dead_lettered(
+        self, async_upload_client: tuple[TestClient, _FakeQueue]
+    ) -> None:
+        client, _fake_queue = async_upload_client
+
+        response = client.get(f"{settings.application.api_prefix}/jobs/dead-letter")
+
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_lists_every_dead_lettered_jobs_current_record(
+        self, async_upload_client: tuple[TestClient, _FakeQueue]
+    ) -> None:
+        client, fake_queue = async_upload_client
+        upload_response = client.post(_UPLOAD_URL, data={"name": "Widget"}, files=_image_file())
+        job_id = upload_response.json()["job_id"]
+        fake_queue.dead_letter_ids.append(UUID(job_id))
+
+        response = client.get(f"{settings.application.api_prefix}/jobs/dead-letter")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["job_id"] == job_id
+
+    def test_is_matched_before_the_job_id_route_not_parsed_as_a_uuid(
+        self, async_upload_client: tuple[TestClient, _FakeQueue]
+    ) -> None:
+        client, _fake_queue = async_upload_client
+
+        response = client.get(f"{settings.application.api_prefix}/jobs/dead-letter")
+
+        assert response.status_code == 200  # not a 422 UUID-parsing failure

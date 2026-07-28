@@ -45,6 +45,8 @@ from app.exceptions.errors import (
 )
 from app.models.search import HybridSearchResult, NearestNeighbor, ProductFilters, SearchModality
 from app.schemas.product import ProductImage
+from app.services.base_reranker import BaseReranker
+from app.services.reranker_service import RerankerService
 from app.services.vectorstore.search_service import SearchService
 from app.services.vectorstore.text_search_service import TextSearchService
 
@@ -52,7 +54,7 @@ logger = get_logger(__name__)
 
 
 class HybridSearchService:
-    """Orchestrates image search, text search, and weighted score fusion between them."""
+    """Orchestrates image search, text search, weighted score fusion, and optional reranking."""
 
     def __init__(
         self,
@@ -61,6 +63,8 @@ class HybridSearchService:
         text_search_service: TextSearchService | None = None,
         image_weight: float | None = None,
         text_weight: float | None = None,
+        reranker: BaseReranker | None = None,
+        reranking_enabled: bool | None = None,
     ) -> None:
         self._search_service = search_service if search_service is not None else SearchService()
         self._text_search_service = (
@@ -72,6 +76,17 @@ class HybridSearchService:
         self._text_weight = (
             text_weight if text_weight is not None else settings.hybrid_search.text_weight
         )
+        #: Cross-encoder reranking (Phase 11) — an optional refinement
+        #: step applied only when a text query is available (a
+        #: cross-encoder scores query-document *text* pairs, so an
+        #: image-only search has nothing to rerank with; see `.search`'s
+        #: own docstring). Composing `RerankerService` directly here
+        #: (rather than depending only on `BaseReranker`) would be wrong
+        #: for testability, so the constructor accepts either.
+        self._reranker: BaseReranker = reranker if reranker is not None else RerankerService()
+        self._reranking_enabled = (
+            reranking_enabled if reranking_enabled is not None else settings.reranker.enabled
+        )
 
     async def search(
         self,
@@ -80,22 +95,44 @@ class HybridSearchService:
         text: str | None = None,
         top_k: int | None = None,
         filters: ProductFilters | None = None,
+        reranking_enabled: bool | None = None,
     ) -> list[HybridSearchResult]:
         """Search by `image`, `text`, or both — at least one must be given.
 
-        Raises `ValidationException` if neither is provided; otherwise
-        raises whatever `SearchService`/`TextSearchService` raise for the
-        modality/modalities actually used, or `HybridSearchException` if
-        combining their results (hybrid mode only) fails unexpectedly.
+        When reranking is active (`reranking_enabled`, defaulting to this
+        instance's own configured value) *and* a text query is present,
+        the underlying search(es) are overfetched up to
+        `RERANKER__TOP_N` candidates, reranked by cross-encoder against
+        `text`, and truncated back down to the requested `top_k` — an
+        image-only search has no text to build a query-document pair
+        from, so it's returned unreranked regardless of
+        `reranking_enabled` (a documented limitation, not a bug).
+
+        Raises `ValidationException` if neither `image` nor `text` is
+        provided; otherwise raises whatever `SearchService`/
+        `TextSearchService` raise for the modality/modalities actually
+        used, `HybridSearchException` if combining their results (hybrid
+        mode only) fails unexpectedly, or `RerankException` if reranking
+        fails.
         """
         has_text = text is not None and text.strip() != ""
 
         if image is None and not has_text:
             raise ValidationException("At least one of an image or a text query must be provided.")
 
+        resolved_top_k = top_k if top_k is not None else settings.vector_store.default_top_k
+        rerank_active = (
+            reranking_enabled if reranking_enabled is not None else self._reranking_enabled
+        ) and has_text
+        retrieval_top_k = (
+            max(settings.reranker.top_n, resolved_top_k) if rerank_active else resolved_top_k
+        )
+
         if image is not None and not has_text:
             logger.info("Hybrid search dispatching: mode=image-only")
-            result = await self._search_service.search_by_image(image, top_k=top_k, filters=filters)
+            result = await self._search_service.search_by_image(
+                image, top_k=resolved_top_k, filters=filters
+            )
             return [
                 _single_modality_result(neighbor, SearchModality.IMAGE)
                 for neighbor in result.neighbors
@@ -105,20 +142,21 @@ class HybridSearchService:
             logger.info("Hybrid search dispatching: mode=text-only")
             assert text is not None  # narrowed by `has_text` above
             result = await self._text_search_service.search_by_text(
-                text, top_k=top_k, filters=filters
+                text, top_k=retrieval_top_k, filters=filters
             )
-            return [
+            results = [
                 _single_modality_result(neighbor, SearchModality.TEXT)
                 for neighbor in result.neighbors
             ]
+            return await self._finalize(text, results, resolved_top_k, rerank_active)
 
         logger.info("Hybrid search dispatching: mode=hybrid")
         assert text is not None  # narrowed by `has_text` above
         image_result = await self._search_service.search_by_image(
-            image, top_k=top_k, filters=filters
+            image, top_k=retrieval_top_k, filters=filters
         )
         text_result = await self._text_search_service.search_by_text(
-            text, top_k=top_k, filters=filters
+            text, top_k=retrieval_top_k, filters=filters
         )
 
         try:
@@ -132,14 +170,36 @@ class HybridSearchService:
             raise HybridSearchException("Failed to combine image and text search results.") from exc
 
         fused.sort(key=lambda result: result.score, reverse=True)
-        resolved_top_k = top_k if top_k is not None else settings.vector_store.default_top_k
         logger.info(
             "Hybrid search completed: image_results=%d, text_results=%d, fused_results=%d",
             len(image_result.neighbors),
             len(text_result.neighbors),
             min(len(fused), resolved_top_k),
         )
-        return fused[:resolved_top_k]
+        return await self._finalize(text, fused, resolved_top_k, rerank_active)
+
+    async def _finalize(
+        self,
+        text: str,
+        results: list[HybridSearchResult],
+        resolved_top_k: int,
+        rerank_active: bool,
+    ) -> list[HybridSearchResult]:
+        """Truncate `results` to `resolved_top_k`, reranking first if `rerank_active`."""
+        if not rerank_active:
+            return results[:resolved_top_k]
+
+        rerank_result = await self._reranker.rerank(text, results, top_k=resolved_top_k)
+        by_id = {result.product_id: result for result in results}
+        logger.info(
+            "Reranking applied: candidates=%d, reranked=%d",
+            len(results),
+            len(rerank_result.candidates),
+        )
+        return [
+            by_id[candidate.product_id].model_copy(update={"score": candidate.rerank_score})
+            for candidate in rerank_result.candidates
+        ]
 
     async def search_by_product_id(
         self,

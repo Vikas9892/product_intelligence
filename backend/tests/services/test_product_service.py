@@ -207,6 +207,7 @@ class _FakeDuplicateDetectionService(DuplicateDetectionService):
         image: ProductImage,
         top_k: int | None = None,
         threshold: float | None = None,
+        reranking_enabled: bool | None = None,
     ) -> DuplicateDecision:
         self.calls.append(name)
         return self._decision

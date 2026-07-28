@@ -12,9 +12,16 @@ Pipeline, per the phase spec's own diagram:
 Deliberately thin, mirroring `DuplicateDetectionService`/
 `CatalogIntelligenceService`: this class does no similarity/attribute/tag
 math of its own — `RecommendationScorer` owns every signal computation,
-so the same scorer can be reused elsewhere (a future cross-encoder
-reranker, Phase 10) without dragging retrieval/ranking/diversity logic
-along with it.
+so the same scorer can be reused elsewhere without dragging retrieval/
+ranking/diversity logic along with it.
+
+**Cross-encoder reranking (Phase 11, optional).** When enabled, the
+overfetched candidate pool is reranked by `RerankerService` against the
+target product's own text representation *before* `RecommendationScorer`
+ever sees it — each candidate's `score` (the "similarity" signal
+`RecommendationScorer` reuses as-is) is replaced with its cross-encoder-
+refined rerank score, so reranking improves the same formula rather than
+requiring a parallel one.
 
 **Why does this class hold its own `BaseVectorStore`, when
 `HybridSearchService` already composes one indirectly (via
@@ -67,10 +74,13 @@ from app.models.recommendation_candidate import RecommendationCandidate
 from app.models.recommendation_result import RecommendationResult
 from app.models.recommendation_type import RecommendationType
 from app.models.search import HybridSearchResult, SearchModality
+from app.services.base_reranker import BaseReranker
 from app.services.recommendation.recommendation_scorer import RecommendationScorer
+from app.services.reranker_service import RerankerService
 from app.services.vectorstore.base import BaseVectorStore
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
 from app.services.vectorstore.qdrant_store import QdrantVectorStore
+from app.utils.text import build_text_representation_from_metadata
 
 logger = get_logger(__name__)
 
@@ -102,8 +112,10 @@ class RecommendationEngineService:
         hybrid_search_service: HybridSearchService | None = None,
         vector_store: BaseVectorStore | None = None,
         recommendation_scorer: RecommendationScorer | None = None,
+        reranker: BaseReranker | None = None,
         top_k: int | None = None,
         diversity_enabled: bool | None = None,
+        reranking_enabled: bool | None = None,
     ) -> None:
         self._hybrid_search_service = (
             hybrid_search_service if hybrid_search_service is not None else HybridSearchService()
@@ -112,11 +124,15 @@ class RecommendationEngineService:
         self._recommendation_scorer = (
             recommendation_scorer if recommendation_scorer is not None else RecommendationScorer()
         )
+        self._reranker: BaseReranker = reranker if reranker is not None else RerankerService()
         self._top_k = top_k if top_k is not None else settings.recommendation.top_k
         self._diversity_enabled = (
             diversity_enabled
             if diversity_enabled is not None
             else settings.recommendation.diversity_enabled
+        )
+        self._reranking_enabled = (
+            reranking_enabled if reranking_enabled is not None else settings.reranker.enabled
         )
 
     async def recommend(
@@ -125,8 +141,14 @@ class RecommendationEngineService:
         product_id: UUID,
         recommendation_type: RecommendationType = RecommendationType.SIMILAR,
         top_k: int | None = None,
+        reranking_enabled: bool | None = None,
     ) -> RecommendationResult:
         """Generate ranked recommendations for the already-indexed product `product_id`.
+
+        When reranking is active (`reranking_enabled`, defaulting to this
+        instance's own configured value), the overfetched candidate pool
+        is reranked by cross-encoder against the target's own text
+        representation *before* scoring — see the module docstring.
 
         Raises `ResourceNotFoundException` if `product_id` isn't indexed,
         whatever `HybridSearchService` raises for candidate retrieval, or
@@ -135,6 +157,9 @@ class RecommendationEngineService:
         """
         start = time.monotonic()
         resolved_top_k = top_k if top_k is not None else self._top_k
+        rerank_active = (
+            reranking_enabled if reranking_enabled is not None else self._reranking_enabled
+        )
 
         target_metadata = await self._target_metadata(product_id)
 
@@ -146,6 +171,8 @@ class RecommendationEngineService:
             if self._diversity_enabled
             else resolved_top_k
         )
+        if rerank_active:
+            overfetch_top_k = max(overfetch_top_k, settings.reranker.top_n)
         candidates = await self._hybrid_search_service.search_by_product_id(
             product_id, top_k=overfetch_top_k, modality=modality
         )
@@ -154,6 +181,18 @@ class RecommendationEngineService:
             product_id,
             len(candidates),
         )
+
+        if rerank_active and candidates:
+            target_text = build_text_representation_from_metadata(target_metadata)
+            rerank_result = await self._reranker.rerank(target_text, candidates)
+            by_id = {candidate.product_id: candidate for candidate in candidates}
+            candidates = [
+                by_id[reranked.product_id].model_copy(update={"score": reranked.rerank_score})
+                for reranked in rerank_result.candidates
+            ]
+            logger.info(
+                "Reranking applied: product_id=%s, candidates=%d", product_id, len(candidates)
+            )
 
         try:
             scored_pairs: list[_ScoredPair] = [

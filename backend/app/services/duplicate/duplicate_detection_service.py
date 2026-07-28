@@ -10,13 +10,28 @@ Pipeline, per the phase spec's own diagram:
 Deliberately thin, mirroring `CatalogIntelligenceService` (Phase 7) and
 `HybridSearchService` (Phase 6): this class does no similarity math of
 its own — `SimilarityScorer` owns every signal computation, so the same
-scorer can be reused elsewhere (recommendation ranking, cross-encoder
-reranking) without dragging retrieval/decision logic along with it, per
-the phase's own "why this design" rationale. `detect` holds no mutable
-instance state and every call operates on its own local variables, so a
-single `DuplicateDetectionService` instance is safe to share across
-concurrent requests — the same reasoning already established for
+scorer can be reused elsewhere (recommendation ranking) without dragging
+retrieval/decision logic along with it, per the phase's own "why this
+design" rationale. `detect` holds no mutable instance state and every
+call operates on its own local variables, so a single
+`DuplicateDetectionService` instance is safe to share across concurrent
+requests — the same reasoning already established for
 `HybridSearchService`/`CatalogIntelligenceService`.
+
+**Cross-encoder reranking (Phase 11, optional).** When enabled, the
+overfetched candidate pool is reranked against the checked product's own
+text (the same `text` `detect`/`detect_by_product_id` already build for
+hybrid search) *before* `SimilarityScorer` sees it. Unlike
+`RecommendationEngineService` (which substitutes the rerank score into
+`candidate.score`, the exact signal `RecommendationScorer` reuses),
+`SimilarityScorer` never reads `candidate.score` — it reads
+`candidate.text_score` directly — so reranking here replaces
+`text_score` instead: a cross-encoder's joint-attention relevance
+judgment is a strictly more accurate refinement of "how textually
+similar is this candidate" than the embedding cosine similarity
+`text_score` started as, and substituting it flows straight into the
+existing `text_weight`-weighted formula with no changes to
+`SimilarityScorer` itself.
 """
 
 import time
@@ -30,12 +45,15 @@ from app.models.duplicate_candidate import DuplicateCandidate
 from app.models.duplicate_decision import DuplicateDecision
 from app.models.duplicate_result import DuplicateResult
 from app.models.product_attributes import ProductAttributes
+from app.models.search import HybridSearchResult
 from app.schemas.product import ProductImage
+from app.services.base_reranker import BaseReranker
 from app.services.duplicate.similarity_scorer import SimilarityScorer
+from app.services.reranker_service import RerankerService
 from app.services.vectorstore.base import BaseVectorStore
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
 from app.services.vectorstore.qdrant_store import QdrantVectorStore
-from app.utils.text import build_text_representation
+from app.utils.text import build_text_representation, build_text_representation_from_metadata
 
 logger = get_logger(__name__)
 
@@ -49,8 +67,10 @@ class DuplicateDetectionService:
         hybrid_search_service: HybridSearchService | None = None,
         vector_store: BaseVectorStore | None = None,
         similarity_scorer: SimilarityScorer | None = None,
+        reranker: BaseReranker | None = None,
         top_k: int | None = None,
         threshold: float | None = None,
+        reranking_enabled: bool | None = None,
     ) -> None:
         self._hybrid_search_service = (
             hybrid_search_service if hybrid_search_service is not None else HybridSearchService()
@@ -66,9 +86,13 @@ class DuplicateDetectionService:
         self._similarity_scorer = (
             similarity_scorer if similarity_scorer is not None else SimilarityScorer()
         )
+        self._reranker: BaseReranker = reranker if reranker is not None else RerankerService()
         self._top_k = top_k if top_k is not None else settings.duplicate_detection.top_k
         self._threshold = (
             threshold if threshold is not None else settings.duplicate_detection.threshold
+        )
+        self._reranking_enabled = (
+            reranking_enabled if reranking_enabled is not None else settings.reranker.enabled
         )
 
     async def detect(
@@ -82,6 +106,7 @@ class DuplicateDetectionService:
         image: ProductImage,
         top_k: int | None = None,
         threshold: float | None = None,
+        reranking_enabled: bool | None = None,
     ) -> DuplicateDecision:
         """Check whether a product (not yet indexed) is likely a duplicate of an existing one.
 
@@ -94,20 +119,39 @@ class DuplicateDetectionService:
         `POST /products/check-duplicate` (Milestone 5), which lets a
         caller tune both per-request; `ProductService`'s own upload
         integration never passes them, relying on the configured
-        defaults. Raises whatever `HybridSearchService` raises for
-        candidate retrieval, or `DuplicateDetectionException` if scoring
-        the otherwise successfully-retrieved candidates fails
-        unexpectedly.
+        defaults. When reranking is active (`reranking_enabled`,
+        defaulting to this instance's own configured value), candidates
+        are reranked against `text` before scoring — see the module
+        docstring for why that replaces `text_score`, not `score`. Raises
+        whatever `HybridSearchService` raises for candidate retrieval, or
+        `DuplicateDetectionException` if scoring the otherwise
+        successfully-retrieved candidates fails unexpectedly.
         """
         start = time.monotonic()
         resolved_top_k = top_k if top_k is not None else self._top_k
         resolved_threshold = threshold if threshold is not None else self._threshold
+        rerank_active = (
+            reranking_enabled if reranking_enabled is not None else self._reranking_enabled
+        )
+        retrieval_top_k = (
+            max(settings.reranker.top_n, resolved_top_k) if rerank_active else resolved_top_k
+        )
 
         text = build_text_representation(name, brand, category, description)
+        # `reranking_enabled=False`: this class applies its own rerank
+        # pass below (substituting into `text_score`, not `score`) — if
+        # `HybridSearchService.search` also reranked internally, the same
+        # candidates would be scored by the cross-encoder twice.
         candidates = await self._hybrid_search_service.search(
-            image=image, text=text, top_k=resolved_top_k
+            image=image, text=text, top_k=retrieval_top_k, reranking_enabled=False
         )
         logger.info("Duplicate candidate retrieval complete: candidates=%d", len(candidates))
+
+        if rerank_active and candidates:
+            candidates = await _rerank_candidates(
+                self._reranker, text, candidates, top_k=resolved_top_k
+            )
+            logger.info("Reranking applied: candidates=%d", len(candidates))
 
         try:
             results = [
@@ -143,6 +187,7 @@ class DuplicateDetectionService:
         *,
         top_k: int | None = None,
         threshold: float | None = None,
+        reranking_enabled: bool | None = None,
     ) -> DuplicateDecision:
         """Check whether an *already-indexed* product looks like a duplicate of another.
 
@@ -163,6 +208,12 @@ class DuplicateDetectionService:
         start = time.monotonic()
         resolved_top_k = top_k if top_k is not None else self._top_k
         resolved_threshold = threshold if threshold is not None else self._threshold
+        rerank_active = (
+            reranking_enabled if reranking_enabled is not None else self._reranking_enabled
+        )
+        retrieval_top_k = (
+            max(settings.reranker.top_n, resolved_top_k) if rerank_active else resolved_top_k
+        )
 
         target_point = await self._vector_store.retrieve_text(product_id)
         if target_point is None:
@@ -188,13 +239,22 @@ class DuplicateDetectionService:
         )
 
         candidates = await self._hybrid_search_service.search_by_product_id(
-            product_id, top_k=resolved_top_k
+            product_id, top_k=retrieval_top_k
         )
         logger.info(
             "Duplicate candidate retrieval (by ID) complete: product_id=%s, candidates=%d",
             product_id,
             len(candidates),
         )
+
+        if rerank_active and candidates:
+            query_text = build_text_representation_from_metadata(metadata)
+            candidates = await _rerank_candidates(
+                self._reranker, query_text, candidates, top_k=resolved_top_k
+            )
+            logger.info(
+                "Reranking applied: product_id=%s, candidates=%d", product_id, len(candidates)
+            )
 
         try:
             results = [
@@ -224,6 +284,24 @@ class DuplicateDetectionService:
             processing_time,
         )
         return decision
+
+
+async def _rerank_candidates(
+    reranker: BaseReranker,
+    query: str,
+    candidates: list[HybridSearchResult],
+    *,
+    top_k: int,
+) -> list[HybridSearchResult]:
+    """Rerank `candidates` against `query`, substituting each survivor's `text_score`
+    with its cross-encoder-refined rerank score — see the module docstring for why
+    `text_score` (not `score`) is the field `SimilarityScorer` actually reads."""
+    rerank_result = await reranker.rerank(query, candidates, top_k=top_k)
+    by_id = {candidate.product_id: candidate for candidate in candidates}
+    return [
+        by_id[reranked.product_id].model_copy(update={"text_score": reranked.rerank_score})
+        for reranked in rerank_result.candidates
+    ]
 
 
 def _build_decision(results: list[DuplicateResult], *, threshold: float) -> DuplicateDecision:

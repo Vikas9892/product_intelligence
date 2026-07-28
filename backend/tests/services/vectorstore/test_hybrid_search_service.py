@@ -17,7 +17,11 @@ from app.exceptions.errors import (
     ResourceNotFoundException,
     ValidationException,
 )
+from app.models.rerank_reason import RerankReason
+from app.models.rerank_result import RerankResult
+from app.models.reranked_candidate import RerankedCandidate
 from app.models.search import (
+    HybridSearchResult,
     NearestNeighbor,
     ProductFilters,
     SearchModality,
@@ -25,10 +29,43 @@ from app.models.search import (
     StoredPoint,
 )
 from app.schemas.product import ProductImage
+from app.services.base_reranker import BaseReranker
 from app.services.vectorstore import hybrid_search_service as hybrid_search_service_module
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
 from app.services.vectorstore.search_service import SearchService
 from app.services.vectorstore.text_search_service import TextSearchService
+
+
+class _FakeReranker(BaseReranker):
+    """Reverses `candidates`' order and reports a fixed `rerank_score` — enough
+    to prove `HybridSearchService` actually applies whatever the reranker
+    returns, without needing real cross-encoder inference."""
+
+    def __init__(self, *, rerank_score: float = 0.99) -> None:
+        self._rerank_score = rerank_score
+        self.calls: list[dict[str, object]] = []
+
+    async def rerank(
+        self, query: str, candidates: list[HybridSearchResult], *, top_k: int | None = None
+    ) -> RerankResult:
+        self.calls.append({"query": query, "candidates": candidates, "top_k": top_k})
+        reversed_candidates = list(reversed(candidates))
+        resolved_top_k = top_k if top_k is not None else len(reversed_candidates)
+        return RerankResult(
+            query=query,
+            candidates=[
+                RerankedCandidate(
+                    product_id=candidate.product_id,
+                    original_score=candidate.score,
+                    rerank_score=self._rerank_score,
+                    final_rank=rank,
+                    metadata=candidate.metadata,
+                    reason=RerankReason(original_rank=rank, final_rank=rank, rank_delta=0),
+                )
+                for rank, candidate in enumerate(reversed_candidates[:resolved_top_k], start=1)
+            ],
+            original_count=len(candidates),
+        )
 
 
 class _FakeSearchService(SearchService):
@@ -303,6 +340,133 @@ class TestHybridFusion:
 
         with pytest.raises(HybridSearchException):
             await service.search(image=_image(), text="query")
+
+
+class TestReranking:
+    async def test_disabled_by_default_even_with_a_text_query(self) -> None:
+        reranker = _FakeReranker()
+        service = HybridSearchService(
+            search_service=_FakeSearchService(),
+            text_search_service=_FakeTextSearchService(
+                neighbors=[NearestNeighbor(product_id=uuid4(), score=0.5)]
+            ),
+            reranker=reranker,
+        )
+
+        await service.search(text="red shoes")
+
+        assert reranker.calls == []
+
+    async def test_reranks_a_text_only_search_when_enabled(self) -> None:
+        first, second = uuid4(), uuid4()
+        reranker = _FakeReranker()
+        service = HybridSearchService(
+            search_service=_FakeSearchService(),
+            text_search_service=_FakeTextSearchService(
+                neighbors=[
+                    NearestNeighbor(product_id=first, score=0.9),
+                    NearestNeighbor(product_id=second, score=0.1),
+                ]
+            ),
+            reranker=reranker,
+            reranking_enabled=True,
+        )
+
+        results = await service.search(text="red shoes")
+
+        assert [result.product_id for result in results] == [second, first]
+        assert reranker.calls[0]["query"] == "red shoes"
+
+    async def test_reranked_results_carry_the_rerank_score(self) -> None:
+        product_id = uuid4()
+        service = HybridSearchService(
+            search_service=_FakeSearchService(),
+            text_search_service=_FakeTextSearchService(
+                neighbors=[NearestNeighbor(product_id=product_id, score=0.2)]
+            ),
+            reranker=_FakeReranker(rerank_score=0.77),
+            reranking_enabled=True,
+        )
+
+        results = await service.search(text="red shoes")
+
+        assert results[0].score == 0.77
+
+    async def test_reranks_hybrid_search_too(self) -> None:
+        first, second = uuid4(), uuid4()
+        service = HybridSearchService(
+            search_service=_FakeSearchService(
+                neighbors=[
+                    NearestNeighbor(product_id=first, score=0.9),
+                    NearestNeighbor(product_id=second, score=0.1),
+                ]
+            ),
+            text_search_service=_FakeTextSearchService(),
+            reranker=_FakeReranker(),
+            reranking_enabled=True,
+        )
+
+        results = await service.search(image=_image(), text="red shoes")
+
+        assert [result.product_id for result in results] == [second, first]
+
+    async def test_image_only_search_is_never_reranked(self) -> None:
+        reranker = _FakeReranker()
+        service = HybridSearchService(
+            search_service=_FakeSearchService(
+                neighbors=[NearestNeighbor(product_id=uuid4(), score=0.5)]
+            ),
+            text_search_service=_FakeTextSearchService(),
+            reranker=reranker,
+            reranking_enabled=True,
+        )
+
+        await service.search(image=_image())
+
+        assert reranker.calls == []
+
+    async def test_per_call_override_disables_reranking(self) -> None:
+        reranker = _FakeReranker()
+        service = HybridSearchService(
+            search_service=_FakeSearchService(),
+            text_search_service=_FakeTextSearchService(
+                neighbors=[NearestNeighbor(product_id=uuid4(), score=0.5)]
+            ),
+            reranker=reranker,
+            reranking_enabled=True,
+        )
+
+        await service.search(text="red shoes", reranking_enabled=False)
+
+        assert reranker.calls == []
+
+    async def test_per_call_override_enables_reranking(self) -> None:
+        reranker = _FakeReranker()
+        service = HybridSearchService(
+            search_service=_FakeSearchService(),
+            text_search_service=_FakeTextSearchService(
+                neighbors=[NearestNeighbor(product_id=uuid4(), score=0.5)]
+            ),
+            reranker=reranker,
+            reranking_enabled=False,
+        )
+
+        await service.search(text="red shoes", reranking_enabled=True)
+
+        assert len(reranker.calls) == 1
+
+    async def test_truncates_to_top_k_after_reranking(self) -> None:
+        neighbors = [NearestNeighbor(product_id=uuid4(), score=0.5) for _ in range(5)]
+        service = HybridSearchService(
+            search_service=_FakeSearchService(),
+            text_search_service=_FakeTextSearchService(neighbors=neighbors),
+            reranker=_FakeReranker(),
+            reranking_enabled=True,
+        )
+
+        results = await service.search(text="red shoes", top_k=2)
+
+        assert len(results) == 2
 
 
 class TestConcurrency:

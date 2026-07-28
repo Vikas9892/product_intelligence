@@ -15,11 +15,59 @@ from app.exceptions.errors import RecommendationException, ResourceNotFoundExcep
 from app.models.recommendation_candidate import RecommendationCandidate
 from app.models.recommendation_reason import RecommendationReason
 from app.models.recommendation_type import RecommendationType
+from app.models.rerank_reason import RerankReason
+from app.models.rerank_result import RerankResult
+from app.models.reranked_candidate import RerankedCandidate
 from app.models.search import HybridSearchResult, ProductFilters, SearchModality, StoredPoint
+from app.services.base_reranker import BaseReranker
 from app.services.recommendation.recommendation_engine_service import RecommendationEngineService
 from app.services.recommendation.recommendation_scorer import RecommendationScorer
 from app.services.vectorstore.base import BaseVectorStore, VectorCollection, VectorRecord
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
+
+
+class _FakeReranker(BaseReranker):
+    """Reverses candidate order and stamps a fixed `rerank_score` — enough to prove
+    the reranked order/score actually reaches `RecommendationScorer`."""
+
+    def __init__(self, *, rerank_score: float = 0.9) -> None:
+        self._rerank_score = rerank_score
+        self.calls: list[dict[str, object]] = []
+
+    async def rerank(
+        self, query: str, candidates: list[HybridSearchResult], *, top_k: int | None = None
+    ) -> RerankResult:
+        self.calls.append({"query": query, "candidates": candidates, "top_k": top_k})
+        reversed_candidates = list(reversed(candidates))
+        return RerankResult(
+            query=query,
+            candidates=[
+                RerankedCandidate(
+                    product_id=candidate.product_id,
+                    original_score=candidate.score,
+                    rerank_score=self._rerank_score,
+                    final_rank=rank,
+                    metadata=candidate.metadata,
+                    reason=RerankReason(original_rank=rank, final_rank=rank, rank_delta=0),
+                )
+                for rank, candidate in enumerate(reversed_candidates, start=1)
+            ],
+            original_count=len(candidates),
+        )
+
+
+class _EchoingRecommendationScorer(RecommendationScorer):
+    """Reflects `candidate.score` directly into every score field, so a test can
+    prove whether reranking's score substitution actually reached the scorer."""
+
+    def score(self, *, target_metadata, candidate) -> RecommendationCandidate:  # type: ignore[no-untyped-def]
+        return RecommendationCandidate(
+            product_id=candidate.product_id,
+            similarity_score=candidate.score,
+            quality_score=candidate.score,
+            final_score=candidate.score,
+            reason=RecommendationReason(),
+        )
 
 
 class _FakeHybridSearchService(HybridSearchService):
@@ -322,6 +370,113 @@ class TestDiversity:
         result = await service.recommend(product_id=uuid4())
 
         assert len(result.recommendations) == 1
+
+
+class TestReranking:
+    async def test_disabled_by_default(self) -> None:
+        candidate_id = uuid4()
+        reranker = _FakeReranker()
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(candidate_id)]),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(
+                final_score_by_product={candidate_id: 0.5}
+            ),
+            reranker=reranker,
+        )
+
+        await service.recommend(product_id=uuid4())
+
+        assert reranker.calls == []
+
+    async def test_reranking_uses_the_targets_own_text_representation(self) -> None:
+        candidate_id = uuid4()
+        target_point = StoredPoint(
+            product_id=uuid4(), vector=[0.1], metadata={"name": "Red Shoe", "brand": "Nike"}
+        )
+        reranker = _FakeReranker()
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(candidate_id)]),
+            vector_store=_FakeVectorStore(stored_point=target_point),
+            recommendation_scorer=_FakeRecommendationScorer(
+                final_score_by_product={candidate_id: 0.5}
+            ),
+            reranker=reranker,
+            reranking_enabled=True,
+        )
+
+        await service.recommend(product_id=uuid4())
+
+        assert reranker.calls[0]["query"] == "Red Shoe. Nike"
+
+    async def test_reranked_score_flows_into_the_scorer(self) -> None:
+        first, second = uuid4(), uuid4()
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(
+                results=[_hybrid_result(first), _hybrid_result(second)]
+            ),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_EchoingRecommendationScorer(),
+            reranker=_FakeReranker(rerank_score=0.83),
+            reranking_enabled=True,
+            diversity_enabled=False,
+            top_k=2,
+        )
+
+        result = await service.recommend(product_id=uuid4())
+
+        assert [rec.product_id for rec in result.recommendations] == [second, first]
+        assert all(rec.similarity_score == 0.83 for rec in result.recommendations)
+
+    async def test_overfetches_at_least_rerank_top_n(self) -> None:
+        hybrid_search_service = _FakeHybridSearchService()
+        service = RecommendationEngineService(
+            hybrid_search_service=hybrid_search_service,
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product={}),
+            reranker=_FakeReranker(),
+            reranking_enabled=True,
+            diversity_enabled=False,
+            top_k=5,
+        )
+
+        await service.recommend(product_id=uuid4())
+
+        requested_top_k = hybrid_search_service.calls[0]["top_k"]
+        assert isinstance(requested_top_k, int)
+        assert requested_top_k >= 50
+
+    async def test_no_candidates_skips_reranking(self) -> None:
+        reranker = _FakeReranker()
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(results=[]),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(final_score_by_product={}),
+            reranker=reranker,
+            reranking_enabled=True,
+        )
+
+        result = await service.recommend(product_id=uuid4())
+
+        assert result.recommendations == []
+        assert reranker.calls == []
+
+    async def test_per_call_override_disables_reranking(self) -> None:
+        candidate_id = uuid4()
+        reranker = _FakeReranker()
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(candidate_id)]),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(
+                final_score_by_product={candidate_id: 0.5}
+            ),
+            reranker=reranker,
+            reranking_enabled=True,
+        )
+
+        await service.recommend(product_id=uuid4(), reranking_enabled=False)
+
+        assert reranker.calls == []
 
 
 class TestErrorWrapping:

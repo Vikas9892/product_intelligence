@@ -49,6 +49,7 @@ class _FakeHybridSearchService(HybridSearchService):
         text: str | None = None,
         top_k: int | None = None,
         filters: ProductFilters | None = None,
+        reranking_enabled: bool | None = None,
     ) -> list[HybridSearchResult]:
         self.calls.append({"text": text, "top_k": top_k})
         return self._results
@@ -69,6 +70,7 @@ class _RoutingFakeHybridSearchService(HybridSearchService):
         text: str | None = None,
         top_k: int | None = None,
         filters: ProductFilters | None = None,
+        reranking_enabled: bool | None = None,
     ) -> list[HybridSearchResult]:
         assert text is not None
         return [self._results_by_text[text]]
@@ -83,7 +85,12 @@ class _FakeDuplicateDetectionService(DuplicateDetectionService):
         self.calls: list[dict[str, object]] = []
 
     async def detect_by_product_id(
-        self, product_id: UUID, *, top_k: int | None = None, threshold: float | None = None
+        self,
+        product_id: UUID,
+        *,
+        top_k: int | None = None,
+        threshold: float | None = None,
+        reranking_enabled: bool | None = None,
     ) -> DuplicateDecision:
         self.calls.append({"product_id": product_id, "top_k": top_k})
         if self._error is not None:
@@ -106,6 +113,7 @@ class _FakeRecommendationEngineService(RecommendationEngineService):
         product_id: UUID,
         recommendation_type: RecommendationType = RecommendationType.SIMILAR,
         top_k: int | None = None,
+        reranking_enabled: bool | None = None,
     ) -> RecommendationResult:
         self.calls.append(
             {"product_id": product_id, "recommendation_type": recommendation_type, "top_k": top_k}

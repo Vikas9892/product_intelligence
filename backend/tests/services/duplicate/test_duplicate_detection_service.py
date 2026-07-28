@@ -18,13 +18,74 @@ from app.exceptions.errors import DuplicateDetectionException, ResourceNotFoundE
 from app.models.duplicate_decision import DuplicateDecision
 from app.models.duplicate_result import DuplicateResult
 from app.models.product_attributes import ProductAttributes
+from app.models.rerank_reason import RerankReason
+from app.models.rerank_result import RerankResult
+from app.models.reranked_candidate import RerankedCandidate
 from app.models.search import HybridSearchResult, ProductFilters, SearchModality, StoredPoint
 from app.models.similarity_signal import SimilaritySignal
 from app.schemas.product import ProductImage
+from app.services.base_reranker import BaseReranker
 from app.services.duplicate.duplicate_detection_service import DuplicateDetectionService
 from app.services.duplicate.similarity_scorer import SimilarityScorer
 from app.services.vectorstore.base import BaseVectorStore, VectorCollection, VectorRecord
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
+
+
+class _FakeReranker(BaseReranker):
+    """Reverses candidate order and stamps a fixed `rerank_score` — enough to prove
+    the reranked order/score actually reaches `SimilarityScorer` via `text_score`."""
+
+    def __init__(self, *, rerank_score: float = 0.9) -> None:
+        self._rerank_score = rerank_score
+        self.calls: list[dict[str, object]] = []
+
+    async def rerank(
+        self, query: str, candidates: list[HybridSearchResult], *, top_k: int | None = None
+    ) -> RerankResult:
+        self.calls.append({"query": query, "candidates": candidates, "top_k": top_k})
+        reversed_candidates = list(reversed(candidates))
+        return RerankResult(
+            query=query,
+            candidates=[
+                RerankedCandidate(
+                    product_id=candidate.product_id,
+                    original_score=candidate.score,
+                    rerank_score=self._rerank_score,
+                    final_rank=rank,
+                    metadata=candidate.metadata,
+                    reason=RerankReason(original_rank=rank, final_rank=rank, rank_delta=0),
+                )
+                for rank, candidate in enumerate(reversed_candidates, start=1)
+            ],
+            original_count=len(candidates),
+        )
+
+
+class _TextScoreEchoingSimilarityScorer(SimilarityScorer):
+    """Reflects `candidate.text_score` directly into `overall_similarity`, so a test
+    can prove whether reranking's `text_score` substitution actually reached scoring."""
+
+    def score(
+        self,
+        *,
+        name: str,
+        brand: str | None,
+        category: str | None,
+        attributes: ProductAttributes,
+        candidate: HybridSearchResult,
+    ) -> DuplicateResult:
+        return DuplicateResult(
+            product_id=candidate.product_id,
+            signals=[
+                SimilaritySignal(
+                    name="text",
+                    score=candidate.text_score,
+                    weight=1.0,
+                    contribution=candidate.text_score,
+                )
+            ],
+            overall_similarity=candidate.text_score,
+        )
 
 
 class _FakeHybridSearchService(HybridSearchService):
@@ -40,6 +101,7 @@ class _FakeHybridSearchService(HybridSearchService):
         text: str | None = None,
         top_k: int | None = None,
         filters: ProductFilters | None = None,
+        reranking_enabled: bool | None = None,
     ) -> list[HybridSearchResult]:
         self.calls.append((image, text, top_k))
         return self._results
@@ -347,6 +409,7 @@ class _RoutingFakeHybridSearchService(HybridSearchService):
         text: str | None = None,
         top_k: int | None = None,
         filters: ProductFilters | None = None,
+        reranking_enabled: bool | None = None,
     ) -> list[HybridSearchResult]:
         assert text is not None
         return self._results_by_text[text]
@@ -529,3 +592,136 @@ class TestDetectByProductId:
 
         with pytest.raises(DuplicateDetectionException):
             await service.detect_by_product_id(target_id)
+
+
+class TestReranking:
+    async def test_disabled_by_default(self) -> None:
+        candidate_id = uuid4()
+        reranker = _FakeReranker()
+        service = DuplicateDetectionService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(candidate_id)]),
+            similarity_scorer=_FakeSimilarityScorer(
+                overall_similarity_by_product={candidate_id: 0.5}
+            ),
+            reranker=reranker,
+        )
+
+        await _detect(service)
+
+        assert reranker.calls == []
+
+    async def test_reranked_text_score_flows_into_scoring(self) -> None:
+        first, second = uuid4(), uuid4()
+        service = DuplicateDetectionService(
+            hybrid_search_service=_FakeHybridSearchService(
+                results=[_hybrid_result(first), _hybrid_result(second)]
+            ),
+            similarity_scorer=_TextScoreEchoingSimilarityScorer(),
+            reranker=_FakeReranker(rerank_score=0.87),
+            reranking_enabled=True,
+            threshold=0.5,
+        )
+
+        decision = await _detect(service)
+
+        # `_FakeReranker` reverses order, so `second` (originally last)
+        # becomes the top-ranked, highest-`text_score` candidate.
+        assert decision.matched_product == second
+        assert decision.confidence == pytest.approx(0.87)
+
+    async def test_does_not_double_rerank_via_hybrid_search_service(self) -> None:
+        # `HybridSearchService.search` is called with `reranking_enabled=False`
+        # explicitly — this class applies its own single rerank pass.
+        candidate_id = uuid4()
+
+        class _RecordingHybridSearchService(HybridSearchService):
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def search(
+                self,
+                *,
+                image: ProductImage | None = None,
+                text: str | None = None,
+                top_k: int | None = None,
+                filters: ProductFilters | None = None,
+                reranking_enabled: bool | None = None,
+            ) -> list[HybridSearchResult]:
+                self.calls.append({"reranking_enabled": reranking_enabled})
+                return [_hybrid_result(candidate_id)]
+
+        hybrid_search_service = _RecordingHybridSearchService()
+        service = DuplicateDetectionService(
+            hybrid_search_service=hybrid_search_service,
+            similarity_scorer=_FakeSimilarityScorer(
+                overall_similarity_by_product={candidate_id: 0.5}
+            ),
+            reranker=_FakeReranker(),
+            reranking_enabled=True,
+        )
+
+        await _detect(service)
+
+        assert hybrid_search_service.calls[0]["reranking_enabled"] is False
+
+    async def test_no_candidates_skips_reranking(self) -> None:
+        reranker = _FakeReranker()
+        service = DuplicateDetectionService(
+            hybrid_search_service=_FakeHybridSearchService(results=[]),
+            similarity_scorer=_FakeSimilarityScorer(overall_similarity_by_product={}),
+            reranker=reranker,
+            reranking_enabled=True,
+        )
+
+        decision = await _detect(service)
+
+        assert decision.is_duplicate is False
+        assert reranker.calls == []
+
+    async def test_per_call_override_disables_reranking(self) -> None:
+        candidate_id = uuid4()
+        reranker = _FakeReranker()
+        service = DuplicateDetectionService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(candidate_id)]),
+            similarity_scorer=_FakeSimilarityScorer(
+                overall_similarity_by_product={candidate_id: 0.5}
+            ),
+            reranker=reranker,
+            reranking_enabled=True,
+        )
+
+        await service.detect(
+            name="Widget",
+            brand=None,
+            category=None,
+            description=None,
+            attributes=ProductAttributes(),
+            image=_image(),
+            reranking_enabled=False,
+        )
+
+        assert reranker.calls == []
+
+    async def test_reranking_by_product_id_uses_the_targets_stored_metadata(self) -> None:
+        target_id = uuid4()
+        candidate_id = uuid4()
+        reranker = _FakeReranker()
+        service = DuplicateDetectionService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(candidate_id)]),
+            vector_store=_FakeVectorStore(
+                stored_point=StoredPoint(
+                    product_id=target_id,
+                    vector=[0.1],
+                    metadata={"name": "Red Shoe", "brand": "Nike"},
+                )
+            ),
+            similarity_scorer=_FakeSimilarityScorer(
+                overall_similarity_by_product={candidate_id: 0.5}
+            ),
+            reranker=reranker,
+            reranking_enabled=True,
+        )
+
+        await service.detect_by_product_id(target_id)
+
+        assert reranker.calls[0]["query"] == "Red Shoe. Nike"

@@ -264,6 +264,35 @@ class EvaluationSettings(BaseModel):
     latency_metrics_enabled: bool = True
 
 
+class RerankerSettings(BaseModel):
+    """Cross-encoder reranking configuration for `RerankerService` (Phase 11).
+
+    `enabled` defaults to `False` — unlike every other feature flag in
+    this codebase, turning this one on adds a *real transformer model
+    load and inference call* to every hybrid search/recommendation/
+    duplicate-detection request it applies to, not a deterministic,
+    already-cheap computation (`CatalogIntelligenceSettings.enabled`,
+    `RecommendationSettings.enabled`, ... are all safe to default on for
+    exactly that reason). Defaulting reranking on would silently break
+    this project's own "zero-config, runs locally without extra setup"
+    promise (see `DatabaseSettings`'s docstring) the first time any route
+    that searches by text is hit without a Qdrant-backed catalog and
+    internet access to fetch the model. `top_n` is how many top
+    hybrid-search candidates get reranked (the "50" in "Hybrid Search ->
+    Top 50 -> Cross Encoder"); `batch_size` bounds how many query-product
+    pairs `CrossEncoderService` scores in one model forward pass, the
+    same reasoning `AIModelSettings.embedding_batch_size`/`text_batch_size`
+    already establish. `device` follows the exact same "auto"/"cpu"/
+    "cuda[:N]" convention `embedding_device`/`text_device` do.
+    """
+
+    enabled: bool = False
+    model_name: str = constants.DEFAULT_RERANKER_MODEL_NAME
+    top_n: int = Field(default=50, gt=0)
+    batch_size: int = Field(default=16, gt=0)
+    device: str = "auto"
+
+
 class StorageSettings(BaseModel):
     """Local/object storage for uploaded product assets."""
 
@@ -332,6 +361,7 @@ class Settings(BaseSettings):
     )
     recommendation: RecommendationSettings = Field(default_factory=RecommendationSettings)
     evaluation: EvaluationSettings = Field(default_factory=EvaluationSettings)
+    reranker: RerankerSettings = Field(default_factory=RerankerSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

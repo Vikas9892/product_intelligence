@@ -13,6 +13,7 @@ from app.core.settings import (
     EvaluationSettings,
     HybridSearchSettings,
     RecommendationSettings,
+    RerankerSettings,
     SecuritySettings,
     Settings,
     StorageSettings,
@@ -220,6 +221,25 @@ class TestEvaluationSettings:
     def test_rejects_a_non_positive_top_k(self) -> None:
         with pytest.raises(ValidationError):
             EvaluationSettings(top_k=0)
+
+
+class TestRerankerSettings:
+    def test_defaults(self) -> None:
+        settings = RerankerSettings()
+
+        assert settings.enabled is False
+        assert settings.model_name == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        assert settings.top_n == 50
+        assert settings.batch_size == 16
+        assert settings.device == "auto"
+
+    def test_rejects_a_non_positive_top_n(self) -> None:
+        with pytest.raises(ValidationError):
+            RerankerSettings(top_n=0)
+
+    def test_rejects_a_non_positive_batch_size(self) -> None:
+        with pytest.raises(ValidationError):
+            RerankerSettings(batch_size=0)
 
 
 class TestSecuritySettings:

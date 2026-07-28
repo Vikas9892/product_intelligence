@@ -104,6 +104,12 @@ DEFAULT_CLIP_MODEL_NAME = "openai/clip-vit-base-patch32"
 DEFAULT_TEXT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 DEFAULT_TEXT_VECTOR_SIZE = 384
 
+# --- Cross-encoder reranking (Phase 11) ---
+# A well-known, CPU-friendly MS-MARCO-tuned cross-encoder checkpoint —
+# small enough to run without a GPU, per the phase's own "CPU compatible"
+# requirement.
+DEFAULT_RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
 # --- Vector search (Phase 5-6) ---
 # One collection per modality (Phase 6) — image and text embeddings come
 # from different models with different dimensions, and have no reason to

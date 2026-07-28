@@ -247,3 +247,22 @@ class EvaluationException(AppException):
     status_code = 500
     code = "evaluation_error"
     message = "Failed to run the evaluation."
+
+
+class RerankException(AppException):
+    """Cross-encoder reranking (model loading, inference, or the rerank pipeline itself)
+    failed unexpectedly.
+
+    An infrastructure failure in deterministic, server-side processing —
+    not a client input problem — the same reasoning as
+    `RecommendationException`/`DuplicateDetectionException`. Hence a 500.
+    Callers that compose reranking as an *optional* refinement step
+    (`HybridSearchService`, `RecommendationEngineService`,
+    `DuplicateDetectionService`) let this propagate rather than silently
+    falling back to unreranked results — a reranking failure should be
+    visible, not hidden behind a quietly degraded response.
+    """
+
+    status_code = 500
+    code = "rerank_error"
+    message = "Failed to rerank candidates."

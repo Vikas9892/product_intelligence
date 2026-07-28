@@ -8,6 +8,7 @@ from app.core.constants import DuplicateDetectionMode, Environment, LogLevel
 from app.core.settings import (
     AIModelSettings,
     ApplicationSettings,
+    AsyncPipelineSettings,
     CatalogIntelligenceSettings,
     DuplicateDetectionSettings,
     EvaluationSettings,
@@ -240,6 +241,32 @@ class TestRerankerSettings:
     def test_rejects_a_non_positive_batch_size(self) -> None:
         with pytest.raises(ValidationError):
             RerankerSettings(batch_size=0)
+
+
+class TestAsyncPipelineSettings:
+    def test_defaults(self) -> None:
+        settings = AsyncPipelineSettings()
+
+        assert settings.enabled is True
+        assert settings.queue_backend == "redis"
+        assert settings.redis_url == "redis://localhost:6379/0"
+        assert settings.queue_name == "product_processing"
+        assert settings.max_retries == 5
+        assert settings.retry_delay_seconds == 5.0
+        assert settings.worker_concurrency == 4
+        assert settings.job_timeout_seconds == 300.0
+
+    def test_rejects_a_negative_max_retries(self) -> None:
+        with pytest.raises(ValidationError):
+            AsyncPipelineSettings(max_retries=-1)
+
+    def test_rejects_a_non_positive_retry_delay(self) -> None:
+        with pytest.raises(ValidationError):
+            AsyncPipelineSettings(retry_delay_seconds=0)
+
+    def test_rejects_a_non_positive_worker_concurrency(self) -> None:
+        with pytest.raises(ValidationError):
+            AsyncPipelineSettings(worker_concurrency=0)
 
 
 class TestSecuritySettings:

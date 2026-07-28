@@ -293,6 +293,37 @@ class RerankerSettings(BaseModel):
     device: str = "auto"
 
 
+class AsyncPipelineSettings(BaseModel):
+    """Background job/queue/worker pipeline configuration (Phase 12).
+
+    `enabled` defaults to `True` — unlike `RerankerSettings.enabled`
+    (Phase 11, which stays off by default because it bolts an optional,
+    heavy refinement onto already-working synchronous endpoints), this
+    flag *is* the phase's own deliverable: turning it off intentionally
+    falls back to the old, fully-synchronous `POST /products/upload`
+    behavior (still supported, for simple local dev without Redis
+    running), but the async pipeline is what production is meant to run.
+    `queue_backend` is currently only ever `"redis"` — kept as a string
+    rather than an enum with one member so a second backend can be added
+    later without a schema-breaking rename, the same reasoning
+    `AIModelSettings.openai_api_key` reserves shape ahead of need.
+    `max_retries`/`retry_delay_seconds` are `RedisQueue`'s exponential-
+    backoff policy (`ProductWorker`); `worker_concurrency` is how many
+    `ProductWorker` loops `WorkerManager` runs concurrently;
+    `job_timeout_seconds` is reserved for a future stuck-job watchdog —
+    not enforced yet (see `WorkerManager`'s own docstring).
+    """
+
+    enabled: bool = True
+    queue_backend: str = "redis"
+    redis_url: str = "redis://localhost:6379/0"
+    queue_name: str = "product_processing"
+    max_retries: int = Field(default=5, ge=0)
+    retry_delay_seconds: float = Field(default=5.0, gt=0)
+    worker_concurrency: int = Field(default=4, gt=0)
+    job_timeout_seconds: float = Field(default=300.0, gt=0)
+
+
 class StorageSettings(BaseModel):
     """Local/object storage for uploaded product assets."""
 
@@ -362,6 +393,7 @@ class Settings(BaseSettings):
     recommendation: RecommendationSettings = Field(default_factory=RecommendationSettings)
     evaluation: EvaluationSettings = Field(default_factory=EvaluationSettings)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
+    async_pipeline: AsyncPipelineSettings = Field(default_factory=AsyncPipelineSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

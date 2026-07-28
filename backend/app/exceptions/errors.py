@@ -266,3 +266,21 @@ class RerankException(AppException):
     status_code = 500
     code = "rerank_error"
     message = "Failed to rerank candidates."
+
+
+class JobException(AppException):
+    """Job creation, queueing, or background processing failed unexpectedly.
+
+    Covers `QueueManager`/`RedisQueue` failures (the queue backend itself
+    is unreachable or returned something unexpected) and `ProductWorker`
+    failures that exhausted all retries (moved to the dead-letter queue).
+    A 500 either way — the same "infrastructure failure in deterministic,
+    server-side processing" reasoning every other phase's own top-level
+    exception already establishes. Distinct from `ResourceNotFoundException`
+    (404), raised when a caller asks about a `job_id`/`product_id` that
+    was never queued at all.
+    """
+
+    status_code = 500
+    code = "job_error"
+    message = "Failed to process the background job."

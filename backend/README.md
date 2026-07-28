@@ -2423,6 +2423,194 @@ the target's own stored vector metadata (the same `retrieve_text`/
 reuses the exact same `SimilarityScorer`/`_build_decision` path
 `detect()` already uses.
 
+## Phase 11 — Cross-Encoder Reranking design decisions
+
+This phase adds an optional refinement stage that reorders an
+already-retrieved candidate pool using a cross-encoder — a model that
+scores a query and one candidate *together* rather than comparing two
+independently-computed embeddings — before hybrid search, duplicate
+detection, or recommendations return their final answer.
+
+### Architecture
+
+```
+      HybridSearchService.search_by_(image|text|vector)
+                     │
+          Top N candidates (already ranked by
+           embedding cosine similarity)
+                     │
+                     ▼  (only when reranking is enabled)
+            overfetch to RERANKER__TOP_N
+                     │
+                     ▼
+             RerankerService.rerank(query, candidates)
+                     │
+        ┌────────────┴────────────┐
+        ▼                         ▼
+  build one (query,        CrossEncoderService.score_pairs
+   document) pair per       (ModelManagerCrossEncoder: lazy-
+   candidate (from its       loaded, thread-safe, batched)
+   own stored metadata)
+        └────────────┬────────────┘
+                      ▼
+         sigmoid-normalize each raw score into [0, 1]
+                      ▼
+              sort, descending; truncate to top_k
+                      ▼
+              RerankResult (RerankedCandidate + RerankReason
+                        per survivor)
+                      │
+        ┌─────────────┼─────────────┐
+        ▼             ▼             ▼
+ HybridSearchService  Recommendation   DuplicateDetection
+ .search: replaces    EngineService:   Service: replaces
+ .score               replaces .score  .text_score
+```
+
+`RerankerService` is deliberately thin, mirroring every other
+orchestrator in this codebase (`RecommendationEngineService`,
+`DuplicateDetectionService`): it does no retrieval of its own —
+`candidates` must already come from `HybridSearchService` — and
+`CrossEncoderService` owns the actual model inference, so
+`RerankerService`'s only job is pooling, pairing, sorting, and
+truncating.
+
+### Cross-Encoder vs. Embedding Similarity
+
+Every existing retrieval signal in this codebase (`HybridSearchResult.
+score`, `image_score`, `text_score`) comes from comparing two
+*independently* computed embeddings with cosine similarity — fast (a
+candidate's vector is computed once, at upload time, and reused for
+every future query) but limited: the model never sees the query and the
+candidate together, so it can't reason about how they specifically
+relate. A cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`, a
+small, CPU-friendly MS-MARCO-tuned checkpoint) feeds the query and one
+candidate's text into the model jointly, letting it attend across both —
+slower per pair (nothing can be precomputed and reused across queries)
+but typically a materially more accurate relevance judgment. That
+asymmetry is exactly why reranking is applied to a small, already-
+retrieved top-N pool rather than the whole catalog: embedding search is
+still what finds the candidates in the first place.
+
+### Why Sigmoid-Normalize the Rerank Score?
+
+A cross-encoder outputs an unbounded relevance logit — a confident match
+can score well above `1.0`, an irrelevant pair well below `0.0` (verified
+directly against the real model: a clearly relevant pair scored `~9.0`
+in manual testing). Left as raw logits, every integration that
+substitutes a rerank score into an existing `[0, 1]`-scored field would
+either lose precision to clamping (many confidently-relevant candidates
+collapsing to the same `1.0`) or need its own ad-hoc normalization.
+`RerankerService._normalize` applies a sigmoid once, so
+`RerankedCandidate.rerank_score` stays directly comparable to every
+other score already in this codebase (`HybridSearchResult.score`,
+`RecommendationCandidate.similarity_score`, `DuplicateResult.
+overall_similarity`, ...) without each caller reinventing the transform.
+`CrossEncoderService.score_pairs` itself still returns the *raw* score —
+normalization is `RerankerService`'s concern, not the scoring service's.
+
+### Integration: Which Field Gets Replaced, and Why
+
+Reranking never replaces an existing scorer's math (`SimilarityScorer`/
+`RecommendationScorer` are untouched) — it replaces one of that scorer's
+*inputs*, chosen per integration based on what each scorer actually
+reads:
+
+- **`HybridSearchService.search`** — reranking *is* the final answer
+  here (no downstream scorer), so the reranked candidates' `.score` is
+  overwritten with the rerank score directly, and the list is truncated
+  to `top_k`. Only applies when a text query is present (text-only or
+  hybrid mode) — the cross-encoder scores *text* pairs, so an image-only
+  search has nothing to build a query-document pair from and is
+  returned unreranked, a documented limitation rather than a bug.
+- **`RecommendationEngineService.recommend`** — `RecommendationScorer`
+  reuses `candidate.score` as-is for its "similarity" signal, so
+  substituting the rerank score there directly improves that signal
+  before the existing weighted formula runs.
+- **`DuplicateDetectionService.detect`/`detect_by_product_id`** —
+  `SimilarityScorer` never reads `candidate.score` at all; it reads
+  `candidate.image_score`/`text_score` independently. A cross-encoder's
+  joint-attention relevance judgment is a strictly more accurate
+  refinement of "how textually similar is this candidate" than the
+  embedding cosine similarity `text_score` started as, so reranking
+  substitutes into `text_score` instead, flowing into the existing
+  `text_weight`-weighted formula with no scorer changes at all. Calling
+  `HybridSearchService.search` with `reranking_enabled=False` explicitly
+  avoids scoring the same candidates through the cross-encoder twice.
+
+### Latency/Quality Trade-off
+
+Reranking is applied to an overfetched pool capped at `RERANKER__TOP_N`
+(50 by default) candidates, never the full retrieved set — a cross-
+encoder forward pass is far more expensive per candidate than the
+embedding cosine similarity that found them, so only the top of an
+already-ranked list is ever re-scored, batched (`RERANKER__BATCH_SIZE`)
+and pushed off the event loop the same way every embedding service in
+this codebase already does. Each of the three integrations overfetches
+*retrieval* itself up to `RERANKER__TOP_N` (rather than pre-truncating
+to the caller's requested `top_k` before reranking runs) so reranking
+has a real pool to reorder — the same overfetch reasoning
+`RecommendationEngineService`'s own diversity filter (Phase 9) already
+established.
+
+### Why Reranking Defaults to Disabled
+
+`RerankerSettings.enabled` defaults to `False` — the only feature flag
+in this codebase that does. Every other configurable toggle
+(`RECOMMENDATION__ENABLED`, `CATALOG_INTELLIGENCE__ENABLED`, `EVALUATION__ENABLED`,
+...) gates deterministic, already-cheap computation; this one gates a
+*real transformer model load and inference call* on every applicable
+request. Defaulting it on would silently add that cost — and a
+first-request model download requiring internet access — to a project
+whose own `DatabaseSettings` docstring promises "runs with zero config
+locally." An operator turns it on explicitly (`RERANKER__ENABLED=true`)
+once the model is reachable and the added latency is acceptable.
+
+### Configuration
+
+New settings, all under `RerankerSettings` (`app/core/settings.py`), env
+prefix `RERANKER__`:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `RERANKER__ENABLED` | `false` | Master switch — see "Why Reranking Defaults to Disabled" |
+| `RERANKER__MODEL_NAME` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Hugging Face Hub cross-encoder checkpoint |
+| `RERANKER__TOP_N` | `50` | How many top candidates get reranked per request |
+| `RERANKER__BATCH_SIZE` | `16` | Query-document pairs per cross-encoder forward pass |
+| `RERANKER__DEVICE` | `auto` | Same `"auto"`/`"cpu"`/`"cuda[:N]"` convention as `AIModelSettings`' own device fields |
+
+Every one of `HybridSearchService.search`/`RecommendationEngineService.
+recommend`/`DuplicateDetectionService.detect`/`detect_by_product_id`
+also accepts a per-call `reranking_enabled` override, the same
+"constructor default, per-call override" convention `top_k`/`threshold`
+already use throughout this codebase — `RetrievalEvaluator.
+compare_reranking` (below) is what actually exercises that override.
+
+### Evaluation Integration
+
+`RetrievalEvaluator.evaluate` gained a `reranking_enabled` parameter,
+threaded through to whichever system a query dispatches to.
+`RetrievalEvaluator.compare_reranking` runs the *same* dataset through
+`evaluate` twice — once forced off, once forced on — and diffs the two
+`BenchmarkReport`s into a `RerankComparisonReport` (`{task_type:
+{metric_name: after - before}}`), producing exactly the phase spec's own
+worked example (MRR: before `0.81`, after `0.90`) without an operator
+hand-computing it from two separate runs. Two ways to run it, mirroring
+Phase 10's own "script + API" pattern: `scripts/benchmark.py
+--compare-reranking` writes `rerank_comparison.json`/`rerank_comparison.md`;
+`POST /evaluation/compare-reranking` returns the same comparison over
+the API, reusing `/evaluation/run`'s own `query_ids`/`limit` subset
+filtering and response shaping.
+
+### Explicitly out of scope this phase
+
+No LLM reranking, no fine-tuning, no online/reinforcement learning, no
+distributed inference, no GPU-specific optimizations, no background
+workers, no Redis caching — matching the phase spec's own "Do NOT
+Implement" list. Reranking is a deterministic function of the
+pretrained cross-encoder checkpoint and whatever candidates retrieval
+already found.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -3527,5 +3715,99 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden evaluation test coverage and document Phase 10 (Phase 10 milestone 6/6)"
+git push
+```
+
+## Phase 11 — Cross-Encoder Reranking (built from scratch)
+
+```bash
+# Milestone 1-2/6 — cross-encoder infrastructure + rerank domain models
+#   (domain models pulled forward: BaseReranker's abstract interface
+#   needs RerankResult to exist first)
+#   app/core/constants.py — added DEFAULT_RERANKER_MODEL_NAME
+#   app/core/settings.py — added RerankerSettings (enabled defaults False —
+#   the only feature flag in this codebase that does, since it gates a
+#   real model load/inference call, not deterministic computation)
+#   backend/.env.example — documented the five new RERANKER__ variables
+#   app/exceptions/errors.py — added RerankException
+#   app/utils/text.py — added build_text_representation_from_metadata
+#   app/models/rerank_reason.py, reranked_candidate.py, rerank_result.py
+#   app/services/base_reranker.py — BaseReranker abstract interface
+#   app/services/model_manager_cross_encoder.py — ModelManagerCrossEncoder,
+#   mirrors TextModelManager's lazy-loading/thread-safety exactly
+#   app/services/cross_encoder_service.py — CrossEncoderService.score_pairs,
+#   batched, never exposes raw model outputs
+#   tests/core/test_settings.py, tests/utils/test_text.py — extended
+#   tests/models/test_rerank_{reason,candidate,result}.py,
+#   tests/services/test_{model_manager_cross_encoder,cross_encoder_service}.py
+#   — hand-written, including real-tiny-model integration tests
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add cross-encoder infrastructure and rerank domain models (Phase 11 milestone 1-2/6)"
+
+# Milestone 3/6 — RerankerService
+#   app/services/reranker_service.py — hand-written: overfetch pool ->
+#   build query/document pairs -> CrossEncoderService.score_pairs ->
+#   sigmoid-normalize -> sort -> truncate top_k -> RerankResult
+#   tests/services/test_reranker_service.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add RerankerService (Phase 11 milestone 3/6)"
+
+# Milestone 4/6 — integration into search, recommendations, duplicate detection
+#   app/services/vectorstore/hybrid_search_service.py — reranks text/hybrid
+#   queries, replaces .score (image-only search left unreranked)
+#   app/services/recommendation/recommendation_engine_service.py — reranks
+#   against the target's own text representation, replaces .score
+#   app/services/duplicate/duplicate_detection_service.py — reranks against
+#   the checked product's text, replaces .text_score instead (SimilarityScorer
+#   never reads .score); calls HybridSearchService.search with
+#   reranking_enabled=False to avoid double-scoring the same candidates
+#   tests/services/vectorstore/test_hybrid_search_service.py,
+#   tests/services/recommendation/test_recommendation_engine_service.py,
+#   tests/services/duplicate/test_duplicate_detection_service.py — extended
+#   tests/services/evaluation/test_retrieval_evaluator.py,
+#   tests/services/test_product_service.py,
+#   tests/services/duplicate/test_duplicate_check_service.py — fake
+#   HybridSearchService/DuplicateDetectionService overrides updated for
+#   the new reranking_enabled parameter
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: integrate reranking into search, recommendations, and duplicate detection (Phase 11 milestone 4/6)"
+
+# Milestone 5/6 — evaluation integration (before/after comparison)
+#   app/models/rerank_comparison_report.py — RerankComparisonReport
+#   app/services/evaluation/retrieval_evaluator.py — evaluate() gained a
+#   reranking_enabled override threaded to every dispatch target;
+#   compare_reranking runs the dataset with it forced off then on and
+#   diffs the resulting metrics per task type
+#   scripts/benchmark.py — --compare-reranking flag writes
+#   rerank_comparison.json/rerank_comparison.md
+#   app/schemas/evaluation.py — RerankComparisonResponse
+#   app/api/evaluation.py — POST /evaluation/compare-reranking, sharing
+#   query_ids/limit subset filtering with /evaluation/run via _resolve_queries
+#   tests/models/test_rerank_comparison_report.py,
+#   tests/services/evaluation/test_retrieval_evaluator.py,
+#   tests/scripts/test_benchmark.py, tests/api/test_evaluation.py,
+#   tests/test_application.py — hand-written / extended
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add reranking comparison to the evaluation framework (Phase 11 milestone 5/6)"
+
+# Milestone 6/6 — test hardening + documentation
+#   Coverage audit against the phase's own test-coverage checklist
+#   (reranking correctness, empty candidates, malformed metadata, batching,
+#   concurrency, disabled reranking, evaluation comparison) — already
+#   satisfied by Milestones 1-5's own tests; any remaining gaps closed here
+#   backend/README.md — this section
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden reranking test coverage and document Phase 11 (Phase 11 milestone 6/6)"
 git push
 ```

@@ -2611,6 +2611,271 @@ Implement" list. Reranking is a deterministic function of the
 pretrained cross-encoder checkpoint and whatever candidates retrieval
 already found.
 
+## Phase 12 — Asynchronous AI Processing Pipeline design decisions
+
+This phase turns product upload from a single long-running synchronous
+request into a queue-and-worker pipeline: the API acknowledges a request
+in milliseconds, and a separate worker process runs the actual AI
+pipeline (image processing, embeddings, catalog intelligence, duplicate
+detection, vector indexing, recommendation cache warm-up) afterward —
+"exactly how production ML systems work," per the phase's own framing.
+
+### Architecture
+
+```
+        POST /products/upload
+                │
+      UploadService.save_upload
+     (validate + store the file —
+      still synchronous: a client
+      needs this to fail fast, and
+      the worker needs a file
+      already on disk to process)
+                │
+                ▼
+   pre-assign product_id + job_id
+                │
+                ▼
+        QueueManager.enqueue
+        (RedisQueue: pending list)
+                │
+                ▼
+        202 Accepted (product_id,
+         job_id, status_url)
+                │
+   ═══════════════════════════════  <- request/response ends here
+                │
+                ▼           (separate OS process: scripts/run_workers.py)
+         WorkerManager
+     (worker_concurrency many
+      ProductWorker loops +
+      1 crash-recovery loop)
+                │
+                ▼
+      ProductWorker.process_one
+                │
+                ▼
+   ProductService.process_upload   <- unchanged from Phase 2B (one
+   (image processing, embeddings,     opaque call — see "Progress
+    catalog intelligence, duplicate    Reporting" below)
+    detection, vector indexing)
+                │
+                ▼
+   RecommendationEngineService.recommend
+   -> RecommendationCacheRepository.set
+                │
+                ▼
+      Job marked COMPLETED
+   (or: exception -> QueueManager.retry
+    -> RETRYING with backoff, or FAILED
+    -> dead-letter queue, after max_retries)
+```
+
+`GET /jobs/{job_id}` / `GET /products/{id}/status` (looked up by job ID
+or product ID respectively) poll a job's `status`/`progress`/
+`current_stage` at any point in this pipeline; `GET /jobs/dead-letter`
+lists everything that permanently failed.
+
+### Why Redis Only, No Database
+
+The phase's own "Existing Architecture" list mentions PostgreSQL, but
+this codebase has never had one — every phase through 11 explicitly
+deferred persistence ("this pipeline processes but does not persist").
+Building a real ORM/migrations layer just for job/product-status
+tracking would be a substantial new subsystem, and none of this phase's
+six milestones actually ask for one — they ask for `app/jobs/`,
+`app/queue/`, `app/workers/`, all explicitly Redis-backed ("a
+lightweight Redis-backed implementation is sufficient" — the phase
+spec's own words, stated about the queue but equally true of job-status
+storage, which is exactly the same kind of simple keyed record). `Job`
+(the queued unit of work, persisted as JSON at `job:{job_id}` in Redis)
+*is* the product's processing status — there's no separate database
+row to keep in sync with it. `DatabaseSettings` stays exactly as
+reserved/unused as it already was.
+
+### Job Lifecycle
+
+```
+PENDING --(dequeue)--> RUNNING --(success)--> COMPLETED
+                           │
+                      (failure)
+                           │
+                           v
+                      RETRYING --(backoff elapses, re-dequeued)--> RUNNING
+                           │
+                (retry_count > max_retries)
+                           │
+                           v
+                        FAILED  (moved to the dead-letter queue)
+```
+
+`Job` (`app/jobs/base_job.py`) carries `job_id`/`product_id`/
+`created_at`/`updated_at`/`retry_count` (Milestone 1's own required
+fields) plus `progress`/`current_stage` (status-endpoint payload) and
+`retry_history` (a `JobResult` per attempt — Milestone 5's own
+requirement). `job_type` exists so a second job type could be added
+later without a new record shape (`payload` is a generic `dict`) — only
+`PRODUCT_PROCESSING` is implemented this phase.
+
+### Queue Internals
+
+`RedisQueue` (`app/queue/redis_queue.py`) keys everything by
+`ASYNC_PIPELINE__QUEUE_NAME` (`"product_processing"` by default —
+"configurable queues," the phase spec's own requirement, since a
+different queue name is a fully independent queue):
+
+| Redis key | Type | Purpose |
+|---|---|---|
+| `{queue_name}:pending` | LIST | Job IDs waiting to be dequeued (FIFO: `RPUSH`/`LPOP`) |
+| `{queue_name}:processing` | HASH | Job ID -> dequeue timestamp; in-flight jobs, for crash recovery |
+| `{queue_name}:delayed` | ZSET | Job ID -> ready-at timestamp; jobs waiting out a retry's backoff delay |
+| `{queue_name}:dead_letter` | LIST | Job IDs that exhausted `max_retries` |
+| `job:{job_id}` | STRING (JSON) | The actual `Job` record |
+| `product:{product_id}:job_id` | STRING | Secondary index for `get_by_product_id` |
+
+`dequeue()` promotes any due `delayed` entries back onto `pending`
+*before* popping — no separate scheduler process is needed (Celery/RQ-
+style delayed-task workers are explicitly out of scope this phase); a
+plain sorted set plus a check on every dequeue is enough for a
+lightweight implementation. `QueueManager` (`app/queue/queue_manager.py`)
+is the thin, lazily-constructed singleton facade every caller
+(`ProductWorker`, `app/api/products.py`, `app/api/jobs.py`) actually
+depends on — never `RedisQueue` directly — so a second queue backend
+(`ASYNC_PIPELINE__QUEUE_BACKEND` reserves the name) would only require a
+new `BaseQueue` implementation.
+
+### Retry Policy
+
+`retry()` computes `delay = RETRY_DELAY_SECONDS * 2^(retry_count - 1)`
+— attempt 1's failure waits one base delay, attempt 2's waits two,
+attempt 3's waits four, and so on — and schedules the job into the
+`delayed` sorted set at `now + delay`. If incrementing `retry_count`
+would exceed `max_retries` (configured per-job from
+`ASYNC_PIPELINE__MAX_RETRIES`, so an operator can change the default
+without affecting jobs already queued under the old value), the job is
+moved to the dead-letter queue instead (`status=FAILED`) — callers
+(`ProductWorker`) only ever call `retry()`, never decide the dead-letter
+branch themselves. Every retry and every dead-letter transition is
+logged (`logger.warning`, with `job_id`/`product_id`/`attempt`/`delay`/
+`error` — never the job's own `payload`, so a submitted product's
+name/description/image metadata never lands in logs).
+
+### Dead-Letter Queue
+
+A job that exhausts its retries is never discarded — "never lose a
+job," the phase's own requirement — it moves to
+`{queue_name}:dead_letter` and stays there, `status=FAILED`, with its
+last `error` and full `retry_history` intact. `GET /jobs/dead-letter`
+(Milestone 5) lists every such job's current record, so an operator can
+see *what* failed and *why* instead of it silently vanishing from view.
+There's no automatic "revive from dead-letter" action this phase — only
+inspection; re-driving a permanently-failed job is an operational
+decision, not something this phase's spec asks the system to do on its
+own.
+
+### Idempotency
+
+`product_id` is generated *before* a job is enqueued (`app/api/
+products.py`'s `_queue_for_processing`) and never changes across
+retries — `ProductService.process_upload` gained an optional
+`product_id` parameter (backward compatible; omitted, it still generates
+a fresh UUID4 exactly as before Phase 12) specifically so `ProductWorker`
+can pass the job's own ID through on every attempt. Every write this
+pipeline makes — the Qdrant image/text upserts — is keyed by that same
+ID, and an upsert with the same ID is naturally idempotent: reprocessing
+a retried job converges to the same final indexed state rather than
+creating a duplicate point per attempt.
+
+### Progress Reporting: Why Coarse, Not Per-Stage
+
+`ProductWorker` reports `progress`/`current_stage` at a handful of
+checkpoints (validating, processing, generating recommendations,
+completed) around one opaque call to `ProductService.process_upload`,
+not at every internal stage (image processing, embeddings, catalog
+intelligence, duplicate detection, vector indexing individually). This
+phase's own requirement is to extend the architecture "without modifying
+existing business services" — `ProductService` already owns that exact
+sequence, and reaching into its private sub-services from outside would
+break the same encapsulation every other orchestrator's own docstring in
+this codebase already establishes (`HybridSearchService`,
+`RecommendationEngineService`, ...). The trade-off is honest: a client
+polling status sees progress jump from ~40% to ~80%, not a live
+per-stage percentage — a deliberate consequence of preserving that
+boundary, not an oversight.
+
+### Recommendation Cache
+
+After `process_upload` succeeds, `ProductWorker` also calls
+`RecommendationEngineService.recommend` once and stores the result in
+`RecommendationCacheRepository` (Redis, TTL'd via
+`RECOMMENDATION__CACHE_TTL_SECONDS`) — the diagram's own "Recommendation
+Cache" pipeline stage. `GET /products/{id}/recommendations` checks this
+cache first, but only for a plain default request
+(`recommendation_type=SIMILAR`, no `top_k` override — the only shape
+`ProductWorker` ever warms); a customized request always computes live,
+so a cache hit can never return something that doesn't match what was
+actually asked for. A cache miss (nothing warmed yet, or the entry
+expired) falls back to live computation exactly as before this phase —
+the cache is a warm-up optimization, not a strict consistency
+guarantee.
+
+### Monitoring
+
+`GET /jobs/{job_id}` / `GET /products/{id}/status` / `GET
+/jobs/dead-letter` are this phase's own monitoring surface — no metrics
+exporter or dashboard is part of this phase's scope, but every stage
+that matters is logged: job creation (`enqueue`), worker start/stop
+(`WorkerManager`'s own start/stop-loop logs), every retry and dead-letter
+transition (`RedisQueue.retry`), completion and failure
+(`ProductWorker._complete`/`_fail`), and the crash-recovery loop's own
+periodic check (`WorkerManager._run_recovery_loop`). None of these ever
+log a job's `payload` or a raw embedding vector.
+
+### Worker Lifecycle
+
+`WorkerManager` (`app/workers/worker_manager.py`) runs entirely outside
+the API process — `app/lifespan.py` stays untouched, matching the
+architecture diagram's own separate "Worker Process" boxes, so the API
+stays responsive regardless of worker load. `scripts/run_workers.py` is
+the standalone entrypoint that actually runs it (`uv run python
+scripts/run_workers.py`), spawning `WORKER_CONCURRENCY` many
+`ProductWorker` loops plus one crash-recovery loop
+(`QueueManager.requeue_stale_jobs`, checked every `JOB_TIMEOUT_SECONDS`
+— a job still `processing` after that long almost certainly belongs to
+a worker that crashed mid-job). Graceful shutdown
+(SIGINT/SIGTERM): every loop only checks its stop flag *between* jobs,
+never mid-job, so an in-flight job always finishes (or fails through to
+a scheduled retry) before the process actually exits.
+
+### Configuration
+
+New settings, all under `AsyncPipelineSettings` (`app/core/settings.py`),
+env prefix `ASYNC_PIPELINE__`:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `ASYNC_PIPELINE__ENABLED` | `true` | Master switch — `false` falls back to the pre-Phase-12 fully-synchronous upload |
+| `ASYNC_PIPELINE__QUEUE_BACKEND` | `redis` | Reserved for a future second backend; only `"redis"` exists today |
+| `ASYNC_PIPELINE__REDIS_URL` | `redis://localhost:6379/0` | Where `RedisQueue`/`RecommendationCacheRepository` connect |
+| `ASYNC_PIPELINE__QUEUE_NAME` | `product_processing` | Redis key prefix for the pending/processing/delayed/dead-letter structures |
+| `ASYNC_PIPELINE__MAX_RETRIES` | `5` | Attempts before a job is dead-lettered |
+| `ASYNC_PIPELINE__RETRY_DELAY_SECONDS` | `5` | Base exponential-backoff delay |
+| `ASYNC_PIPELINE__WORKER_CONCURRENCY` | `4` | How many `ProductWorker` loops `WorkerManager` runs |
+| `ASYNC_PIPELINE__JOB_TIMEOUT_SECONDS` | `300` | Crash-recovery threshold/check interval |
+
+Unlike `RerankerSettings.enabled` (Phase 11, defaults `false` because it
+bolts an optional refinement onto already-working endpoints),
+`ASYNC_PIPELINE__ENABLED` defaults `true` — this phase's async pipeline
+*is* the deliverable, not an optional add-on.
+
+### Explicitly out of scope this phase
+
+No Kubernetes, Kafka, RabbitMQ, Celery, Ray, Airflow, distributed
+workers, auto-scaling, or GPU scheduling — matching the phase spec's own
+"Do NOT Implement" list, and its own "a lightweight Redis-backed
+implementation is sufficient." Every queue/worker primitive here is
+plain `asyncio` and Redis data structures, nothing more.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -3809,5 +4074,101 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden reranking test coverage and document Phase 11 (Phase 11 milestone 6/6)"
+git push
+```
+
+## Phase 12 — Asynchronous AI Processing Pipeline (built from scratch)
+
+```bash
+# Milestone 1-2/6 — job infrastructure + Redis-backed queue
+#   (committed together: RedisQueue depends on the AsyncPipelineSettings
+#   this commit also adds)
+#   app/jobs/job_status.py, job_types.py, job_result.py, base_job.py —
+#   Job/JobStatus/JobType/JobResult
+#   app/exceptions/errors.py — added JobException
+#   app/core/settings.py — added AsyncPipelineSettings (enabled defaults
+#   true — this phase's async pipeline is the deliverable itself)
+#   backend/.env.example — documented the eight new ASYNC_PIPELINE__ variables
+#   app/queue/base_queue.py — BaseQueue abstract interface
+#   app/queue/redis_queue.py — RedisQueue: pending/processing/delayed/
+#   dead-letter Redis structures, exponential backoff, crash recovery
+#   app/queue/queue_manager.py, app/dependencies/queue.py — QueueManager
+#   lazy singleton facade
+#   pyproject.toml — added redis (runtime) and fakeredis (dev/test,
+#   in-memory protocol-compatible fake) dependencies
+#   tests/jobs/, tests/queue/, tests/dependencies/test_queue.py,
+#   tests/core/test_settings.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add job and Redis-backed queue infrastructure (Phase 12 milestone 1-2/6)"
+
+# Milestone 3/6 — worker pipeline
+#   app/services/product_service.py — process_upload gained an optional
+#   product_id parameter (backward compatible) so a worker can pre-assign
+#   one and reuse it across every retry attempt (idempotency)
+#   app/workers/product_worker.py — ProductWorker: dequeue, call
+#   process_upload as one opaque call, warm the recommendation cache,
+#   report completion or route failures through QueueManager.retry
+#   app/workers/worker_manager.py — runs worker_concurrency many
+#   ProductWorker loops plus one crash-recovery loop; graceful shutdown
+#   app/repositories/recommendation_cache_repository.py —
+#   RecommendationCacheRepository (Redis, TTL'd)
+#   BaseQueue/RedisQueue/QueueManager gained update() (in-place progress
+#   persistence, distinct from ack()/retry() which move a job between lists)
+#   tests/workers/, tests/repositories/, tests/services/test_product_service.py
+#   — hand-written / extended
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add worker pipeline for background product processing (Phase 12 milestone 3/6)"
+
+# Milestone 4/6 — upload integration + status endpoints
+#   app/schemas/product.py — added UploadAcceptedResponse
+#   app/schemas/job.py — JobStatusResponse (shared by both status routes)
+#   app/api/jobs.py — GET /jobs/{job_id}
+#   app/api/products.py — POST /products/upload branches on
+#   ASYNC_PIPELINE__ENABLED; added GET /products/{id}/status; GET
+#   /products/{id}/recommendations now checks RecommendationCacheRepository
+#   first for a plain default request
+#   app/dependencies/recommendation.py — added get_recommendation_cache_repository
+#   scripts/run_workers.py — standalone WorkerManager entrypoint,
+#   graceful shutdown on SIGINT/SIGTERM
+#   tests/api/test_products.py, test_check_duplicate.py, test_search.py,
+#   test_recommendations.py — each fixture now forces
+#   ASYNC_PIPELINE__ENABLED=false (they seed/exercise the full synchronous
+#   pipeline through real HTTP requests)
+#   tests/api/test_upload_async.py, tests/schemas/test_job.py,
+#   tests/scripts/test_run_workers.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: integrate async upload pipeline with job/product status endpoints (Phase 12 milestone 4/6)"
+
+# Milestone 5/6 — dead-letter queue inspection
+#   app/queue/base_queue.py, redis_queue.py, queue_manager.py —
+#   get_dead_letter_job_ids promoted to the formal BaseQueue interface
+#   app/api/jobs.py — GET /jobs/dead-letter (registered before
+#   /jobs/{job_id} so "dead-letter" is never parsed as a job ID)
+#   tests/api/test_upload_async.py, tests/queue/test_queue_manager.py —
+#   extended
+#   (exponential backoff, configurable retry count, retry history, and
+#   logging every retry were already built in Milestones 2-3)
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add dead-letter queue inspection endpoint (Phase 12 milestone 5/6)"
+
+# Milestone 6/6 — test hardening + documentation
+#   Coverage audit against the phase's own test-coverage checklist
+#   (enqueue, dequeue, retries, failures, duplicate jobs, worker crash
+#   recovery, concurrent workers, idempotency, graceful shutdown) — all
+#   already satisfied by Milestones 1-5's own tests
+#   backend/README.md — this section
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden async pipeline test coverage and document Phase 12 (Phase 12 milestone 6/6)"
 git push
 ```

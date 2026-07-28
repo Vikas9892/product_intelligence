@@ -182,6 +182,25 @@ class TestRetry:
         assert await queue.dequeue() is None
 
 
+class TestUpdate:
+    async def test_persists_progress_without_moving_the_job_between_lists(self) -> None:
+        queue = _queue()
+        await queue.enqueue(_job())
+        job = await queue.dequeue()
+        assert job is not None
+
+        job.progress = 60
+        job.current_stage = "Generating Embeddings"
+        await queue.update(job)
+
+        stored = await queue.get(job.job_id)
+        assert stored is not None
+        assert stored.progress == 60
+        assert stored.current_stage == "Generating Embeddings"
+        # Still only reachable via get() — update() didn't re-enqueue it.
+        assert await queue.dequeue() is None
+
+
 class TestLookups:
     async def test_get_returns_none_for_an_unknown_job(self) -> None:
         queue = _queue()

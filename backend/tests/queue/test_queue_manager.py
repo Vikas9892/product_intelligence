@@ -19,6 +19,7 @@ class _FakeQueue(BaseQueue):
         self.enqueued: list[Job] = []
         self.acked: list[Job] = []
         self.retried: list[tuple[Job, str]] = []
+        self.updated: list[Job] = []
         self._by_id: dict[UUID, Job] = {}
 
     async def enqueue(self, job: Job) -> None:
@@ -39,6 +40,10 @@ class _FakeQueue(BaseQueue):
 
     async def get_by_product_id(self, product_id: UUID) -> Job | None:
         return next((job for job in self._by_id.values() if job.product_id == product_id), None)
+
+    async def update(self, job: Job) -> None:
+        self.updated.append(job)
+        self._by_id[job.job_id] = job
 
 
 class _FakeQueueWithRecovery(_FakeQueue):
@@ -108,6 +113,15 @@ class TestQueueManagerDelegation:
         manager = QueueManager(queue=fake_queue)
 
         assert await manager.get_by_product_id(job.product_id) is job
+
+    async def test_update_delegates_to_the_underlying_queue(self) -> None:
+        fake_queue = _FakeQueue()
+        manager = QueueManager(queue=fake_queue)
+        job = _job()
+
+        await manager.update(job)
+
+        assert fake_queue.updated == [job]
 
 
 class TestRequeueStaleJobs:

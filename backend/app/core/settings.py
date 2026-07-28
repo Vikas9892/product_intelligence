@@ -224,7 +224,10 @@ class RecommendationSettings(BaseModel):
     filter. The four `*_weight` fields are `RecommendationScorer`'s final-
     score formula and are required to sum to `1.0` (validated below),
     matching `DuplicateDetectionSettings`'s own reasoning: they represent
-    a complete split of "how much each signal counts."
+    a complete split of "how much each signal counts." `cache_ttl_seconds`
+    (Phase 12) is how long `RecommendationCacheRepository` keeps a
+    product's worker-precomputed recommendations before a fresh
+    `GET /products/{id}/recommendations` call recomputes them live.
     """
 
     enabled: bool = True
@@ -234,6 +237,7 @@ class RecommendationSettings(BaseModel):
     attribute_weight: float = Field(default=0.20, ge=0)
     tag_weight: float = Field(default=0.15, ge=0)
     quality_weight: float = Field(default=0.10, ge=0)
+    cache_ttl_seconds: float = Field(default=3600.0, gt=0)
 
     @model_validator(mode="after")
     def _validate_weights_sum_to_one(self) -> "RecommendationSettings":

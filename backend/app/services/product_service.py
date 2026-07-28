@@ -19,7 +19,9 @@ below runs), parse internal file metadata
 (`app.utils.metadata.parse_file_metadata`), normalize the submitted
 product fields (the module-level `_normalize_*` functions below),
 re-validate the normalized result (`app.validators.product_validator`),
-generate a UUID4 identifier, build the `Product` domain model, and upsert
+resolve a UUID4 identifier (generated here, or passed in by the caller —
+Phase 12's `ProductWorker` pre-assigns one so a retried job keeps the
+same ID across attempts), build the `Product` domain model, and upsert
 both embeddings — now carrying the enriched attributes/tags as
 additional metadata — into their respective vector store collections
 (`BaseVectorStore`, Phases 5-6) so the product is immediately searchable
@@ -184,18 +186,26 @@ class ProductService:
         self._vector_store = vector_store if vector_store is not None else QdrantVectorStore()
         self._upload_dir = upload_dir if upload_dir is not None else settings.storage.upload_dir
 
-    async def process_upload(self, product: ProductCreate, image: ProductImage) -> Product:
+    async def process_upload(
+        self, product: ProductCreate, image: ProductImage, *, product_id: uuid.UUID | None = None
+    ) -> Product:
         """Process one uploaded product image into a `Product` domain object.
 
         `image` must describe a file `UploadService` has already written
-        under this service's `upload_dir`. Raises `ChecksumException` if
-        that file can't be read; `InvalidImageException`,
-        `UnsupportedMediaTypeException`, or `ImageTooLargeException` if it
-        fails image validation/processing (see `ImageProcessingService`);
-        `ValidationException` if the normalized product fields fail a
-        domain invariant; or `ConflictException` (409) if
-        `DuplicateDetectionMode.BLOCK` is configured and the product is
-        flagged as a likely duplicate.
+        under this service's `upload_dir`. `product_id` lets a caller
+        pre-assign the identifier instead of one being generated here
+        (Phase 12's `ProductWorker` passes the same `product_id` its job
+        was created with, so a retried job re-processes under the exact
+        same ID — Qdrant's upsert then makes the whole pipeline naturally
+        idempotent under retries, rather than creating a second indexed
+        point per attempt); omitted, a new UUID4 is generated exactly as
+        before. Raises `ChecksumException` if that file can't be read;
+        `InvalidImageException`, `UnsupportedMediaTypeException`, or
+        `ImageTooLargeException` if it fails image validation/processing
+        (see `ImageProcessingService`); `ValidationException` if the
+        normalized product fields fail a domain invariant; or
+        `ConflictException` (409) if `DuplicateDetectionMode.BLOCK` is
+        configured and the product is flagged as a likely duplicate.
         """
         logger.info(
             "Upload processing started: product_name=%s, filename=%s",
@@ -300,21 +310,21 @@ class ProductService:
         validate_price(normalized_price)
         logger.info("Normalization complete: product_name=%s", normalized_name)
 
-        product_id = uuid.uuid4()
+        resolved_product_id = product_id if product_id is not None else uuid.uuid4()
         embedding = ImageEmbedding(
-            product_id=product_id,
+            product_id=resolved_product_id,
             model_name=self._embedding_service.model_name,
             embedding_dimension=len(vector),
             vector=vector,
         )
         text_embedding = TextEmbedding(
-            product_id=product_id,
+            product_id=resolved_product_id,
             model_name=self._text_embedding_service.model_name,
             embedding_dimension=len(text_vector),
             vector=text_vector,
         )
         domain_product = Product(
-            id=product_id,
+            id=resolved_product_id,
             name=normalized_name,
             brand=normalized_brand,
             description=normalized_description,
@@ -343,18 +353,26 @@ class ProductService:
             "quality_score": catalog_result.quality_score,
         }
         await self._vector_store.upsert_image(
-            [VectorRecord(product_id=product_id, vector=embedding.vector, metadata=vector_metadata)]
+            [
+                VectorRecord(
+                    product_id=resolved_product_id,
+                    vector=embedding.vector,
+                    metadata=vector_metadata,
+                )
+            ]
         )
         await self._vector_store.upsert_text(
             [
                 VectorRecord(
-                    product_id=product_id, vector=text_embedding.vector, metadata=vector_metadata
+                    product_id=resolved_product_id,
+                    vector=text_embedding.vector,
+                    metadata=vector_metadata,
                 )
             ]
         )
-        logger.info("Product embeddings upserted into vector store: id=%s", product_id)
+        logger.info("Product embeddings upserted into vector store: id=%s", resolved_product_id)
 
-        logger.info("Product processed: id=%s, name=%s", product_id, normalized_name)
+        logger.info("Product processed: id=%s, name=%s", resolved_product_id, normalized_name)
         return domain_product
 
 

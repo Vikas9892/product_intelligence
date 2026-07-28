@@ -369,6 +369,20 @@ class TestProcessUploadSuccess:
 
         assert first.id != second.id
 
+    async def test_uses_a_caller_supplied_product_id_when_given(self, tmp_path: Path) -> None:
+        image = _image()
+        _write_valid_image(tmp_path, image.stored_filename)
+        service = _build_service(tmp_path)
+        preassigned_id = uuid.uuid4()
+
+        product = await service.process_upload(
+            ProductCreate(name="Widget"), image, product_id=preassigned_id
+        )
+
+        assert product.id == preassigned_id
+        assert product.embedding.product_id == preassigned_id
+        assert product.text_embedding.product_id == preassigned_id
+
     async def test_file_metadata_checksum_matches_the_stored_content(self, tmp_path: Path) -> None:
         image = _image()
         content = _write_valid_image(tmp_path, image.stored_filename)

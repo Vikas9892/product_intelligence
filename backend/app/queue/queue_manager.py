@@ -43,6 +43,9 @@ class QueueManager:
     async def get_by_product_id(self, product_id: UUID) -> Job | None:
         return await self._queue.get_by_product_id(product_id)
 
+    async def update(self, job: Job) -> None:
+        await self._queue.update(job)
+
     async def requeue_stale_jobs(self, *, older_than_seconds: float) -> int:
         """Recover jobs a crashed worker left stuck in-flight — see `RedisQueue`'s own docstring.
 

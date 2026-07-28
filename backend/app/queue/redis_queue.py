@@ -161,6 +161,9 @@ class RedisQueue(BaseQueue):
             error,
         )
 
+    async def update(self, job: Job) -> None:
+        await self._save(job)
+
     async def get(self, job_id: UUID) -> Job | None:
         raw = await self._redis.get(f"job:{job_id}")
         return Job.model_validate_json(raw) if raw is not None else None

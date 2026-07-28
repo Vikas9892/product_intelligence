@@ -191,6 +191,7 @@ class TestRecommendationSettings:
         assert settings.attribute_weight == 0.20
         assert settings.tag_weight == 0.15
         assert settings.quality_weight == 0.10
+        assert settings.cache_ttl_seconds == 3600.0
 
     def test_rejects_weights_that_do_not_sum_to_one(self) -> None:
         with pytest.raises(ValidationError, match=r"must sum to 1\.0"):

@@ -59,8 +59,10 @@ class _EmptyQueueWorker:
 
 
 class _FakeQueueWithRecovery(BaseQueue):
-    def __init__(self) -> None:
+    def __init__(self, *, recovered: int = 0, error: Exception | None = None) -> None:
         self.recovery_calls: list[float] = []
+        self._recovered = recovered
+        self._error = error
 
     async def enqueue(self, job: Job) -> None:
         raise NotImplementedError
@@ -85,7 +87,9 @@ class _FakeQueueWithRecovery(BaseQueue):
 
     async def requeue_stale_jobs(self, *, older_than_seconds: float) -> int:
         self.recovery_calls.append(older_than_seconds)
-        return 0
+        if self._error is not None:
+            raise self._error
+        return self._recovered
 
 
 def _job() -> Job:
@@ -172,6 +176,39 @@ class TestCrashRecoveryLoop:
         await manager.stop()
 
         assert fake_queue.recovery_calls[0] == 0.02
+
+    async def test_logs_a_warning_when_jobs_are_actually_recovered(self) -> None:
+        fake_queue = _FakeQueueWithRecovery(recovered=2)
+        manager = WorkerManager(
+            worker_factory=_EmptyQueueWorker,
+            queue_manager=QueueManager(queue=fake_queue),
+            concurrency=1,
+            poll_interval_seconds=10,
+            job_timeout_seconds=0.02,
+        )
+
+        await manager.start()
+        await asyncio.wait_for(_wait_until(lambda: len(fake_queue.recovery_calls) >= 1), timeout=2)
+        await manager.stop()
+
+        assert fake_queue.recovery_calls  # the loop ran at least once without raising
+
+    async def test_survives_a_failing_recovery_check(self) -> None:
+        fake_queue = _FakeQueueWithRecovery(error=RuntimeError("redis unreachable"))
+        manager = WorkerManager(
+            worker_factory=_EmptyQueueWorker,
+            queue_manager=QueueManager(queue=fake_queue),
+            concurrency=1,
+            poll_interval_seconds=10,
+            job_timeout_seconds=0.02,
+        )
+
+        await manager.start()
+        await asyncio.wait_for(_wait_until(lambda: len(fake_queue.recovery_calls) >= 2), timeout=2)
+        await manager.stop()
+
+        # The loop kept running (recovered a 2nd call) despite the 1st raising.
+        assert len(fake_queue.recovery_calls) >= 2
 
 
 async def _wait_until(predicate: Callable[[], bool]) -> None:

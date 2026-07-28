@@ -38,7 +38,8 @@ class _Worker(Protocol):
     """What `WorkerManager` actually depends on: a `process_one()` — not the full
     `ProductWorker` type — so tests can supply a lightweight fake loop body."""
 
-    async def process_one(self) -> bool: ...
+    async def process_one(self) -> bool:
+        raise NotImplementedError
 
 
 class WorkerManager:

@@ -114,14 +114,12 @@ class ProductWorker:
             attempt,
         )
 
-        if job.job_type is not JobType.PRODUCT_PROCESSING:
-            await self._fail(
-                job,
-                start=start,
-                attempt=attempt,
-                error=f"Unsupported job type: {job.job_type.value}",
-            )
-            return True
+        # `JobType` only has one member today (see its own docstring) — a
+        # real invariant, not a case this worker needs to gracefully
+        # degrade for, the same "assert real invariants rather than
+        # defensively handle impossible cases" reasoning `QdrantVectorStore`
+        # (Phase 9) already established for its own mode-dependent type.
+        assert job.job_type is JobType.PRODUCT_PROCESSING
 
         try:
             await self._report_progress(job, progress=10, stage=_STAGE_VALIDATING)

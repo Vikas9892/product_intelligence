@@ -470,6 +470,36 @@ class TestMalformedInput:
         assert 0.0 <= decision.confidence <= 1.0
 
 
+class TestMetrics:
+    async def test_records_a_check_and_each_candidate_similarity(self) -> None:
+        from prometheus_client import CollectorRegistry
+
+        from app.metrics.metrics_registry import MetricsRegistry
+
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        a, b = uuid4(), uuid4()
+        service = DuplicateDetectionService(
+            hybrid_search_service=_FakeHybridSearchService(
+                results=[_hybrid_result(a), _hybrid_result(b)]
+            ),
+            similarity_scorer=_FakeSimilarityScorer(overall_similarity_by_product={a: 0.5, b: 0.9}),
+            metrics_registry=metrics,
+        )
+
+        await _detect(service)
+
+        assert (
+            metrics._registry.get_sample_value("product_intelligence_duplicate_detection_total")
+            == 1.0
+        )
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_duplicate_similarity_score_count"
+            )
+            == 2.0
+        )
+
+
 class TestDetectByProductId:
     async def test_raises_resource_not_found_when_the_product_is_not_indexed(self) -> None:
         service = DuplicateDetectionService(

@@ -9,6 +9,7 @@ lists of floats (never a framework-specific tensor type) for anything
 downstream of this layer to consume.
 """
 
+import time
 from pathlib import Path
 
 import torch
@@ -18,6 +19,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.exceptions.errors import EmbeddingGenerationException
+from app.metrics.metrics_registry import MetricsRegistry
 from app.models.model_type import ModelType
 from app.services.embeddings.base import BaseEmbeddingService
 from app.services.embeddings.model_manager import ModelManager
@@ -36,6 +38,7 @@ class CLIPEmbeddingService(BaseEmbeddingService):
         batch_size: int | None = None,
         model_manager: ModelManager | None = None,
         model_registry: ModelRegistry | None = None,
+        metrics_registry: MetricsRegistry | None = None,
     ) -> None:
         if model_name is not None:
             self._model_name = model_name
@@ -46,6 +49,7 @@ class CLIPEmbeddingService(BaseEmbeddingService):
             batch_size if batch_size is not None else settings.ai_models.embedding_batch_size
         )
         self._model_manager = model_manager if model_manager is not None else ModelManager()
+        self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
     @property
     def model_name(self) -> str:
@@ -73,10 +77,20 @@ class CLIPEmbeddingService(BaseEmbeddingService):
             self._batch_size,
         )
 
-        vectors: list[list[float]] = []
-        for start in range(0, len(image_paths), self._batch_size):
-            chunk = image_paths[start : start + self._batch_size]
-            vectors.extend(await run_in_threadpool(self._encode_batch, chunk))
+        start_time = time.monotonic()
+        try:
+            vectors: list[list[float]] = []
+            for start in range(0, len(image_paths), self._batch_size):
+                chunk = image_paths[start : start + self._batch_size]
+                vectors.extend(await run_in_threadpool(self._encode_batch, chunk))
+        except Exception:
+            self._metrics.observe_embedding(
+                model=self._model_name, seconds=time.monotonic() - start_time, success=False
+            )
+            raise
+        self._metrics.observe_embedding(
+            model=self._model_name, seconds=time.monotonic() - start_time, success=True
+        )
 
         logger.info(
             "Embeddings generated: count=%d, dimension=%d",

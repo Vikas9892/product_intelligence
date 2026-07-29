@@ -15,6 +15,7 @@ does.
 """
 
 import threading
+import time
 from collections.abc import Callable
 
 import torch
@@ -22,6 +23,7 @@ from sentence_transformers import CrossEncoder
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.metrics.metrics_registry import MetricsRegistry
 from app.services.embeddings.model_manager import resolve_device
 
 logger = get_logger(__name__)
@@ -45,11 +47,13 @@ class ModelManagerCrossEncoder:
         *,
         device: str | None = None,
         model_loader: Callable[..., CrossEncoder] | None = None,
+        metrics_registry: MetricsRegistry | None = None,
     ) -> None:
         self._device = resolve_device(device if device is not None else settings.reranker.device)
         self._model_loader = model_loader if model_loader is not None else CrossEncoder
         self._models: dict[str, LoadedCrossEncoder] = {}
         self._lock = threading.Lock()
+        self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
     def get_model(self, model_name: str) -> LoadedCrossEncoder:
         """Return `(model, device)` for `model_name`, loading it on first use."""
@@ -65,12 +69,16 @@ class ModelManagerCrossEncoder:
                 logger.info(
                     "Loading cross-encoder model '%s' onto device '%s'", model_name, self._device
                 )
+                load_start = time.monotonic()
                 # Unlike `CLIPModel`/`SentenceTransformer` (loaded, then moved
                 # onto a device via `.to()`), `CrossEncoder` places itself on
                 # its target device as part of construction.
                 model = self._model_loader(model_name, device=str(self._device))
                 cached = (model, self._device)
                 self._models[model_name] = cached
+                self._metrics.observe_model_load(
+                    model_type="reranker", seconds=time.monotonic() - load_start
+                )
                 logger.info("Cross-encoder model '%s' loaded", model_name)
 
         return cached

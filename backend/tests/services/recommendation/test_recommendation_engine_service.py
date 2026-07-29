@@ -501,6 +501,31 @@ class TestErrorWrapping:
             await service.recommend(product_id=uuid4())
 
 
+class TestMetrics:
+    async def test_records_a_recommendation_request(self) -> None:
+        from prometheus_client import CollectorRegistry
+
+        from app.metrics.metrics_registry import MetricsRegistry
+
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        product_id = uuid4()
+        service = RecommendationEngineService(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(product_id)]),
+            vector_store=_FakeVectorStore(stored_point=_target_point()),
+            recommendation_scorer=_FakeRecommendationScorer(
+                final_score_by_product={product_id: 0.5}
+            ),
+            metrics_registry=metrics,
+        )
+
+        await service.recommend(product_id=uuid4())
+
+        assert (
+            metrics._registry.get_sample_value("product_intelligence_recommendation_requests_total")
+            == 1.0
+        )
+
+
 class TestExplanations:
     async def _recommend_one(self, candidate: RecommendationCandidate) -> str:
         service = RecommendationEngineService(

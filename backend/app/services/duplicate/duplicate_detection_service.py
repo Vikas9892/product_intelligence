@@ -41,6 +41,7 @@ from uuid import UUID
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.exceptions.errors import DuplicateDetectionException, ResourceNotFoundException
+from app.metrics.metrics_registry import MetricsRegistry
 from app.models.duplicate_candidate import DuplicateCandidate
 from app.models.duplicate_decision import DuplicateDecision
 from app.models.duplicate_result import DuplicateResult
@@ -71,6 +72,7 @@ class DuplicateDetectionService:
         top_k: int | None = None,
         threshold: float | None = None,
         reranking_enabled: bool | None = None,
+        metrics_registry: MetricsRegistry | None = None,
     ) -> None:
         self._hybrid_search_service = (
             hybrid_search_service if hybrid_search_service is not None else HybridSearchService()
@@ -94,6 +96,7 @@ class DuplicateDetectionService:
         self._reranking_enabled = (
             reranking_enabled if reranking_enabled is not None else settings.reranker.enabled
         )
+        self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
     async def detect(
         self,
@@ -170,6 +173,9 @@ class DuplicateDetectionService:
                 "Failed to score candidates for duplicate detection."
             ) from exc
 
+        self._metrics.record_duplicate_detection(
+            similarity_scores=[result.overall_similarity for result in results]
+        )
         processing_time = time.monotonic() - start
         logger.info(
             "Duplicate detection complete: is_duplicate=%s, confidence=%.2f, "
@@ -273,6 +279,9 @@ class DuplicateDetectionService:
                 "Failed to score candidates for duplicate detection."
             ) from exc
 
+        self._metrics.record_duplicate_detection(
+            similarity_scores=[result.overall_similarity for result in results]
+        )
         processing_time = time.monotonic() - start
         logger.info(
             "Duplicate detection (by ID) complete: product_id=%s, is_duplicate=%s, "

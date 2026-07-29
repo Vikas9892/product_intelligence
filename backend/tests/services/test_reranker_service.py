@@ -10,8 +10,10 @@ import asyncio
 from uuid import UUID, uuid4
 
 import pytest
+from prometheus_client import CollectorRegistry
 
 from app.exceptions.errors import RerankException
+from app.metrics.metrics_registry import MetricsRegistry
 from app.models.search import HybridSearchResult, SearchModality
 from app.services.cross_encoder_service import CrossEncoderService
 from app.services.reranker_service import RerankerService
@@ -169,6 +171,37 @@ class TestErrorHandling:
 
         with pytest.raises(RerankException):
             await service.rerank("query", [_candidate(name="Widget")])
+
+
+class TestMetrics:
+    async def test_records_rerank_latency_and_success(self) -> None:
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        cross_encoder = _FakeCrossEncoderService(scores_by_document={"Widget": 1.0})
+        service = RerankerService(cross_encoder_service=cross_encoder, metrics_registry=metrics)
+
+        await service.rerank("query", [_candidate(name="Widget")])
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_rerank_inference_total", {"status": "success"}
+            )
+            == 1.0
+        )
+
+    async def test_records_failure_when_the_cross_encoder_raises(self) -> None:
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        cross_encoder = _FakeCrossEncoderService(error=RuntimeError("boom"))
+        service = RerankerService(cross_encoder_service=cross_encoder, metrics_registry=metrics)
+
+        with pytest.raises(RerankException):
+            await service.rerank("query", [_candidate(name="Widget")])
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_rerank_inference_total", {"status": "failure"}
+            )
+            == 1.0
+        )
 
 
 class TestConcurrency:

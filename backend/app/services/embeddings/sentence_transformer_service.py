@@ -13,12 +13,15 @@ L2-normalization step is needed the way `CLIPEmbeddingService._encode_batch`
 does one.
 """
 
+import time
+
 from starlette.concurrency import run_in_threadpool
 
 from app.core import constants
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.exceptions.errors import TextEmbeddingException
+from app.metrics.metrics_registry import MetricsRegistry
 from app.models.model_type import ModelType
 from app.services.embeddings.text_base import BaseTextEmbeddingService
 from app.services.embeddings.text_model_manager import TextModelManager
@@ -39,6 +42,7 @@ class SentenceTransformerEmbeddingService(BaseTextEmbeddingService):
         normalize: bool | None = None,
         model_manager: TextModelManager | None = None,
         model_registry: ModelRegistry | None = None,
+        metrics_registry: MetricsRegistry | None = None,
     ) -> None:
         if model_name is not None:
             self._model_name = model_name
@@ -54,6 +58,7 @@ class SentenceTransformerEmbeddingService(BaseTextEmbeddingService):
         self._dimension = dimension if dimension is not None else constants.DEFAULT_TEXT_VECTOR_SIZE
         self._normalize = normalize if normalize is not None else settings.ai_models.text_normalize
         self._model_manager = model_manager if model_manager is not None else TextModelManager()
+        self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
     @property
     def model_name(self) -> str:
@@ -85,10 +90,20 @@ class SentenceTransformerEmbeddingService(BaseTextEmbeddingService):
             self._batch_size,
         )
 
-        vectors: list[list[float]] = []
-        for start in range(0, len(texts), self._batch_size):
-            chunk = texts[start : start + self._batch_size]
-            vectors.extend(await run_in_threadpool(self._encode_batch, chunk))
+        start_time = time.monotonic()
+        try:
+            vectors: list[list[float]] = []
+            for start in range(0, len(texts), self._batch_size):
+                chunk = texts[start : start + self._batch_size]
+                vectors.extend(await run_in_threadpool(self._encode_batch, chunk))
+        except Exception:
+            self._metrics.observe_embedding(
+                model=self._model_name, seconds=time.monotonic() - start_time, success=False
+            )
+            raise
+        self._metrics.observe_embedding(
+            model=self._model_name, seconds=time.monotonic() - start_time, success=True
+        )
 
         logger.info(
             "Text embeddings generated: count=%d, dimension=%d",

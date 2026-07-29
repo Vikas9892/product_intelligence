@@ -70,6 +70,7 @@ from uuid import UUID
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.exceptions.errors import RecommendationException, ResourceNotFoundException
+from app.metrics.metrics_registry import MetricsRegistry
 from app.models.recommendation_candidate import RecommendationCandidate
 from app.models.recommendation_result import RecommendationResult
 from app.models.recommendation_type import RecommendationType
@@ -116,6 +117,7 @@ class RecommendationEngineService:
         top_k: int | None = None,
         diversity_enabled: bool | None = None,
         reranking_enabled: bool | None = None,
+        metrics_registry: MetricsRegistry | None = None,
     ) -> None:
         self._hybrid_search_service = (
             hybrid_search_service if hybrid_search_service is not None else HybridSearchService()
@@ -134,6 +136,7 @@ class RecommendationEngineService:
         self._reranking_enabled = (
             reranking_enabled if reranking_enabled is not None else settings.reranker.enabled
         )
+        self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
     async def recommend(
         self,
@@ -156,6 +159,7 @@ class RecommendationEngineService:
         successfully-retrieved candidates fails unexpectedly.
         """
         start = time.monotonic()
+        self._metrics.record_recommendation_request()
         resolved_top_k = top_k if top_k is not None else self._top_k
         rerank_active = (
             reranking_enabled if reranking_enabled is not None else self._reranking_enabled

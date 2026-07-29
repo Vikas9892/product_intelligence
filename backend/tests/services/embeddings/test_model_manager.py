@@ -140,6 +140,31 @@ class TestModelManagerCaching:
         assert manager.is_loaded("some-model") is True
 
 
+class TestModelManagerMetrics:
+    def test_records_model_load_time_on_first_load_only(self) -> None:
+        from prometheus_client import CollectorRegistry
+
+        from app.metrics.metrics_registry import MetricsRegistry
+
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        manager = ModelManager(
+            device="cpu",
+            model_loader=_fake_model_loader(load_calls=[]),
+            processor_loader=_fake_processor_loader,
+            metrics_registry=metrics,
+        )
+
+        manager.get_model("some-model")
+        manager.get_model("some-model")  # cached: no second observation
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_model_load_seconds_count", {"model_type": "image_embedding"}
+            )
+            == 1.0
+        )
+
+
 class TestModelManagerThreadSafety:
     def test_concurrent_requests_for_the_same_model_load_it_only_once(self) -> None:
         load_calls: list[str] = []

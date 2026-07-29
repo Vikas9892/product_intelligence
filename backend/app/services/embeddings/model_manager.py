@@ -27,6 +27,7 @@ CLIP weights, while production code gets the real
 """
 
 import threading
+import time
 from collections.abc import Callable
 
 import torch
@@ -34,6 +35,7 @@ from transformers import CLIPModel, CLIPProcessor
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.metrics.metrics_registry import MetricsRegistry
 
 logger = get_logger(__name__)
 
@@ -69,6 +71,7 @@ class ModelManager:
         device: str | None = None,
         model_loader: Callable[[str], CLIPModel] | None = None,
         processor_loader: Callable[[str], CLIPProcessor] | None = None,
+        metrics_registry: MetricsRegistry | None = None,
     ) -> None:
         self._device = resolve_device(
             device if device is not None else settings.ai_models.embedding_device
@@ -79,6 +82,7 @@ class ModelManager:
         )
         self._models: dict[str, LoadedModel] = {}
         self._lock = threading.Lock()
+        self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
     def get_model(self, model_name: str) -> LoadedModel:
         """Return `(model, processor, device)` for `model_name`, loading it on first use."""
@@ -94,6 +98,7 @@ class ModelManager:
                 logger.info(
                     "Loading embedding model '%s' onto device '%s'", model_name, self._device
                 )
+                load_start = time.monotonic()
                 model = self._model_loader(model_name)
                 # torch's `nn.Module.to()` type stub is imprecise about its
                 # heavily-overloaded signature (device, dtype, tensor, or
@@ -104,6 +109,9 @@ class ModelManager:
                 processor = self._processor_loader(model_name)
                 cached = (model, processor, self._device)
                 self._models[model_name] = cached
+                self._metrics.observe_model_load(
+                    model_type="image_embedding", seconds=time.monotonic() - load_start
+                )
                 logger.info("Embedding model '%s' loaded", model_name)
 
         return cached

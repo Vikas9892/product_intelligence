@@ -17,6 +17,7 @@ already-cached service singleton.
 """
 
 import threading
+import time
 from collections.abc import Callable
 
 import torch
@@ -24,6 +25,7 @@ from sentence_transformers import SentenceTransformer
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.metrics.metrics_registry import MetricsRegistry
 from app.services.embeddings.model_manager import resolve_device
 
 logger = get_logger(__name__)
@@ -47,6 +49,7 @@ class TextModelManager:
         *,
         device: str | None = None,
         model_loader: Callable[[str], SentenceTransformer] | None = None,
+        metrics_registry: MetricsRegistry | None = None,
     ) -> None:
         self._device = resolve_device(
             device if device is not None else settings.ai_models.text_device
@@ -54,6 +57,7 @@ class TextModelManager:
         self._model_loader = model_loader if model_loader is not None else SentenceTransformer
         self._models: dict[str, LoadedTextModel] = {}
         self._lock = threading.Lock()
+        self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
     def get_model(self, model_name: str) -> LoadedTextModel:
         """Return `(model, device)` for `model_name`, loading it on first use."""
@@ -71,6 +75,7 @@ class TextModelManager:
                     model_name,
                     self._device,
                 )
+                load_start = time.monotonic()
                 model = self._model_loader(model_name)
                 # Unlike `ModelManager`'s `CLIPModel.to()`, `SentenceTransformer`'s
                 # own stub for `.to()` is precise about accepting a `torch.device`
@@ -78,6 +83,9 @@ class TextModelManager:
                 model = model.to(self._device)
                 cached = (model, self._device)
                 self._models[model_name] = cached
+                self._metrics.observe_model_load(
+                    model_type="text_embedding", seconds=time.monotonic() - load_start
+                )
                 logger.info("Text embedding model '%s' loaded", model_name)
 
         return cached

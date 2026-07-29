@@ -145,6 +145,55 @@ class TestModelNameAndDimension:
         assert manager.is_loaded(service.model_name) is False
 
 
+class TestMetrics:
+    async def test_records_embedding_latency_and_success(self) -> None:
+        from prometheus_client import CollectorRegistry
+
+        from app.metrics.metrics_registry import MetricsRegistry
+
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        service = SentenceTransformerEmbeddingService(
+            model_name="fake-model",
+            dimension=4,
+            model_manager=_fake_model_manager(),
+            metrics_registry=metrics,
+        )
+
+        await service.embed_text("a red widget")
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_embedding_inference_total",
+                {"model": "fake-model", "status": "success"},
+            )
+            == 1.0
+        )
+
+    async def test_records_failure_on_inference_error(self) -> None:
+        from prometheus_client import CollectorRegistry
+
+        from app.metrics.metrics_registry import MetricsRegistry
+
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        service = SentenceTransformerEmbeddingService(
+            model_name="fake-model",
+            dimension=4,
+            model_manager=_fake_model_manager(model=_RaisingSentenceTransformerModel()),
+            metrics_registry=metrics,
+        )
+
+        with pytest.raises(TextEmbeddingException):
+            await service.embed_text("a red widget")
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_embedding_inference_total",
+                {"model": "fake-model", "status": "failure"},
+            )
+            == 1.0
+        )
+
+
 class TestModelRegistryResolution:
     def test_uses_the_explicit_model_name_when_given_ignoring_the_registry(self) -> None:
         registry = ModelRegistry(seed_from_settings=False)

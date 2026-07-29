@@ -54,6 +54,26 @@ class TestModelManagerCrossEncoderCaching:
 
         assert load_calls == ["some-model"]
 
+    def test_records_model_load_time_on_first_load_only(self) -> None:
+        from prometheus_client import CollectorRegistry
+
+        from app.metrics.metrics_registry import MetricsRegistry
+
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        manager = ModelManagerCrossEncoder(
+            device="cpu", model_loader=_fake_model_loader(), metrics_registry=metrics
+        )
+
+        manager.get_model("some-model")
+        manager.get_model("some-model")
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_model_load_seconds_count", {"model_type": "reranker"}
+            )
+            == 1.0
+        )
+
     def test_caches_different_models_independently(self) -> None:
         load_calls: list[str] = []
         manager = ModelManagerCrossEncoder(

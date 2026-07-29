@@ -46,6 +46,7 @@ import time
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.exceptions.errors import RerankException
+from app.metrics.metrics_registry import MetricsRegistry
 from app.models.rerank_reason import RerankReason
 from app.models.rerank_result import RerankResult
 from app.models.reranked_candidate import RerankedCandidate
@@ -65,11 +66,13 @@ class RerankerService(BaseReranker):
         *,
         cross_encoder_service: CrossEncoderService | None = None,
         top_n: int | None = None,
+        metrics_registry: MetricsRegistry | None = None,
     ) -> None:
         self._cross_encoder_service = (
             cross_encoder_service if cross_encoder_service is not None else CrossEncoderService()
         )
         self._top_n = top_n if top_n is not None else settings.reranker.top_n
+        self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
     async def rerank(
         self,
@@ -95,8 +98,10 @@ class RerankerService(BaseReranker):
             pairs = [(query, _document_text(candidate)) for candidate in pool]
             raw_scores = await self._cross_encoder_service.score_pairs(pairs)
         except RerankException:
+            self._metrics.observe_rerank(seconds=time.monotonic() - start, success=False)
             raise
         except Exception as exc:
+            self._metrics.observe_rerank(seconds=time.monotonic() - start, success=False)
             raise RerankException("Failed to rerank candidates.") from exc
 
         original_ranks = {
@@ -117,6 +122,7 @@ class RerankerService(BaseReranker):
         ]
 
         processing_time = time.monotonic() - start
+        self._metrics.observe_rerank(seconds=processing_time, success=True)
         logger.info(
             "Reranking complete: candidates=%d, pool=%d, reranked=%d, duration=%.4fs",
             len(candidates),

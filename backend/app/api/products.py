@@ -234,6 +234,10 @@ async def check_duplicate(
     brand: Annotated[str | None, Form(max_length=100)] = None,
     description: Annotated[str | None, Form(max_length=2000)] = None,
     category: Annotated[str | None, Form(max_length=100)] = None,
+    price: Annotated[
+        float | None,
+        Form(ge=0, description="Product price, used by cross-encoder verification's price rule."),
+    ] = None,
     top_k: Annotated[
         int | None, Form(gt=0, description="Overrides DUPLICATE_DETECTION__TOP_K for this call.")
     ] = None,
@@ -242,27 +246,31 @@ async def check_duplicate(
         Form(ge=0, le=1, description="Overrides DUPLICATE_DETECTION__THRESHOLD for this call."),
     ] = None,
 ) -> DuplicateCheckResponse:
-    """Validate/store the image (so it can be processed), then run duplicate detection only.
+    """Validate/store the image (so it can be processed), then run duplicate detection/verification.
 
     Missing/invalid form fields, an unsupported file extension/MIME type,
     or an invalid image are all handled by `UploadService`/
     `DuplicateCheckService` (each raises the appropriate `AppException`
     subclass) — this route stays a thin adapter, same as `upload_product`.
+    The `cross_encoder_score`/`retrieval_similarity`/`reasons` response
+    fields are populated only when `DUPLICATE_VERIFICATION__ENABLED` is on
+    (Phase 15); otherwise the response is exactly the pre-Phase-15 shape.
     """
     logger.info("Duplicate check requested: product_name=%s, filename=%s", name, file.filename)
 
     image = await upload_service.save_upload(file)
-    decision = await duplicate_check_service.check(
+    verification = await duplicate_check_service.check(
         name=name,
         brand=brand,
         category=category,
         description=description,
         image=image,
+        price=price,
         top_k=top_k,
         threshold=threshold,
     )
 
-    best_candidate = decision.top_candidates[0] if decision.top_candidates else None
+    best_candidate = verification.top_candidates[0] if verification.top_candidates else None
     signals = (
         DuplicateSignalBreakdown(
             image=best_candidate.image_similarity,
@@ -275,10 +283,10 @@ async def check_duplicate(
     )
 
     return DuplicateCheckResponse(
-        duplicate=decision.is_duplicate,
-        confidence=decision.confidence,
-        reason=decision.reason,
-        matched_product=decision.matched_product,
+        duplicate=verification.is_duplicate,
+        confidence=verification.confidence,
+        reason=verification.reasons[0].message if verification.reasons else "",
+        matched_product=verification.matched_product,
         signals=signals,
         top_candidates=[
             DuplicateCandidateInfo(
@@ -289,8 +297,11 @@ async def check_duplicate(
                 attribute_similarity=candidate.attribute_similarity,
                 overall_similarity=candidate.overall_similarity,
             )
-            for candidate in decision.top_candidates
+            for candidate in verification.top_candidates
         ],
+        cross_encoder_score=verification.cross_encoder_score,
+        retrieval_similarity=verification.retrieval_similarity,
+        reasons=[reason.message for reason in verification.reasons],
     )
 
 

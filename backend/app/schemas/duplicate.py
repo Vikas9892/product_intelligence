@@ -51,6 +51,14 @@ class DuplicateCheckResponse(BaseModel):
     `signals`/`matched_product` are `None` when no candidate was found at
     all (an empty catalog, or a genuinely novel product) — there is no
     "winning" candidate to report on.
+
+    `cross_encoder_score`/`retrieval_similarity`/`reasons` (Phase 15) are
+    populated only when `DUPLICATE_VERIFICATION__ENABLED` is on: the
+    cross-encoder relevance of the matched product, its raw embedding
+    retrieval similarity, and the human-readable factors behind the
+    verdict. When verification is off they stay `None`/empty — every
+    pre-Phase-15 field keeps its exact meaning, so the response is
+    backward compatible.
     """
 
     duplicate: bool
@@ -59,3 +67,6 @@ class DuplicateCheckResponse(BaseModel):
     matched_product: UUID | None = None
     signals: DuplicateSignalBreakdown | None = None
     top_candidates: list[DuplicateCandidateInfo] = Field(default_factory=list)
+    cross_encoder_score: float | None = None
+    retrieval_similarity: float | None = None
+    reasons: list[str] = Field(default_factory=list)

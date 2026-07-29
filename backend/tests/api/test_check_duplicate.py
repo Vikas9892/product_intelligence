@@ -14,6 +14,7 @@ one is not.
 import io
 from collections.abc import Iterator
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -27,9 +28,16 @@ from app.core.constants import DuplicateDetectionMode
 from app.dependencies.duplicate import get_duplicate_check_service
 from app.dependencies.product import get_product_service
 from app.dependencies.upload import get_upload_service
+from app.models.catalog_intelligence_result import CatalogIntelligenceResult
+from app.models.duplicate_verification import DuplicateVerification
+from app.models.image_metadata import ImageMetadata
+from app.models.product_attributes import ProductAttributes
+from app.models.verification_reason import VerificationReason
+from app.schemas.product import ProductImage
 from app.services.catalog.catalog_intelligence_service import CatalogIntelligenceService
 from app.services.duplicate.duplicate_check_service import DuplicateCheckService
 from app.services.duplicate.duplicate_detection_service import DuplicateDetectionService
+from app.services.duplicate.duplicate_verification_service import DuplicateVerificationService
 from app.services.embeddings.base import BaseEmbeddingService
 from app.services.embeddings.clip_service import CLIPEmbeddingService
 from app.services.embeddings.model_manager import ModelManager
@@ -299,3 +307,98 @@ class TestCheckDuplicateValidation:
 
         assert response.status_code == 422
         assert response.json()["error"]["code"] == "invalid_image"
+
+
+# --- Phase 15: cross-encoder verification response fields ---
+
+
+class _FakeImageProcessingService(ImageProcessingService):
+    async def process_image(self, stored_path: Path, stored_filename: str) -> "ImageMetadata":
+        return ImageMetadata(
+            width=40,
+            height=40,
+            format="JPEG",
+            color_mode="RGB",
+            original_path=stored_path,
+            processed_path=stored_path,
+        )
+
+
+class _FakeCatalogIntelligenceService(CatalogIntelligenceService):
+    async def enrich(
+        self,
+        *,
+        name: str,
+        brand: str | None,
+        category: str | None,
+        description: str | None,
+        image_path: Path,
+    ) -> "CatalogIntelligenceResult":
+        return CatalogIntelligenceResult(
+            attributes=ProductAttributes(), tags=[], quality_score=0.0, processing_time=0.0
+        )
+
+
+class _FixedVerificationService(DuplicateVerificationService):
+    def __init__(self, *, verification: DuplicateVerification) -> None:
+        self._verification = verification
+
+    async def verify(
+        self,
+        *,
+        name: str,
+        brand: str | None,
+        category: str | None,
+        description: str | None,
+        image: ProductImage,
+        price: float | None = None,
+        attributes: ProductAttributes | None = None,
+        top_k: int | None = None,
+    ) -> DuplicateVerification:
+        return self._verification
+
+
+@pytest.fixture
+def verification_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    monkeypatch.setattr(settings.async_pipeline, "enabled", False)
+    app = create_app()
+    verification = DuplicateVerification(
+        is_duplicate=True,
+        confidence=0.97,
+        cross_encoder_score=0.98,
+        retrieval_similarity=0.94,
+        matched_product=uuid4(),
+        reasons=[
+            VerificationReason(code="same_brand", message="Same brand (Nike)"),
+            VerificationReason(code="title_similarity", message="Title similarity 98%"),
+        ],
+    )
+    app.dependency_overrides[get_upload_service] = lambda: UploadService(upload_dir=tmp_path)
+    app.dependency_overrides[get_duplicate_check_service] = lambda: DuplicateCheckService(
+        image_processing_service=_FakeImageProcessingService(),
+        catalog_intelligence_service=_FakeCatalogIntelligenceService(),
+        duplicate_verification_service=_FixedVerificationService(verification=verification),
+        verification_enabled=True,
+        upload_dir=tmp_path,
+    )
+    with TestClient(app) as client:
+        yield client
+
+
+class TestCheckDuplicateVerificationFields:
+    def test_exposes_cross_encoder_score_and_reasons(self, verification_client: TestClient) -> None:
+        response = verification_client.post(
+            _CHECK_URL,
+            data={"name": "Nike Air Max", "brand": "Nike", "price": "100.0"},
+            files=_image_file(),
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["duplicate"] is True
+        assert body["confidence"] == pytest.approx(0.97)
+        assert body["cross_encoder_score"] == pytest.approx(0.98)
+        assert body["retrieval_similarity"] == pytest.approx(0.94)
+        assert body["reasons"] == ["Same brand (Nike)", "Title similarity 98%"]
+        # `reason` (the pre-Phase-15 singular string) mirrors the first reason.
+        assert body["reason"] == "Same brand (Nike)"

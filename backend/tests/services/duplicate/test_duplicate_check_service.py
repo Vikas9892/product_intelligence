@@ -11,12 +11,15 @@ from pathlib import Path
 
 from app.models.catalog_intelligence_result import CatalogIntelligenceResult
 from app.models.duplicate_decision import DuplicateDecision
+from app.models.duplicate_verification import DuplicateVerification
 from app.models.image_metadata import ImageMetadata
 from app.models.product_attributes import ProductAttributes
+from app.models.verification_reason import VerificationReason
 from app.schemas.product import ProductImage
 from app.services.catalog.catalog_intelligence_service import CatalogIntelligenceService
 from app.services.duplicate.duplicate_check_service import DuplicateCheckService
 from app.services.duplicate.duplicate_detection_service import DuplicateDetectionService
+from app.services.duplicate.duplicate_verification_service import DuplicateVerificationService
 from app.services.image_processing_service import ImageProcessingService
 
 
@@ -82,6 +85,29 @@ class _FakeDuplicateDetectionService(DuplicateDetectionService):
         return self._decision
 
 
+class _FakeDuplicateVerificationService(DuplicateVerificationService):
+    def __init__(self, *, verification: DuplicateVerification) -> None:
+        self._verification = verification
+        self.received_price: float | None = None
+        self.received_attributes: ProductAttributes | None = None
+
+    async def verify(
+        self,
+        *,
+        name: str,
+        brand: str | None,
+        category: str | None,
+        description: str | None,
+        image: ProductImage,
+        price: float | None = None,
+        attributes: ProductAttributes | None = None,
+        top_k: int | None = None,
+    ) -> DuplicateVerification:
+        self.received_price = price
+        self.received_attributes = attributes
+        return self._verification
+
+
 def _image() -> ProductImage:
     return ProductImage(
         original_filename="photo.jpg",
@@ -138,12 +164,13 @@ class TestDuplicateCheckService:
         assert duplicate_detection_service.received_top_k == 3
         assert duplicate_detection_service.received_threshold == 0.5
 
-    async def test_returns_the_duplicate_detection_services_decision(self, tmp_path: Path) -> None:
+    async def test_adapts_the_detection_decision_into_a_verification(self, tmp_path: Path) -> None:
         decision = DuplicateDecision(is_duplicate=True, confidence=0.97, reason="matched")
         service = DuplicateCheckService(
             image_processing_service=_FakeImageProcessingService(),
             catalog_intelligence_service=_FakeCatalogIntelligenceService(),
             duplicate_detection_service=_FakeDuplicateDetectionService(decision=decision),
+            verification_enabled=False,
             upload_dir=tmp_path,
         )
 
@@ -151,7 +178,13 @@ class TestDuplicateCheckService:
             name="Widget", brand=None, category=None, description=None, image=_image()
         )
 
-        assert result == decision
+        # Weighted path: the decision is adapted into DuplicateVerification
+        # with the cross-encoder/retrieval fields left None.
+        assert result.is_duplicate is True
+        assert result.confidence == 0.97
+        assert result.cross_encoder_score is None
+        assert result.retrieval_similarity is None
+        assert [r.message for r in result.reasons] == ["matched"]
 
     async def test_processes_the_stored_file_under_the_configured_upload_dir(
         self, tmp_path: Path
@@ -171,3 +204,56 @@ class TestDuplicateCheckService:
         )
 
         assert image_processing_service.calls == [tmp_path / "stored.jpg"]
+
+
+class TestDuplicateCheckServiceVerificationPath:
+    async def test_delegates_to_verification_when_enabled(self, tmp_path: Path) -> None:
+        verification = DuplicateVerification(
+            is_duplicate=True,
+            confidence=0.97,
+            cross_encoder_score=0.98,
+            retrieval_similarity=0.94,
+            reasons=[VerificationReason(code="same_brand", message="Same brand (Nike)")],
+        )
+        verification_service = _FakeDuplicateVerificationService(verification=verification)
+        service = DuplicateCheckService(
+            image_processing_service=_FakeImageProcessingService(),
+            catalog_intelligence_service=_FakeCatalogIntelligenceService(),
+            duplicate_verification_service=verification_service,
+            verification_enabled=True,
+            upload_dir=tmp_path,
+        )
+
+        result = await service.check(
+            name="Widget", brand="Nike", category=None, description=None, image=_image()
+        )
+
+        assert result == verification
+        assert result.cross_encoder_score == 0.98
+
+    async def test_forwards_price_and_catalog_attributes_to_verification(
+        self, tmp_path: Path
+    ) -> None:
+        attributes = ProductAttributes(color="Red")
+        verification_service = _FakeDuplicateVerificationService(
+            verification=DuplicateVerification(is_duplicate=False, confidence=0.1)
+        )
+        service = DuplicateCheckService(
+            image_processing_service=_FakeImageProcessingService(),
+            catalog_intelligence_service=_FakeCatalogIntelligenceService(attributes=attributes),
+            duplicate_verification_service=verification_service,
+            verification_enabled=True,
+            upload_dir=tmp_path,
+        )
+
+        await service.check(
+            name="Widget",
+            brand="Nike",
+            category=None,
+            description=None,
+            image=_image(),
+            price=99.0,
+        )
+
+        assert verification_service.received_price == 99.0
+        assert verification_service.received_attributes == attributes

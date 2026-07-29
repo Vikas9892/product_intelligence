@@ -48,15 +48,19 @@ class ModelManagerCrossEncoder:
         device: str | None = None,
         model_loader: Callable[..., CrossEncoder] | None = None,
         metrics_registry: MetricsRegistry | None = None,
+        warmup_enabled: bool | None = None,
     ) -> None:
         self._device = resolve_device(device if device is not None else settings.reranker.device)
         self._model_loader = model_loader if model_loader is not None else CrossEncoder
         self._models: dict[str, LoadedCrossEncoder] = {}
         self._lock = threading.Lock()
         self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
+        self._warmup_enabled = (
+            warmup_enabled if warmup_enabled is not None else settings.reranker.warmup_enabled
+        )
 
     def get_model(self, model_name: str) -> LoadedCrossEncoder:
-        """Return `(model, device)` for `model_name`, loading it on first use."""
+        """Return `(model, device)` for `model_name`, loading (and optionally warming) it on first use."""
         cached = self._models.get(model_name)
         if cached is not None:
             return cached
@@ -80,8 +84,36 @@ class ModelManagerCrossEncoder:
                     model_type="reranker", seconds=time.monotonic() - load_start
                 )
                 logger.info("Cross-encoder model '%s' loaded", model_name)
+                if self._warmup_enabled:
+                    # Inside the lock, right after the load, so warm-up
+                    # happens exactly once per model (not per concurrent
+                    # first-caller) and before any of them get the model
+                    # handed back.
+                    self._warmup(model, model_name)
 
         return cached
+
+    def _warmup(self, model: CrossEncoder, model_name: str) -> None:
+        """Run one throwaway inference so the first real rerank doesn't pay the cold-start cost.
+
+        Deliberately non-fatal: the model already loaded successfully, so a
+        warm-up failure (a transformers version quirk on the dummy input,
+        say) should be logged and swallowed rather than making the whole
+        load fail — the first real request would then just be a little
+        slower, exactly as if warm-up were off. Never raises.
+        """
+        try:
+            warmup_start = time.monotonic()
+            model.predict([("warmup query", "warmup document")])
+            logger.info(
+                "Cross-encoder model '%s' warmed up in %.4fs",
+                model_name,
+                time.monotonic() - warmup_start,
+            )
+        except Exception:
+            logger.warning(
+                "Cross-encoder warm-up failed (non-fatal): model=%s", model_name, exc_info=True
+            )
 
     def is_loaded(self, model_name: str) -> bool:
         """Return whether `model_name` has already been loaded (no locking needed to check)."""

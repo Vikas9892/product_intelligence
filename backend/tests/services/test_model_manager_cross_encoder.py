@@ -103,6 +103,62 @@ class TestModelManagerCrossEncoderCaching:
         assert manager.is_loaded("some-model") is True
 
 
+class _WarmupRecordingModel:
+    """Records `predict` calls so a test can prove warm-up ran (or didn't)."""
+
+    def __init__(self, *, device: str | None = None, raises: bool = False) -> None:
+        self.device = device
+        self._raises = raises
+        self.predict_calls: list[object] = []
+
+    def predict(self, pairs: object, **_: object) -> list[float]:
+        self.predict_calls.append(pairs)
+        if self._raises:
+            raise RuntimeError("warmup boom")
+        return [0.0]
+
+
+class TestModelManagerCrossEncoderWarmup:
+    def test_no_warmup_inference_when_disabled(self) -> None:
+        model = _WarmupRecordingModel()
+        manager = ModelManagerCrossEncoder(
+            device="cpu",
+            model_loader=lambda name, **kwargs: cast(CrossEncoder, model),
+            warmup_enabled=False,
+        )
+
+        manager.get_model("some-model")
+
+        assert model.predict_calls == []
+
+    def test_runs_one_warmup_inference_when_enabled(self) -> None:
+        model = _WarmupRecordingModel()
+        manager = ModelManagerCrossEncoder(
+            device="cpu",
+            model_loader=lambda name, **kwargs: cast(CrossEncoder, model),
+            warmup_enabled=True,
+        )
+
+        manager.get_model("some-model")
+        manager.get_model("some-model")  # cached: no second warm-up
+
+        assert len(model.predict_calls) == 1
+
+    def test_a_warmup_failure_is_non_fatal(self) -> None:
+        model = _WarmupRecordingModel(raises=True)
+        manager = ModelManagerCrossEncoder(
+            device="cpu",
+            model_loader=lambda name, **kwargs: cast(CrossEncoder, model),
+            warmup_enabled=True,
+        )
+
+        # The load still succeeds and the model is cached despite warm-up raising.
+        manager.get_model("some-model")
+
+        assert model.predict_calls != []  # warm-up was attempted
+        assert manager.is_loaded("some-model") is True
+
+
 class TestModelManagerCrossEncoderDeviceResolution:
     def test_reuses_resolve_device_from_the_image_model_manager(
         self, monkeypatch: pytest.MonkeyPatch

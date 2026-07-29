@@ -288,6 +288,16 @@ class RerankerSettings(BaseModel):
     same reasoning `AIModelSettings.embedding_batch_size`/`text_batch_size`
     already establish. `device` follows the exact same "auto"/"cpu"/
     "cuda[:N]" convention `embedding_device`/`text_device` do.
+
+    `warmup_enabled` (Phase 15) runs one throwaway inference immediately
+    after the cross-encoder is first loaded, so the *first real* rerank
+    request doesn't pay the one-time cost of lazy CUDA-kernel
+    compilation / graph construction that the very first forward pass
+    through a freshly-loaded transformer triggers. Off by default — like
+    `enabled`, warm-up only makes sense once the model is actually being
+    used, and forcing an inference at load time on a CPU-only dev box is
+    pure wasted latency there; a GPU deployment that cares about tail
+    latency on the first request turns it on.
     """
 
     enabled: bool = False
@@ -295,6 +305,7 @@ class RerankerSettings(BaseModel):
     top_n: int = Field(default=50, gt=0)
     batch_size: int = Field(default=16, gt=0)
     device: str = "auto"
+    warmup_enabled: bool = False
 
 
 class DuplicateVerificationSettings(BaseModel):

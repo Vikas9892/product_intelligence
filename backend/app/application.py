@@ -29,6 +29,7 @@ from app.api.jobs import router as jobs_router
 from app.api.models import router as models_router
 from app.api.products import router as products_router
 from app.api.search import router as search_router
+from app.api.system import router as system_router
 from app.core import constants
 from app.core.config import settings
 from app.dependencies.metrics import get_metrics_registry
@@ -100,6 +101,11 @@ def _register_routers(app: FastAPI) -> None:
     `SearchService`) — see each router module's own docstring. Further
     business routers are added here the same way, without touching
     application construction/metadata above.
+
+    `system_router` (`/system/health`, `/system/stats`) is gated on
+    `METRICS__HEALTH_ENDPOINTS_ENABLED` — a deployment can turn off the
+    operational dashboard without affecting the unversioned `/health`/
+    `/ready` liveness/readiness probes, which are always registered.
     """
     app.include_router(health_router)
     app.include_router(products_router, prefix=settings.application.api_prefix)
@@ -107,6 +113,8 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(evaluation_router, prefix=settings.application.api_prefix)
     app.include_router(jobs_router, prefix=settings.application.api_prefix)
     app.include_router(models_router, prefix=settings.application.api_prefix)
+    if settings.metrics.health_endpoints_enabled:
+        app.include_router(system_router, prefix=settings.application.api_prefix)
 
 
 def _register_exception_handlers(app: FastAPI) -> None:

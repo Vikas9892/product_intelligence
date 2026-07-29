@@ -30,6 +30,35 @@ FastAPI HTTP API. Milestone 1 establishes the foundation everything else is
 built on: a repo that lints, type-checks, tests, and installs the same way
 on every machine and in CI, before a single line of business logic exists.
 
+## Roadmap
+
+This project is planned across 20 phases. Phases 1–13 are complete and
+documented below (see each phase's own "design decisions" section and
+its entry under
+[How this project was created from scratch](#how-this-project-was-created-from-scratch)).
+Phases 14–20 have not been specified yet — no milestone list, config
+keys, or scope exists for them, so they're listed here only as
+placeholders in the numbering, not as a commitment to specific future
+functionality.
+
+| Phase | Title | Status |
+|---|---|---|
+| 1 | Backend skeleton, configuration, logging, app factory, health endpoints, exception handling, middleware, testing/CI | Complete |
+| 2A | Product Upload Pipeline | Complete |
+| 2B | Product Processing & Metadata Normalization | Complete |
+| 3 | Image Processing Pipeline | Complete |
+| 4 | Image Embedding Pipeline | Complete |
+| 5 | Vector Search & Retrieval | Complete |
+| 6 | Text Embeddings & Hybrid Search | Complete |
+| 7 | Catalog Intelligence & Product Enrichment | Complete |
+| 8 | Duplicate Detection Engine | Complete |
+| 9 | Intelligent Recommendation Engine | Complete |
+| 10 | Retrieval Evaluation Framework | Complete |
+| 11 | Cross-Encoder Reranking | Complete |
+| 12 | Asynchronous AI Processing Pipeline | Complete |
+| 13 | Model Registry & AI Lifecycle Management | Complete |
+| 14–20 | Not yet specified | Planned |
+
 ## Folder structure
 
 ```
@@ -2876,6 +2905,144 @@ workers, auto-scaling, or GPU scheduling — matching the phase spec's own
 implementation is sufficient." Every queue/worker primitive here is
 plain `asyncio` and Redis data structures, nothing more.
 
+## Phase 13 — Model Registry & AI Lifecycle Management design decisions
+
+This phase adds a lightweight, in-memory `ModelRegistry` that tracks
+which version of each AI model (image embedding, text embedding,
+reranker) is currently active — centralizing model metadata and
+lifecycle state so the services that actually load and run those models
+(`ModelManager`, `TextModelManager`, `ModelManagerCrossEncoder`) no
+longer hardcode a model name themselves.
+
+### Architecture
+
+```
+        ModelRegistry
+   (in-memory: which version
+    is ACTIVE, per ModelType)
+            │
+   registry.get_active_model(ModelType.X)
+            │
+            ▼
+  CLIPEmbeddingService / SentenceTransformerEmbeddingService /
+  CrossEncoderService
+   (resolve model_name from the registry;
+    an explicit model_name still wins outright)
+            │
+            ▼
+  ModelManager / TextModelManager / ModelManagerCrossEncoder
+   (unchanged from earlier phases — still own
+    actual loading/caching of the Hugging Face model)
+            │
+            ▼
+      CLIP / BGE / Cross-Encoder
+```
+
+`ModelRegistry` never loads a model itself — see that service's own
+docstring: "Pure metadata bookkeeping... this class never loads a
+model." Its only job is answering "which model name should be loaded
+for this type," the same separation of concerns `HybridSearchService`
+keeps from the vector store it queries.
+
+### Why `app/models/`, Not `app/domain/`
+
+The phase spec's own milestone literally says `app/domain/` for
+`ModelInfo`/`ModelType`/`ModelStatus`/`ModelVersion`, but this codebase
+has never had a separate `domain/` package — every earlier phase's own
+Pydantic domain models (`Product`, `DuplicateDecision`,
+`RecommendationResult`, `EvaluationQuery`, ...) live in `app/models/`,
+and Phase 11's spec asked for the same `app/domain/` wording for its own
+domain models, resolved the same way then. Phase 13 reapplies that
+precedent rather than introducing a second, parallel location for
+domain models this late in the project.
+
+### Seeding: Reusing Existing Settings, Not New Env Vars
+
+The phase's configuration section asks for `IMAGE_MODEL`/`TEXT_MODEL`/
+`RERANK_MODEL` env vars that the registry "validates... on startup," but
+this codebase already has a single source of truth for exactly those
+three values: `AIModelSettings.clip_model_name`/`.text_model_name` and
+`RerankerSettings.model_name` — the same settings
+`CLIPEmbeddingService`/`SentenceTransformerEmbeddingService`/
+`CrossEncoderService` have always read directly. Introducing a second,
+disagreeing set of flat env vars for the same three model names would
+only invite them to drift out of sync with each other. `ModelRegistry`
+seeds one `"1.0.0"`, `ACTIVE` entry per `ModelType` from those existing
+settings at construction — "validates these on startup" is satisfied by
+raising `ModelRegistryException` immediately if any configured name is
+blank, rather than deferring that failure to whenever a model is first
+loaded.
+
+### Lifecycle: Register, Activate, Deactivate
+
+`ModelRegistry` keeps, per `ModelType`, a `{version: ModelInfo}` map.
+`register()` rejects a duplicate `(type, version)` pair
+(`ConflictException`, 409); if the newly-registered version's own
+`status` is `ACTIVE`, every other version of that type is demoted to
+`INACTIVE` first — **at most one `ACTIVE` version exists per type at any
+time**. `activate(type, version)`/`deactivate(type, version)` move an
+already-registered version between those states the same way, and both
+raise `ResourceNotFoundException` (404) for a version that was never
+registered. `ModelStatus` also has `DEPRECATED`/`EXPERIMENTAL` for a
+version that's neither the current default nor fully retired — a
+candidate replacement model can be registered as `EXPERIMENTAL` and
+evaluated (see below) before ever being promoted to `ACTIVE`.
+
+### Registry Integration
+
+`CLIPEmbeddingService`/`SentenceTransformerEmbeddingService`/
+`CrossEncoderService` each gained an optional `model_registry:
+ModelRegistry | None` constructor parameter. An explicit `model_name`
+still wins outright (unit tests that pin a specific fake model
+checkpoint are unaffected); when `model_name` is omitted, the service
+now resolves it through
+`registry.get_active_model(ModelType.X).model_name` instead of reading
+`settings.ai_models.*`/`settings.reranker.model_name` directly. Since
+the registry's own default seeding reads those exact same settings,
+this is a behavior-preserving refactor: every existing caller that
+relied on the old settings-driven default gets back the identical model
+name, just routed through the registry now.
+
+### Model Health & Metadata API
+
+`GET /models` / `GET /models/{type}` / `GET /models/{type}/active`
+(`app/api/models.py`) expose the registry's bookkeeping read-only:
+model name, version, status, dimension, provider, `created_at`. No
+model is ever loaded to answer any of these — "No runtime inference.
+Metadata only," per the phase's own requirement — each route is a thin
+adapter over `ModelRegistry.list_models`/`get_active_model`.
+
+### Evaluation Integration: Model Provenance
+
+`BenchmarkReport` (Phase 10) gained a `models` field: a snapshot of
+whichever model was `ACTIVE`, per `ModelType`, at the moment
+`RetrievalEvaluator.evaluate` ran. This is the phase's own "Model ->
+Metrics -> Timestamp -> Version" record — a report now carries enough to
+say "CLIP ViT-B/32 -> Recall@10 -> 0.91" without a separate lookup, and
+a future model swap (registering and activating a SigLIP/OpenCLIP
+version instead) is comparable against past runs purely by diffing two
+reports' `models`/`overall_metrics` — `RetrievalEvaluator`'s own
+dispatch and metric-computation logic never needs to change to support
+that comparison. `POST /evaluation/run`'s response and
+`scripts/benchmark.py`'s Markdown report both surface this same
+snapshot.
+
+### Configuration
+
+No new environment variables this phase. `ModelRegistry` seeds itself
+from settings that already existed before this phase
+(`AIModelSettings.clip_model_name`/`.text_model_name`,
+`RerankerSettings.model_name`) — see "Seeding" above for why no new
+`IMAGE_MODEL`/`TEXT_MODEL`/`RERANK_MODEL` variables were added.
+
+### Explicitly out of scope this phase
+
+No MLflow, Hugging Face Hub uploads, model training/fine-tuning,
+distributed model serving, GPU scheduling, automatic model download, or
+A/B traffic splitting — matching the phase spec's own "Do NOT
+Implement" list. `ModelRegistry` stays exactly what its own docstring
+says: metadata and lifecycle bookkeeping, nothing more.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -4170,5 +4337,88 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden async pipeline test coverage and document Phase 12 (Phase 12 milestone 6/6)"
+git push
+```
+
+## Phase 13 — Model Registry & AI Lifecycle Management (built from scratch)
+
+```bash
+# Milestone 1/6 — model domain
+#   app/models/model_type.py — ModelType (IMAGE_EMBEDDING/TEXT_EMBEDDING/RERANKER)
+#   app/models/model_status.py — ModelStatus (ACTIVE/INACTIVE/DEPRECATED/EXPERIMENTAL)
+#   app/models/model_version.py — ModelVersion (semantic-version Annotated str alias)
+#   app/models/model_info.py — ModelInfo domain model
+#   app/exceptions/errors.py — added ModelRegistryException
+#   tests/models/test_model_{type,status,version,info}.py — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add model registry domain (Phase 13 milestone 1/6)"
+
+# Milestone 2/6 — ModelRegistry service
+#   app/services/model_registry.py — register/get_active_model/get_model/
+#   list_models/activate/deactivate; seeds one ACTIVE v1.0.0 entry per
+#   ModelType from the existing AIModelSettings/RerankerSettings values
+#   app/dependencies/model_registry.py — cached-singleton provider
+#   tests/services/test_model_registry.py, tests/dependencies/test_model_registry.py
+#   — hand-written
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add ModelRegistry service (Phase 13 milestone 2/6)"
+
+# Milestone 3/6 — registry integration
+#   app/services/embeddings/clip_service.py,
+#   app/services/embeddings/sentence_transformer_service.py,
+#   app/services/cross_encoder_service.py — each gained an optional
+#   model_registry parameter; model_name now resolves through
+#   registry.get_active_model(ModelType.X) when not given explicitly
+#   tests/services/embeddings/test_clip_service.py,
+#   test_sentence_transformer_service.py, tests/services/test_cross_encoder_service.py
+#   — extended with registry-resolution coverage
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: resolve model names via ModelRegistry (Phase 13 milestone 3/6)"
+
+# Milestone 4/6 — model health & metadata API
+#   app/schemas/model.py — ModelInfoResponse
+#   app/api/models.py — GET /models, GET /models/{type}, GET /models/{type}/active
+#   app/application.py — _register_routers() now includes models_router
+#   tests/api/test_models.py — hand-written
+#   tests/test_application.py — extended for the three new business routes
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add model health and metadata API (Phase 13 milestone 4/6)"
+
+# Milestone 5/6 — evaluation integration
+#   app/models/benchmark_report.py — BenchmarkReport gained a models field
+#   app/services/evaluation/retrieval_evaluator.py — RetrievalEvaluator
+#   gained an optional model_registry parameter; evaluate() snapshots
+#   every ACTIVE model into the report it returns
+#   app/schemas/evaluation.py, app/api/evaluation.py — EvaluationRunResponse
+#   surfaces the same models snapshot
+#   scripts/benchmark.py — render_markdown gained a "Models" section
+#   tests/services/evaluation/test_retrieval_evaluator.py,
+#   tests/models/test_benchmark_report.py, tests/api/test_evaluation.py,
+#   tests/scripts/test_benchmark.py — extended
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: record model provenance on every benchmark run (Phase 13 milestone 5/6)"
+
+# Milestone 6/6 — test hardening + documentation
+#   Coverage audit against the phase's own test-coverage checklist
+#   (registration, duplicate versions, active model switching, invalid
+#   metadata, registry lookup, API responses) — already satisfied by
+#   Milestones 1-5's own tests
+#   backend/README.md — this section, the Phase 13 design-decisions
+#   section, and the Roadmap section (Phases 1-13 complete, 14-20 not
+#   yet specified)
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden model registry test coverage and document Phase 13 (Phase 13 milestone 6/6)"
 git push
 ```

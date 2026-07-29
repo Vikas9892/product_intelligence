@@ -203,6 +203,25 @@ class MetricsRegistry:
             namespace=self._namespace,
             registry=self._registry,
         )
+        self.explanation_seconds = get_or_create_histogram(
+            metric_names.EXPLANATION_SECONDS,
+            "Time to build one explanation trace.",
+            namespace=self._namespace,
+            registry=self._registry,
+        )
+        self.explanations_total = get_or_create_counter(
+            metric_names.EXPLANATIONS_TOTAL,
+            "Explanation traces built, per decision type.",
+            ["decision_type"],
+            namespace=self._namespace,
+            registry=self._registry,
+        )
+        self.explanation_confidence = get_or_create_histogram(
+            metric_names.EXPLANATION_CONFIDENCE,
+            "Confidence of each explained decision (for the average-confidence gauge).",
+            namespace=self._namespace,
+            registry=self._registry,
+        )
 
         self.queue_depth.set_function(lambda: self._poll_queue_length("pending", llen=True))
         self.worker_jobs_running.set_function(
@@ -260,6 +279,22 @@ class MetricsRegistry:
             return
         self.worker_jobs_total.labels(status=status).inc()
         self.worker_job_duration_seconds.observe(seconds)
+
+    def record_explanation(
+        self, *, decision_type: str, seconds: float, confidence: float | None
+    ) -> None:
+        """Record one explanation trace's build latency, decision type, and confidence (Phase 16).
+
+        `confidence` is `None` for a purely qualitative explanation (no
+        composite score) — the confidence histogram then gets no sample,
+        but the latency and per-decision-type count are still recorded.
+        """
+        if not self._enabled:
+            return
+        self.explanation_seconds.observe(seconds)
+        self.explanations_total.labels(decision_type=decision_type).inc()
+        if confidence is not None:
+            self.explanation_confidence.observe(confidence)
 
     def record_duplicate_verification(
         self, *, confidence: float | None, is_duplicate: bool

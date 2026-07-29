@@ -37,3 +37,8 @@ WORKER_DEAD_LETTER_SIZE = "worker_dead_letter_size"
 # --- Phase 15: cross-encoder duplicate verification metrics ---
 DUPLICATE_VERIFICATION_CONFIDENCE = "duplicate_verification_confidence"
 DUPLICATE_VERIFICATION_DECISIONS_TOTAL = "duplicate_verification_decisions_total"
+
+# --- Phase 16: explainable-AI metrics ---
+EXPLANATION_SECONDS = "explanation_seconds"
+EXPLANATIONS_TOTAL = "explanations_total"
+EXPLANATION_CONFIDENCE = "explanation_confidence"

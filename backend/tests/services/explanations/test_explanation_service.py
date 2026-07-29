@@ -64,6 +64,30 @@ class TestExplainDelegators:
         assert trace.decision_type == "recommendation"
 
 
+class TestMetrics:
+    def test_explain_records_a_metric(self) -> None:
+        from prometheus_client import CollectorRegistry
+
+        from app.metrics.metrics_registry import MetricsRegistry
+
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        verification = DuplicateVerification(is_duplicate=True, confidence=0.9)
+        service = ExplanationService(metrics_registry=metrics)
+
+        service.explain_duplicate(verification)
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_explanations_total", {"decision_type": "duplicate"}
+            )
+            == 1.0
+        )
+        assert (
+            metrics._registry.get_sample_value("product_intelligence_explanation_seconds_count")
+            == 1.0
+        )
+
+
 class TestBuildTrace:
     def test_builds_a_summary_from_the_reasons(self) -> None:
         service = ExplanationService()

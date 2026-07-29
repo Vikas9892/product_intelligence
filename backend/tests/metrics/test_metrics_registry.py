@@ -276,6 +276,44 @@ class TestRecordDuplicateVerification:
         )
 
 
+class TestRecordExplanation:
+    def test_records_latency_decision_type_and_confidence(self) -> None:
+        metrics = _registry()
+
+        metrics.record_explanation(decision_type="duplicate", seconds=0.01, confidence=0.9)
+
+        assert (
+            metrics._registry.get_sample_value("product_intelligence_explanation_seconds_count")
+            == 1.0
+        )
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_explanations_total", {"decision_type": "duplicate"}
+            )
+            == 1.0
+        )
+        assert (
+            metrics._registry.get_sample_value("product_intelligence_explanation_confidence_count")
+            == 1.0
+        )
+
+    def test_none_confidence_still_records_latency_and_count(self) -> None:
+        metrics = _registry()
+
+        metrics.record_explanation(decision_type="recommendation", seconds=0.01, confidence=None)
+
+        assert (
+            metrics._registry.get_sample_value("product_intelligence_explanation_confidence_count")
+            == 0.0
+        )
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_explanations_total", {"decision_type": "recommendation"}
+            )
+            == 1.0
+        )
+
+
 class TestDisabledNoOpsEverywhere:
     def test_every_record_and_observe_method_no_ops_when_disabled(self) -> None:
         metrics = _registry(enabled=False)
@@ -287,6 +325,7 @@ class TestDisabledNoOpsEverywhere:
         metrics.observe_product_upload(1.0)
         metrics.record_worker_job(status="success", seconds=1.0)
         metrics.record_duplicate_verification(confidence=0.9, is_duplicate=True)
+        metrics.record_explanation(decision_type="duplicate", seconds=1.0, confidence=0.9)
 
         # `model_load_seconds`/`worker_jobs_total` are labeled — no sample
         # exists at all until `.labels(...)` is actually called.

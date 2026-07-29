@@ -14,7 +14,8 @@ confidence, decision-type distribution — are recorded here in Milestone
 across concurrent requests.
 """
 
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 
 from app.core.logging import get_logger
 from app.metrics.metrics_registry import MetricsRegistry
@@ -72,19 +73,30 @@ class ExplanationService:
 
     def explain_hybrid_search(self, result: HybridSearchResult) -> ExplanationTrace:
         """Explain one hybrid-search result's fused score."""
-        return self._hybrid_search_explainer.explain(result)
+        return self._timed(lambda: self._hybrid_search_explainer.explain(result))
 
     def explain_rerank(self, candidate: RerankedCandidate) -> ExplanationTrace:
         """Explain one reranked candidate's rank movement and cross-encoder score."""
-        return self._rerank_explainer.explain(candidate)
+        return self._timed(lambda: self._rerank_explainer.explain(candidate))
 
     def explain_duplicate(self, verification: DuplicateVerification) -> ExplanationTrace:
         """Explain one duplicate-verification decision."""
-        return self._duplicate_explainer.explain(verification)
+        return self._timed(lambda: self._duplicate_explainer.explain(verification))
 
     def explain_recommendation(self, candidate: RecommendationCandidate) -> ExplanationTrace:
         """Explain one recommended product."""
-        return self._recommendation_explainer.explain(candidate)
+        return self._timed(lambda: self._recommendation_explainer.explain(candidate))
+
+    def _timed(self, explain: Callable[[], ExplanationTrace]) -> ExplanationTrace:
+        """Run `explain`, recording its latency, decision type, and confidence."""
+        start = time.monotonic()
+        trace = explain()
+        self._metrics.record_explanation(
+            decision_type=trace.decision_type,
+            seconds=time.monotonic() - start,
+            confidence=trace.confidence,
+        )
+        return trace
 
     def build_trace(
         self,

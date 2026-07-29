@@ -26,7 +26,9 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.exceptions.errors import RerankException
+from app.models.model_type import ModelType
 from app.services.model_manager_cross_encoder import ModelManagerCrossEncoder
+from app.services.model_registry import ModelRegistry
 
 logger = get_logger(__name__)
 
@@ -43,8 +45,13 @@ class CrossEncoderService:
         model_name: str | None = None,
         batch_size: int | None = None,
         model_manager: ModelManagerCrossEncoder | None = None,
+        model_registry: ModelRegistry | None = None,
     ) -> None:
-        self._model_name = model_name if model_name is not None else settings.reranker.model_name
+        if model_name is not None:
+            self._model_name = model_name
+        else:
+            registry = model_registry if model_registry is not None else ModelRegistry()
+            self._model_name = registry.get_active_model(ModelType.RERANKER).model_name
         self._batch_size = batch_size if batch_size is not None else settings.reranker.batch_size
         self._model_manager = (
             model_manager if model_manager is not None else ModelManagerCrossEncoder()

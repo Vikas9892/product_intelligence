@@ -19,8 +19,10 @@ from app.core import constants
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.exceptions.errors import TextEmbeddingException
+from app.models.model_type import ModelType
 from app.services.embeddings.text_base import BaseTextEmbeddingService
 from app.services.embeddings.text_model_manager import TextModelManager
+from app.services.model_registry import ModelRegistry
 
 logger = get_logger(__name__)
 
@@ -36,10 +38,13 @@ class SentenceTransformerEmbeddingService(BaseTextEmbeddingService):
         dimension: int | None = None,
         normalize: bool | None = None,
         model_manager: TextModelManager | None = None,
+        model_registry: ModelRegistry | None = None,
     ) -> None:
-        self._model_name = (
-            model_name if model_name is not None else settings.ai_models.text_model_name
-        )
+        if model_name is not None:
+            self._model_name = model_name
+        else:
+            registry = model_registry if model_registry is not None else ModelRegistry()
+            self._model_name = registry.get_active_model(ModelType.TEXT_EMBEDDING).model_name
         self._batch_size = (
             batch_size if batch_size is not None else settings.ai_models.text_batch_size
         )

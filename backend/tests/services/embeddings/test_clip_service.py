@@ -17,8 +17,12 @@ from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
 
 from app.exceptions.errors import EmbeddingGenerationException
+from app.models.model_info import ModelInfo
+from app.models.model_status import ModelStatus
+from app.models.model_type import ModelType
 from app.services.embeddings.clip_service import CLIPEmbeddingService
 from app.services.embeddings.model_manager import ModelManager
+from app.services.model_registry import ModelRegistry
 
 _TINY_MODEL_NAME = "hf-internal-testing/tiny-random-CLIPModel"
 
@@ -184,6 +188,40 @@ class TestGenerateEmbeddings:
 
         with pytest.raises(EmbeddingGenerationException):
             await service.generate_embedding(image_path)
+
+
+class TestModelRegistryResolution:
+    def test_uses_the_explicit_model_name_when_given_ignoring_the_registry(self) -> None:
+        registry = ModelRegistry(seed_from_settings=False)
+        registry.register(
+            ModelInfo(
+                model_name="registry-model",
+                version="1.0.0",
+                model_type=ModelType.IMAGE_EMBEDDING,
+                dimension=512,
+                status=ModelStatus.ACTIVE,
+            )
+        )
+
+        service = CLIPEmbeddingService(model_name="explicit-model", model_registry=registry)
+
+        assert service.model_name == "explicit-model"
+
+    def test_resolves_the_active_image_embedding_model_from_the_registry(self) -> None:
+        registry = ModelRegistry(seed_from_settings=False)
+        registry.register(
+            ModelInfo(
+                model_name="registry-clip-model",
+                version="1.0.0",
+                model_type=ModelType.IMAGE_EMBEDDING,
+                dimension=512,
+                status=ModelStatus.ACTIVE,
+            )
+        )
+
+        service = CLIPEmbeddingService(model_registry=registry)
+
+        assert service.model_name == "registry-clip-model"
 
 
 class TestRealClipEmbedding:

@@ -14,8 +14,12 @@ import pytest
 from sentence_transformers import CrossEncoder
 
 from app.exceptions.errors import RerankException
+from app.models.model_info import ModelInfo
+from app.models.model_status import ModelStatus
+from app.models.model_type import ModelType
 from app.services.cross_encoder_service import CrossEncoderService
 from app.services.model_manager_cross_encoder import ModelManagerCrossEncoder
+from app.services.model_registry import ModelRegistry
 
 _REAL_TINY_MODEL_NAME = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
 
@@ -103,6 +107,40 @@ class TestCrossEncoderServiceDefaults:
         service = CrossEncoderService(model_manager=_fake_model_manager())
 
         assert service._batch_size == 16
+
+
+class TestModelRegistryResolution:
+    def test_uses_the_explicit_model_name_when_given_ignoring_the_registry(self) -> None:
+        registry = ModelRegistry(seed_from_settings=False)
+        registry.register(
+            ModelInfo(
+                model_name="registry-model",
+                version="1.0.0",
+                model_type=ModelType.RERANKER,
+                dimension=1,
+                status=ModelStatus.ACTIVE,
+            )
+        )
+
+        service = CrossEncoderService(model_name="explicit-model", model_registry=registry)
+
+        assert service._model_name == "explicit-model"
+
+    def test_resolves_the_active_reranker_model_from_the_registry(self) -> None:
+        registry = ModelRegistry(seed_from_settings=False)
+        registry.register(
+            ModelInfo(
+                model_name="registry-reranker-model",
+                version="1.0.0",
+                model_type=ModelType.RERANKER,
+                dimension=1,
+                status=ModelStatus.ACTIVE,
+            )
+        )
+
+        service = CrossEncoderService(model_registry=registry)
+
+        assert service._model_name == "registry-reranker-model"
 
 
 class TestRealCrossEncoderScoring:

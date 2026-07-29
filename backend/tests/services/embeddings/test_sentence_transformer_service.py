@@ -15,10 +15,14 @@ import pytest
 from sentence_transformers import SentenceTransformer
 
 from app.exceptions.errors import TextEmbeddingException
+from app.models.model_info import ModelInfo
+from app.models.model_status import ModelStatus
+from app.models.model_type import ModelType
 from app.services.embeddings.sentence_transformer_service import (
     SentenceTransformerEmbeddingService,
 )
 from app.services.embeddings.text_model_manager import TextModelManager
+from app.services.model_registry import ModelRegistry
 
 _REAL_TINY_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -139,6 +143,42 @@ class TestModelNameAndDimension:
 
         assert service.dimension == 384
         assert manager.is_loaded(service.model_name) is False
+
+
+class TestModelRegistryResolution:
+    def test_uses_the_explicit_model_name_when_given_ignoring_the_registry(self) -> None:
+        registry = ModelRegistry(seed_from_settings=False)
+        registry.register(
+            ModelInfo(
+                model_name="registry-model",
+                version="1.0.0",
+                model_type=ModelType.TEXT_EMBEDDING,
+                dimension=384,
+                status=ModelStatus.ACTIVE,
+            )
+        )
+
+        service = SentenceTransformerEmbeddingService(
+            model_name="explicit-model", model_registry=registry
+        )
+
+        assert service.model_name == "explicit-model"
+
+    def test_resolves_the_active_text_embedding_model_from_the_registry(self) -> None:
+        registry = ModelRegistry(seed_from_settings=False)
+        registry.register(
+            ModelInfo(
+                model_name="registry-text-model",
+                version="1.0.0",
+                model_type=ModelType.TEXT_EMBEDDING,
+                dimension=384,
+                status=ModelStatus.ACTIVE,
+            )
+        )
+
+        service = SentenceTransformerEmbeddingService(model_registry=registry)
+
+        assert service.model_name == "registry-text-model"
 
 
 class TestRealSentenceTransformerEmbedding:

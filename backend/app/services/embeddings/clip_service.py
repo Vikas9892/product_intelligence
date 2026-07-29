@@ -18,8 +18,10 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.exceptions.errors import EmbeddingGenerationException
+from app.models.model_type import ModelType
 from app.services.embeddings.base import BaseEmbeddingService
 from app.services.embeddings.model_manager import ModelManager
+from app.services.model_registry import ModelRegistry
 
 logger = get_logger(__name__)
 
@@ -33,10 +35,13 @@ class CLIPEmbeddingService(BaseEmbeddingService):
         model_name: str | None = None,
         batch_size: int | None = None,
         model_manager: ModelManager | None = None,
+        model_registry: ModelRegistry | None = None,
     ) -> None:
-        self._model_name = (
-            model_name if model_name is not None else settings.ai_models.clip_model_name
-        )
+        if model_name is not None:
+            self._model_name = model_name
+        else:
+            registry = model_registry if model_registry is not None else ModelRegistry()
+            self._model_name = registry.get_active_model(ModelType.IMAGE_EMBEDDING).model_name
         self._batch_size = (
             batch_size if batch_size is not None else settings.ai_models.embedding_batch_size
         )

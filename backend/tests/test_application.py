@@ -13,6 +13,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from prometheus_fastapi_instrumentator.middleware import PrometheusInstrumentatorMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
@@ -44,7 +45,12 @@ _BUSINESS_ROUTE_PATHS = {
 
 # Expected middleware stack, outermost first — see
 # `app.application._register_middleware` for the full ordering rationale.
+# `PrometheusInstrumentatorMiddleware` (Phase 14, added by
+# `_register_metrics` after `_register_middleware`, and thus outermost of
+# all) sits ahead of the custom stack so its request-duration measurement
+# covers the entire request, including every middleware below it.
 _EXPECTED_MIDDLEWARE_ORDER: list[type] = [
+    PrometheusInstrumentatorMiddleware,
     TrustedHostMiddleware,
     CORSMiddleware,
     GZipMiddleware,

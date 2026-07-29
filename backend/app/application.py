@@ -18,6 +18,7 @@ as a whole.
 """
 
 from fastapi import FastAPI
+from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -30,6 +31,7 @@ from app.api.products import router as products_router
 from app.api.search import router as search_router
 from app.core import constants
 from app.core.config import settings
+from app.dependencies.metrics import get_metrics_registry
 from app.exceptions.handlers import register_exception_handlers
 from app.lifespan import lifespan
 from app.middleware.logging import RequestLoggingMiddleware
@@ -50,8 +52,37 @@ def create_app() -> FastAPI:
     _register_middleware(app)
     _register_exception_handlers(app)
     _register_routers(app)
+    _register_metrics(app)
 
     return app
+
+
+def _register_metrics(app: FastAPI) -> None:
+    """Instrument `app` for Prometheus and expose `GET /metrics` (Phase 14).
+
+    Gated on `METRICS__PROMETHEUS_ENABLED`: when off, no `/metrics`
+    endpoint is registered and no HTTP-request instrumentation is added
+    (a deployment that scrapes metrics some other way, or wants none at
+    all). `prometheus-fastapi-instrumentator` adds the standard
+    `http_request_*` series (Milestone 1's "API requests" tracking) and
+    serves them alongside every custom collector this codebase records
+    into `prometheus_client`'s process-wide default registry — the same
+    registry `MetricsRegistry` uses. `get_metrics_registry()` is called
+    here so those custom collectors exist from startup, before any
+    business request has constructed a service that would otherwise
+    register them lazily — so a `/metrics` scrape of a freshly-started,
+    idle process still lists every metric (at its zero value) rather than
+    omitting the ones nothing has touched yet. `include_in_schema=False`
+    keeps `/metrics` out of the OpenAPI docs (it's an operational
+    endpoint, not part of the business API contract), matching how the
+    unversioned health routes are treated.
+    """
+    if not settings.metrics.prometheus_enabled:
+        return
+    get_metrics_registry()
+    instrumentator = Instrumentator()
+    instrumentator.instrument(app)
+    instrumentator.expose(app, endpoint="/metrics", include_in_schema=False)
 
 
 def _register_routers(app: FastAPI) -> None:

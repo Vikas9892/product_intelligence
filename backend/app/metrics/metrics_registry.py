@@ -86,11 +86,19 @@ class MetricsRegistry:
         self._registry = registry
         #: One lazily-used synchronous Redis connection, kept open and
         #: reused across every scrape (rather than reconnecting on every
-        #: `set_function` call) — see `_poll_queue_length`.
+        #: `set_function` call) — see `_poll_queue_length`. Short socket
+        #: timeouts bound how long a single `/metrics` scrape can block
+        #: when Redis is unreachable: a scrape must fail fast (and report
+        #: `0.0` for the gauges), never hang the scraper for seconds
+        #: retrying a dead connection.
         self._sync_redis_client = (
             sync_redis_client
             if sync_redis_client is not None
-            else sync_redis.Redis.from_url(settings.async_pipeline.redis_url)
+            else sync_redis.Redis.from_url(
+                settings.async_pipeline.redis_url,
+                socket_connect_timeout=0.25,
+                socket_timeout=0.25,
+            )
         )
 
         self.product_upload_seconds = get_or_create_histogram(

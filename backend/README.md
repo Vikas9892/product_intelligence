@@ -32,11 +32,11 @@ on every machine and in CI, before a single line of business logic exists.
 
 ## Roadmap
 
-This project is planned across 20 phases. Phases 1–15 are complete and
+This project is planned across 20 phases. Phases 1–16 are complete and
 documented below (see each phase's own "design decisions" section and
 its entry under
 [How this project was created from scratch](#how-this-project-was-created-from-scratch)).
-Phases 16–20 have not been specified yet — no milestone list, config
+Phases 17–20 have not been specified yet — no milestone list, config
 keys, or scope exists for them, so they're listed here only as
 placeholders in the numbering, not as a commitment to specific future
 functionality.
@@ -59,7 +59,8 @@ functionality.
 | 13 | Model Registry & AI Lifecycle Management | Complete |
 | 14 | AI Observability & Monitoring | Complete |
 | 15 | Cross-Encoder Re-ranking & Intelligent Duplicate Verification | Complete |
-| 16–20 | Not yet specified | Planned |
+| 16 | Explainable AI & Decision Intelligence | Complete |
+| 17–20 | Not yet specified | Planned |
 
 ## Folder structure
 
@@ -3399,6 +3400,117 @@ pipeline reuses the existing reranker, model registry, and metrics
 infrastructure, and adds only the business-rules and verification layers
 on top.
 
+## Phase 16 — Explainable AI & Decision Intelligence design decisions
+
+This phase adds a centralized explanation layer: every major AI decision
+(hybrid search, cross-encoder reranking, duplicate verification,
+recommendations) can be turned into a human-readable, structured
+`ExplanationTrace`, and three trace endpoints expose those explanations
+for an already-indexed product.
+
+### The Explanation Layer Reads Decisions, Never Makes Them
+
+The single hard rule of this phase — "explanation generation must not
+affect inference results" — is enforced structurally: explainers are
+pure and read-only. Each takes a decision object a subsystem already
+produced (`HybridSearchResult`, `RerankedCandidate`,
+`DuplicateVerification`, `RecommendationCandidate`) and maps it into an
+`ExplanationTrace`, never mutating it and never re-running inference. The
+trace endpoints run the *same* by-product-id inference the platform would
+run anyway (`RecommendationEngineService.recommend`,
+`DuplicateDetectionService.detect_by_product_id`) and hand the results to
+the explainer — explaining a decision is indistinguishable, to the
+inference code, from not explaining it.
+
+### Built On Existing Reason Types
+
+The codebase already produced phase-specific reason/signal types
+(`SimilaritySignal`, `RecommendationReason`, `RerankReason`,
+`VerificationReason`). This phase does **not** rewrite them — it adds a
+general domain (`DecisionReason`, `DecisionWeight`, `ConfidenceBreakdown`,
+`ExplanationTrace`) that the explainers *map those existing outputs into*.
+`DecisionWeight` is the general-purpose successor to `SimilaritySignal`
+(its `value` isn't clamped to `[0, 1]`, so a cross-encoder logit can be
+surfaced faithfully); `DecisionReason` generalizes the various reason
+types behind one `code`+`description`+optional-`weight` shape.
+
+### Architecture
+
+```
+   HybridSearchResult ─┐
+   RerankedCandidate  ─┤
+   DuplicateVerification ─┼─►  Explainers ──►  ExplanationTrace
+   RecommendationCandidate ┘   (pure, read-only)   (summary + reasons +
+                                    │               ConfidenceBreakdown)
+                                    ▼
+                            ExplanationService  ──►  trace endpoints
+                            (facade + metrics)
+```
+
+`BaseExplainer[T]` is a generic interface (PEP 695 syntax) so each
+concrete explainer is fully typed against exactly the decision it
+explains; `ExplanationService` composes all four behind `explain_*`
+methods and is the single seam the routes depend on. `ExplanationBuilder`
+owns the pure presentation work — weight math (`contribution = value ·
+weight`) and Oxford-comma natural-language summaries — so no explainer
+re-implements phrasing.
+
+### Decision Flow (GET /products/{id}/explanations)
+
+```
+Client ─► product_explanations (router)
+             │
+             ├─► DuplicateDetectionService.detect_by_product_id ─► DuplicateDecision
+             │        └─► decision_to_verification ─► DuplicateVerification
+             │                 └─► ExplanationService.explain_duplicate ─► trace
+             │
+             └─► RecommendationEngineService.recommend ─► [RecommendationCandidate]
+                      └─► ExplanationService.explain_recommendation (each) ─► [trace]
+                                    │
+                                    ▼
+                      ProductExplanationsResponse
+                      {duplicate: trace, recommendations: [trace…]}
+```
+
+### The Endpoints
+
+- `GET /recommendations/{product_id}/trace` — one explanation trace per
+  recommended product (its "decision timeline").
+- `GET /duplicates/{product_id}/trace` — the product's duplicate-decision
+  trace (reuses `decision_to_verification`, the adapter extracted from
+  Phase 15, so an already-indexed product's weighted `DuplicateDecision`
+  is explained through the same `DuplicateExplainer`).
+- `GET /products/{product_id}/explanations` — both combined into one
+  explanation tree.
+
+All three are read-only `GET`s, additive (no existing endpoint changed),
+and each `ExplanationResponse` carries the natural-language `summary`, the
+structured `reasons` tree, the `ConfidenceBreakdown` score accounting, and
+a `created_at` timestamp.
+
+### Metrics (Phase 14 integration)
+
+`ExplanationService` records three metrics through the existing
+`MetricsRegistry`: `explanation_seconds` (build latency),
+`explanations_total{decision_type=…}` (generation count + decision-type
+distribution), and `explanation_confidence` (confidence distribution, for
+the average-confidence view). Every `explain_*` call is timed and
+recorded.
+
+### Configuration
+
+No new settings this phase — the explanation layer has nothing to
+configure. It reuses the existing services, the Phase 13 model registry,
+and the Phase 14 metrics registry, adding only read-only endpoints and
+the explanation domain.
+
+### Explicitly out of scope this phase
+
+Explanations for pricing intelligence are deferred to the (future)
+pricing phase — the explainers are built so a `PriceEstimateExplainer`
+slots in the same way. No rewrite of any existing reason/signal type, no
+change to any inference path.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -4945,5 +5057,80 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "feat: add duplicate-verification metrics and document Phase 15 (Phase 15 milestone 6/6)"
+git push
+```
+
+## Phase 16 — Explainable AI & Decision Intelligence (built from scratch)
+
+Built *on top of* the existing reason/signal types (see the
+design-decisions section above) — the explanation layer maps them, it
+never rewrites them.
+
+```bash
+# Milestone 1/6 — explanation domain + service
+#   app/models/decision_reason.py, decision_weight.py, confidence_breakdown.py,
+#   explanation_trace.py — the general explanation domain
+#   app/services/explanations/base_explainer.py (generic BaseExplainer[T]),
+#   explanation_builder.py (pure weight math + Oxford-comma summaries),
+#   explanation_service.py (facade, optional MetricsRegistry)
+#   app/schemas/explanation.py — ExplanationResponse; app/dependencies/explanations.py
+#   tests/models/, tests/services/explanations/, tests/dependencies/, tests/schemas/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add explanation domain and service (Phase 16 milestone 1/6)"
+
+# Milestone 2/6 — search & reranking explanations
+#   app/services/explanations/hybrid_search_explainer.py — image/text -> final
+#   score contributions; rerank_explainer.py — initial rank -> CE score -> final rank
+#   tests/services/explanations/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add hybrid-search and reranking explainers (Phase 16 milestone 2/6)"
+
+# Milestone 3/6 — duplicate & recommendation explanations
+#   app/services/explanations/duplicate_explainer.py — maps a DuplicateVerification's
+#   CE score, retrieval similarity, and business-rule reasons into a trace
+#   recommendation_explainer.py — maps shared brand/category/attributes/tags + scores
+#   tests/services/explanations/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add duplicate and recommendation explainers (Phase 16 milestone 3/6)"
+
+# Milestone 4/6 — decision-trace API
+#   app/services/explanations/explanation_service.py — composes all four explainers
+#   behind explain_* methods
+#   app/services/duplicate/duplicate_check_service.py — decision_to_verification made public
+#   app/dependencies/duplicate.py — get_duplicate_detection_service provider
+#   app/schemas/explanation.py — TraceBundleResponse/ProductExplanationsResponse
+#   app/api/explanations.py — GET /recommendations/{id}/trace, /duplicates/{id}/trace,
+#   /products/{id}/explanations
+#   app/application.py — explanations_router registered
+#   tests/api/test_explanations.py, tests/test_application.py — extended
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add decision-trace API (Phase 16 milestone 4/6)"
+
+# Milestone 5/6 — explanation metrics
+#   app/metrics/metric_names.py, metrics_registry.py — explanation_seconds,
+#   explanations_total (per decision_type), explanation_confidence
+#   app/services/explanations/explanation_service.py — every explain_* call is timed + recorded
+#   tests/metrics/, tests/services/explanations/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add explanation metrics (Phase 16 milestone 5/6)"
+
+# Milestone 6/6 — tests + documentation
+#   Coverage audit; backend/README.md — this section, the Phase 16 design-decisions
+#   section (architecture + decision flow + sequence), and the Roadmap update
+#   (Phases 1-16 complete, 17-20 not yet specified)
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden explanation coverage and document Phase 16 (Phase 16 milestone 6/6)"
 git push
 ```

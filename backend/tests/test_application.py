@@ -37,6 +37,9 @@ _BUSINESS_ROUTE_PATHS = {
     f"{settings.application.api_prefix}/evaluation/compare-reranking",
     f"{settings.application.api_prefix}/jobs/{{job_id}}",
     f"{settings.application.api_prefix}/jobs/dead-letter",
+    f"{settings.application.api_prefix}/models",
+    f"{settings.application.api_prefix}/models/{{type}}",
+    f"{settings.application.api_prefix}/models/{{type}}/active",
 }
 
 # Expected middleware stack, outermost first — see

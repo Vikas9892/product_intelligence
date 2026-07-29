@@ -134,10 +134,10 @@ class DuplicateCheckService:
             top_k=top_k,
             threshold=threshold,
         )
-        return _decision_to_verification(decision)
+        return decision_to_verification(decision)
 
 
-def _decision_to_verification(decision: DuplicateDecision) -> DuplicateVerification:
+def decision_to_verification(decision: DuplicateDecision) -> DuplicateVerification:
     """Adapt a weighted-similarity `DuplicateDecision` into the unified `DuplicateVerification` shape.
 
     `cross_encoder_score`/`retrieval_similarity` are `None` — the weighted

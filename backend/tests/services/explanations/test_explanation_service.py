@@ -1,9 +1,67 @@
 """Unit tests for `ExplanationService`."""
 
+from uuid import uuid4
+
 from app.models.confidence_breakdown import ConfidenceBreakdown
 from app.models.decision_reason import DecisionReason
 from app.models.decision_weight import DecisionWeight
+from app.models.duplicate_verification import DuplicateVerification
+from app.models.recommendation_candidate import RecommendationCandidate
+from app.models.recommendation_reason import RecommendationReason
+from app.models.rerank_reason import RerankReason
+from app.models.reranked_candidate import RerankedCandidate
+from app.models.search import HybridSearchResult, SearchModality
 from app.services.explanations.explanation_service import ExplanationService
+
+
+class TestExplainDelegators:
+    def test_explain_hybrid_search(self) -> None:
+        result = HybridSearchResult(
+            product_id=uuid4(),
+            score=0.9,
+            metadata={},
+            matched_modalities=[SearchModality.TEXT],
+            image_score=0.8,
+            text_score=0.7,
+        )
+
+        trace = ExplanationService().explain_hybrid_search(result)
+
+        assert trace.decision_type == "hybrid_search"
+
+    def test_explain_rerank(self) -> None:
+        candidate = RerankedCandidate(
+            product_id=uuid4(),
+            original_score=0.5,
+            rerank_score=0.9,
+            final_rank=1,
+            metadata={},
+            reason=RerankReason(original_rank=3, final_rank=1, rank_delta=2),
+        )
+
+        trace = ExplanationService().explain_rerank(candidate)
+
+        assert trace.decision_type == "reranking"
+
+    def test_explain_duplicate(self) -> None:
+        verification = DuplicateVerification(is_duplicate=True, confidence=0.9)
+
+        trace = ExplanationService().explain_duplicate(verification)
+
+        assert trace.decision_type == "duplicate"
+
+    def test_explain_recommendation(self) -> None:
+        candidate = RecommendationCandidate(
+            product_id=uuid4(),
+            similarity_score=0.9,
+            quality_score=0.8,
+            final_score=0.88,
+            reason=RecommendationReason(shared_brand=True),
+        )
+
+        trace = ExplanationService().explain_recommendation(candidate)
+
+        assert trace.decision_type == "recommendation"
 
 
 class TestBuildTrace:

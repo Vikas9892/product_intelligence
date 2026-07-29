@@ -17,6 +17,7 @@ singleton, consumed by `DuplicateCheckService` when
 from functools import lru_cache
 
 from app.services.duplicate.duplicate_check_service import DuplicateCheckService
+from app.services.duplicate.duplicate_detection_service import DuplicateDetectionService
 from app.services.duplicate.duplicate_verification_service import DuplicateVerificationService
 
 
@@ -24,6 +25,19 @@ from app.services.duplicate.duplicate_verification_service import DuplicateVerif
 def get_duplicate_check_service() -> DuplicateCheckService:
     """Return the process-wide DuplicateCheckService singleton, building it on first call."""
     return DuplicateCheckService()
+
+
+@lru_cache(maxsize=1)
+def get_duplicate_detection_service() -> DuplicateDetectionService:
+    """Return the process-wide DuplicateDetectionService singleton, building it on first call.
+
+    Used directly by the decision-trace API (Phase 16) to explain an
+    already-indexed product's duplicate decision via
+    `detect_by_product_id`; the upload/check flows compose their own
+    `DuplicateDetectionService` internally rather than through this
+    provider.
+    """
+    return DuplicateDetectionService()
 
 
 @lru_cache(maxsize=1)

@@ -86,3 +86,29 @@ class ExplanationResponse(BaseModel):
             ),
             created_at=trace.created_at,
         )
+
+
+class TraceBundleResponse(BaseModel):
+    """A subject's ordered list of explanation traces (its "decision timeline").
+
+    Used by `GET /recommendations/{id}/trace` — one `traces` entry per
+    recommended product, newest decision first as produced by the engine.
+    """
+
+    subject_id: str
+    count: int
+    traces: list[ExplanationResponse] = Field(default_factory=list)
+
+
+class ProductExplanationsResponse(BaseModel):
+    """Aggregate explanation tree for one product (`GET /products/{id}/explanations`).
+
+    Combines the product's duplicate-decision trace (`duplicate`, `None`
+    when nothing to report) and its recommendation traces
+    (`recommendations`) into one view — the full "why the platform decided
+    what it did about this product."
+    """
+
+    product_id: str
+    duplicate: ExplanationResponse | None = None
+    recommendations: list[ExplanationResponse] = Field(default_factory=list)

@@ -45,6 +45,7 @@ from app.jobs.base_job import Job
 from app.jobs.job_result import JobResult
 from app.jobs.job_status import JobStatus
 from app.jobs.job_types import JobType
+from app.metrics.metrics_registry import MetricsRegistry
 from app.models.recommendation_type import RecommendationType
 from app.queue.queue_manager import QueueManager
 from app.repositories.recommendation_cache_repository import RecommendationCacheRepository
@@ -79,6 +80,7 @@ class ProductWorker:
         product_service: ProductService | None = None,
         recommendation_engine_service: RecommendationEngineService | None = None,
         recommendation_cache_repository: RecommendationCacheRepository | None = None,
+        metrics_registry: MetricsRegistry | None = None,
     ) -> None:
         self._queue_manager = queue_manager if queue_manager is not None else QueueManager()
         self._product_service = product_service if product_service is not None else ProductService()
@@ -92,6 +94,7 @@ class ProductWorker:
             if recommendation_cache_repository is not None
             else RecommendationCacheRepository()
         )
+        self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
     async def process_one(self) -> bool:
         """Dequeue and fully process (at most) one job.
@@ -179,6 +182,7 @@ class ProductWorker:
         ]
         await self._queue_manager.update(job)
         await self._queue_manager.ack(job)
+        self._metrics.record_worker_job(status="success", seconds=duration)
         logger.info(
             "Worker completed job: job_id=%s, product_id=%s, attempt=%d, duration=%.4fs",
             job.job_id,
@@ -199,6 +203,7 @@ class ProductWorker:
                 completed_at=datetime.now(UTC),
             ),
         ]
+        self._metrics.record_worker_job(status="failure", seconds=duration)
         logger.warning(
             "Worker failed to process job: job_id=%s, product_id=%s, attempt=%d, error=%s",
             job.job_id,

@@ -15,9 +15,11 @@ from uuid import UUID, uuid4
 
 import fakeredis
 from fakeredis import aioredis as fake_aioredis
+from prometheus_client import CollectorRegistry
 
 from app.jobs.base_job import Job
 from app.jobs.job_status import JobStatus
+from app.metrics.metrics_registry import MetricsRegistry
 from app.models.catalog_intelligence_result import CatalogIntelligenceResult
 from app.models.duplicate_decision import DuplicateDecision
 from app.models.embedding import ImageEmbedding
@@ -182,6 +184,7 @@ def _worker(
     product_service: ProductService | None = None,
     recommendation_engine_service: RecommendationEngineService | None = None,
     recommendation_cache_repository: RecommendationCacheRepository | None = None,
+    metrics_registry: MetricsRegistry | None = None,
 ) -> ProductWorker:
     return ProductWorker(
         queue_manager=queue_manager,
@@ -198,6 +201,7 @@ def _worker(
                 redis_client=fake_aioredis.FakeRedis(decode_responses=True)
             )
         ),
+        metrics_registry=metrics_registry,
     )
 
 
@@ -279,6 +283,52 @@ class TestSuccessfulProcessing:
         stored = await queue_manager.get(job.job_id)
         assert stored is not None
         assert stored.status is JobStatus.COMPLETED
+
+
+class TestMetrics:
+    async def test_records_a_successful_job(self) -> None:
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        job, queue_manager = _job()
+        await queue_manager.enqueue(job)
+        worker = _worker(
+            queue_manager=queue_manager,
+            product_service=_FakeProductService(product=_product(job.product_id)),
+            metrics_registry=metrics,
+        )
+
+        await worker.process_one()
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_worker_jobs_total", {"status": "success"}
+            )
+            == 1.0
+        )
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_worker_job_duration_seconds_count"
+            )
+            == 1.0
+        )
+
+    async def test_records_a_failed_job(self) -> None:
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        job, queue_manager = _job()
+        await queue_manager.enqueue(job)
+        worker = _worker(
+            queue_manager=queue_manager,
+            product_service=_FakeProductService(error=RuntimeError("boom")),
+            metrics_registry=metrics,
+        )
+
+        await worker.process_one()
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_worker_jobs_total", {"status": "failure"}
+            )
+            == 1.0
+        )
 
 
 class TestFailureAndRetry:

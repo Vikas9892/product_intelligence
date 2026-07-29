@@ -13,6 +13,7 @@ from app.core.settings import (
     DuplicateDetectionSettings,
     EvaluationSettings,
     HybridSearchSettings,
+    MetricsSettings,
     RecommendationSettings,
     RerankerSettings,
     SecuritySettings,
@@ -268,6 +269,16 @@ class TestAsyncPipelineSettings:
     def test_rejects_a_non_positive_worker_concurrency(self) -> None:
         with pytest.raises(ValidationError):
             AsyncPipelineSettings(worker_concurrency=0)
+
+
+class TestMetricsSettings:
+    def test_defaults(self) -> None:
+        settings = MetricsSettings()
+
+        assert settings.enabled is True
+        assert settings.prometheus_enabled is True
+        assert settings.health_endpoints_enabled is True
+        assert settings.namespace == "product_intelligence"
 
 
 class TestSecuritySettings:

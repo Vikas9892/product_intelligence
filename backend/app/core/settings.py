@@ -328,6 +328,31 @@ class AsyncPipelineSettings(BaseModel):
     job_timeout_seconds: float = Field(default=300.0, gt=0)
 
 
+class MetricsSettings(BaseModel):
+    """Observability configuration for the metrics/health layer (Phase 14).
+
+    `enabled` gates whether any of this phase's instrumentation records
+    metrics at all — every call site checks this once (see
+    `MetricsRegistry`'s own docstring) rather than each of the dozen+
+    instrumented services re-reading settings individually.
+    `prometheus_enabled` separately gates only the `GET /metrics` HTTP
+    endpoint (`enabled=True, prometheus_enabled=False` still records
+    metrics in-process, just doesn't expose them — e.g. for a deployment
+    that scrapes metrics some other way). `health_endpoints_enabled`
+    gates `GET /system/health`/`GET /system/stats` independently of
+    both, since a health check has nothing to do with whether metrics
+    are being recorded. `namespace` is the prefix prepended to every
+    metric name (`prometheus_client`'s own `namespace=` constructor
+    argument) — `product_upload_seconds` becomes
+    `product_intelligence_product_upload_seconds`.
+    """
+
+    enabled: bool = True
+    prometheus_enabled: bool = True
+    health_endpoints_enabled: bool = True
+    namespace: str = "product_intelligence"
+
+
 class StorageSettings(BaseModel):
     """Local/object storage for uploaded product assets."""
 
@@ -398,6 +423,7 @@ class Settings(BaseSettings):
     evaluation: EvaluationSettings = Field(default_factory=EvaluationSettings)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
     async_pipeline: AsyncPipelineSettings = Field(default_factory=AsyncPipelineSettings)
+    metrics: MetricsSettings = Field(default_factory=MetricsSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

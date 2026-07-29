@@ -138,6 +138,7 @@ class DuplicateVerificationService:
         logger.info("Verification candidate retrieval complete: candidates=%d", len(candidates))
 
         if not candidates:
+            self._metrics.record_duplicate_verification(confidence=None, is_duplicate=False)
             return DuplicateVerification(
                 is_duplicate=False,
                 confidence=0.0,
@@ -212,6 +213,9 @@ class DuplicateVerificationService:
             ],
         )
 
+        self._metrics.record_duplicate_verification(
+            confidence=cross_encoder_score, is_duplicate=is_duplicate
+        )
         logger.info(
             "Duplicate verification complete: is_duplicate=%s, confidence=%.2f, "
             "cross_encoder_score=%.2f, business_score=%.2f, veto=%s, candidates=%d, "

@@ -10,8 +10,10 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from prometheus_client import CollectorRegistry
 
 from app.exceptions.errors import DuplicateVerificationException, RerankException
+from app.metrics.metrics_registry import MetricsRegistry
 from app.models.product_attributes import ProductAttributes
 from app.models.rerank_reason import RerankReason
 from app.models.rerank_result import RerankResult
@@ -113,6 +115,7 @@ def _service(
     cross_encoder_threshold: float = 0.95,
     cross_encoder_weight: float = 1.0,
     business_rules_weight: float = 0.0,
+    metrics_registry: MetricsRegistry | None = None,
 ) -> DuplicateVerificationService:
     # Weights default to 1.0/0.0 so the reranking-focused tests assert
     # `confidence == cross_encoder_score` cleanly; the business-rules
@@ -128,6 +131,7 @@ def _service(
         cross_encoder_threshold=cross_encoder_threshold,
         cross_encoder_weight=cross_encoder_weight,
         business_rules_weight=business_rules_weight,
+        metrics_registry=metrics_registry,
     )
 
 
@@ -323,3 +327,51 @@ class TestBusinessRulesCombination:
         assert verification.cross_encoder_score == 0.99
         assert verification.is_duplicate is False
         assert "brand_mismatch" in {r.code for r in verification.reasons}
+
+
+class TestMetrics:
+    async def test_records_confidence_and_decision(self) -> None:
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        product_id = uuid4()
+        service = _service(
+            hybrid_search_service=_FakeHybridSearchService(results=[_hybrid_result(product_id)]),
+            reranker=_FakeReranker(scores={product_id: 0.96}),
+            cross_encoder_threshold=0.95,
+            metrics_registry=metrics,
+        )
+
+        await service.verify(
+            name="Widget", brand=None, category=None, description=None, image=_image()
+        )
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_duplicate_verification_confidence_count"
+            )
+            == 1.0
+        )
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_duplicate_verification_decisions_total",
+                {"decision": "duplicate"},
+            )
+            == 1.0
+        )
+
+    async def test_counts_the_decision_even_with_no_candidates(self) -> None:
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        service = _service(
+            hybrid_search_service=_FakeHybridSearchService(results=[]), metrics_registry=metrics
+        )
+
+        await service.verify(
+            name="Widget", brand=None, category=None, description=None, image=_image()
+        )
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_duplicate_verification_decisions_total",
+                {"decision": "not_duplicate"},
+            )
+            == 1.0
+        )

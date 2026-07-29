@@ -190,6 +190,19 @@ class MetricsRegistry:
             namespace=self._namespace,
             registry=self._registry,
         )
+        self.duplicate_verification_confidence = get_or_create_histogram(
+            metric_names.DUPLICATE_VERIFICATION_CONFIDENCE,
+            "Cross-encoder confidence of the best candidate per duplicate-verification check.",
+            namespace=self._namespace,
+            registry=self._registry,
+        )
+        self.duplicate_verification_decisions_total = get_or_create_counter(
+            metric_names.DUPLICATE_VERIFICATION_DECISIONS_TOTAL,
+            "Duplicate-verification decisions, per outcome.",
+            ["decision"],
+            namespace=self._namespace,
+            registry=self._registry,
+        )
 
         self.queue_depth.set_function(lambda: self._poll_queue_length("pending", llen=True))
         self.worker_jobs_running.set_function(
@@ -247,6 +260,23 @@ class MetricsRegistry:
             return
         self.worker_jobs_total.labels(status=status).inc()
         self.worker_job_duration_seconds.observe(seconds)
+
+    def record_duplicate_verification(
+        self, *, confidence: float | None, is_duplicate: bool
+    ) -> None:
+        """Record one duplicate-verification check's cross-encoder confidence and decision (Phase 15).
+
+        `confidence` is the best candidate's cross-encoder score — `None`
+        when no candidate was retrieved to score (the confidence
+        histogram then gets no sample, but the decision is still counted).
+        """
+        if not self._enabled:
+            return
+        if confidence is not None:
+            self.duplicate_verification_confidence.observe(confidence)
+        self.duplicate_verification_decisions_total.labels(
+            decision="duplicate" if is_duplicate else "not_duplicate"
+        ).inc()
 
     def _poll_queue_length(self, key_suffix: str, *, llen: bool) -> float:
         """Synchronously read the current length of `{queue_name}:{key_suffix}` from Redis.

@@ -32,11 +32,11 @@ on every machine and in CI, before a single line of business logic exists.
 
 ## Roadmap
 
-This project is planned across 20 phases. Phases 1–14 are complete and
+This project is planned across 20 phases. Phases 1–15 are complete and
 documented below (see each phase's own "design decisions" section and
 its entry under
 [How this project was created from scratch](#how-this-project-was-created-from-scratch)).
-Phases 15–20 have not been specified yet — no milestone list, config
+Phases 16–20 have not been specified yet — no milestone list, config
 keys, or scope exists for them, so they're listed here only as
 placeholders in the numbering, not as a commitment to specific future
 functionality.
@@ -58,7 +58,8 @@ functionality.
 | 12 | Asynchronous AI Processing Pipeline | Complete |
 | 13 | Model Registry & AI Lifecycle Management | Complete |
 | 14 | AI Observability & Monitoring | Complete |
-| 15–20 | Not yet specified | Planned |
+| 15 | Cross-Encoder Re-ranking & Intelligent Duplicate Verification | Complete |
+| 16–20 | Not yet specified | Planned |
 
 ## Folder structure
 
@@ -3213,6 +3214,191 @@ OpenTelemetry collectors, or CloudWatch — matching the phase spec's own
 "Do NOT Implement" list. The implementation stays focused on
 Prometheus-compatible metrics and health reporting, nothing more.
 
+## Phase 15 — Cross-Encoder Re-ranking & Intelligent Duplicate Verification design decisions
+
+This phase upgrades duplicate detection from embedding-only retrieval to
+a production-grade pipeline: after vector retrieval, a cross-encoder
+reranks the candidates, then explicit business rules validate the best
+match, producing an explainable duplicate confidence — exactly how many
+real search/ranking systems work.
+
+### Built On, Not Instead Of, Phase 11
+
+Cross-encoder reranking already existed in this codebase (Phase 11:
+`BaseReranker`/`RerankerService`/`CrossEncoderService`/
+`ModelManagerCrossEncoder`, wired through the model registry in Phase 13
+and metered in Phase 14). Phase 15's spec described a "current pipeline"
+with no reranking and asked for a fresh `app/services/reranking/` package
+— but re-creating those components would have duplicated working, tested
+code and violated the phase's own "never rewrite completed phases /
+continue existing architecture" rules. So this phase **composes** the
+existing reranking infrastructure and adds only what was genuinely new:
+warm-up inference, an explainable business-rules layer, a verification
+orchestrator, the richer API response, and two new metrics.
+
+### Architecture
+
+```
+                     Upload
+                        │
+                 Image/Text
+                        │
+                  Embeddings (CLIP / BGE)
+                        │
+                     Qdrant  (top-K retrieval, reranking off)
+                        │
+              Cross-Encoder Reranker  (RerankerService, Phase 11)
+                        │
+              Business Validation  (BusinessRulesEvaluator: brand,
+                        │            category, price, title, attributes)
+              Duplicate Confidence  (weighted blend + hard-gate veto)
+                        │
+                 DuplicateVerification  ->  check-duplicate response
+```
+
+### Sequence (POST /products/check-duplicate, verification enabled)
+
+```
+Client ─► check_duplicate (router)
+             │
+             ▼
+        UploadService.save_upload            (validate + store the image)
+             │
+             ▼
+        DuplicateCheckService.check
+             │  image processing + catalog intelligence (for attributes)
+             ▼
+        DuplicateVerificationService.verify
+             │  1. HybridSearchService.search (reranking_enabled=False)
+             │  2. RerankerService.rerank      → cross_encoder_score per candidate
+             │  3. BusinessRulesEvaluator.evaluate(best candidate)
+             │  4. confidence = w_ce·CE + w_br·business ; veto overrides
+             ▼
+        DuplicateVerification ──► DuplicateCheckResponse
+        (duplicate, confidence, cross_encoder_score,
+         retrieval_similarity, reasons[…])
+```
+
+### Why a Separate Verification Service
+
+`DuplicateVerificationService` is new and distinct from Phase 8's
+`DuplicateDetectionService` (which is left **unchanged** and still powers
+upload-time WARN/BLOCK). The two have genuinely different output
+contracts: detection produces a single *weighted* `DuplicateDecision`;
+verification produces an *explainable* `DuplicateVerification` that
+separates the cross-encoder signal from the raw retrieval signal and
+lists human-readable reasons. Verification retrieves with reranking
+*off* and runs its own explicit rerank pass, so the same candidates are
+never scored by the cross-encoder twice — the exact reasoning
+`DuplicateDetectionService` already documents for its own rerank step.
+
+### Business Rules & the Hard-Gate Veto
+
+`BusinessRulesEvaluator` is a pure, stateless component (no retrieval, no
+model inference — like `SimilarityScorer`) that compares the checked
+product against the best candidate on five rules: **brand** (exact,
+normalized), **category** (fuzzy, `token_sort_ratio` ≥ 0.90, since a
+stored slug is compared against a natural-language submission),
+**price** (within `MAX_PRICE_DIFFERENCE_RATIO`), **title** (fuzzy ≥
+`TITLE_SIMILARITY_THRESHOLD`), and **attribute overlap** (color/material/
+gender/style). It returns a normalized `[0, 1]` score (fraction of
+*applicable* rules satisfied — rules with data missing on either side are
+skipped, not counted against), a list of `VerificationReason`s, and a
+`veto` flag.
+
+The final decision blends the two signals —
+`confidence = CROSS_ENCODER_WEIGHT · cross_encoder_score +
+BUSINESS_RULES_WEIGHT · business_score` — but `is_duplicate` also
+requires the cross-encoder score to clear `CROSS_ENCODER_THRESHOLD`
+**and** no configured hard gate to be violated. `REQUIRE_SAME_BRAND` /
+`REQUIRE_SAME_CATEGORY` are those hard gates: when set, a brand/category
+mismatch **vetoes** the duplicate verdict outright, no matter how
+confident the cross-encoder is — the phase's own "`cross_encoder > 0.95`
+AND brand same AND category same" example made absolute.
+
+### Warm-Up Inference
+
+`ModelManagerCrossEncoder` gained an optional warm-up
+(`RERANKER__WARMUP_ENABLED`): immediately after the model is first loaded
+(inside the load lock, so exactly once per model), it runs one throwaway
+`predict` so the *first real* rerank request doesn't pay the transformer
+cold-start cost (lazy CUDA-kernel compilation / graph construction).
+Warm-up is non-fatal — a failure is logged and swallowed, leaving the
+successfully-loaded model cached — and off by default, since forcing an
+inference at load time on a CPU-only dev box is pure wasted latency
+there; a GPU deployment that cares about first-request tail latency turns
+it on.
+
+### API: Backward Compatible
+
+`DuplicateCheckService.check` now returns a unified `DuplicateVerification`
+regardless of backend: when `DUPLICATE_VERIFICATION__ENABLED` is off (the
+default) it delegates to the weighted `DuplicateDetectionService` and
+adapts the decision into that shape with `cross_encoder_score`/
+`retrieval_similarity` left `None`; when on, it runs the verification
+pipeline. The `DuplicateCheckResponse` gains `cross_encoder_score`,
+`retrieval_similarity`, and a human-readable `reasons` list, plus an
+optional `price` form field feeding the price rule — but **every
+pre-Phase-15 field keeps its exact meaning**, so existing clients are
+unaffected (the new fields are simply `null`/empty when verification is
+off).
+
+### Metrics (Phase 14 integration)
+
+`DuplicateVerificationService` records two new Prometheus metrics through
+the existing `MetricsRegistry` (rerank latency/failures were already
+tracked in Phase 14 via `RerankerService`):
+
+- `duplicate_verification_confidence` (histogram) — the cross-encoder
+  confidence distribution of the best candidate per check.
+- `duplicate_verification_decisions_total{decision="duplicate"|"not_duplicate"}`
+  (counter) — the duplicate-decision distribution.
+
+Grafana/alerting ideas: watch the confidence histogram's quantiles drift
+(a model swap or catalog shift), and alert if the `duplicate` fraction of
+decisions spikes (a mis-tuned threshold flagging everything).
+
+### Configuration
+
+New settings under `DuplicateVerificationSettings` (env prefix
+`DUPLICATE_VERIFICATION__`) plus one addition to `RerankerSettings`:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `DUPLICATE_VERIFICATION__ENABLED` | `false` | Master switch — off keeps the weighted-similarity endpoint behavior |
+| `DUPLICATE_VERIFICATION__CROSS_ENCODER_THRESHOLD` | `0.95` | Minimum cross-encoder score to be eligible as a duplicate |
+| `DUPLICATE_VERIFICATION__REQUIRE_SAME_BRAND` | `false` | Hard gate: a brand mismatch vetoes the verdict |
+| `DUPLICATE_VERIFICATION__REQUIRE_SAME_CATEGORY` | `false` | Hard gate: a category mismatch vetoes the verdict |
+| `DUPLICATE_VERIFICATION__MAX_PRICE_DIFFERENCE_RATIO` | `0.25` | Price tolerance for the "close price" signal |
+| `DUPLICATE_VERIFICATION__CROSS_ENCODER_WEIGHT` | `0.7` | Confidence blend weight (with business weight, sums to 1.0) |
+| `DUPLICATE_VERIFICATION__BUSINESS_RULES_WEIGHT` | `0.3` | Confidence blend weight |
+| `DUPLICATE_VERIFICATION__TITLE_SIMILARITY_THRESHOLD` | `0.85` | Fuzzy name-overlap ratio for the "title similarity" signal |
+| `RERANKER__WARMUP_ENABLED` | `false` | Run one warm-up inference after the cross-encoder first loads |
+
+Like `RERANKER__ENABLED`, verification defaults **off** because turning
+it on runs a real cross-encoder model on every check — defaulting it on
+would break this project's zero-config-runs-locally promise the first
+time the endpoint is hit without the model downloaded.
+
+### Benchmark: Before / After Reranking
+
+Reranking's retrieval-quality impact is measured by the Phase 11
+evaluation framework, not re-implemented here:
+`POST /api/v1/evaluation/compare-reranking` runs the configured dataset
+once with reranking off and once on, returning both metric sets plus the
+per-metric deltas (e.g. `MRR: before 0.81, after 0.90`); the same numbers
+render in `scripts/benchmark.py`'s Markdown report. Phase 13's
+`BenchmarkReport.models` records which model produced each run, so a
+future reranker swap stays comparable.
+
+### Explicitly out of scope this phase
+
+No new reranking package duplicating Phase 11, no rewrite of
+`DuplicateDetectionService`, no placeholder/TODO code. The verification
+pipeline reuses the existing reranker, model registry, and metrics
+infrastructure, and adds only the business-rules and verification layers
+on top.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -4676,5 +4862,88 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden observability test coverage and document Phase 14 (Phase 14 milestone 6/6)"
+git push
+```
+
+## Phase 15 — Cross-Encoder Re-ranking & Intelligent Duplicate Verification (built from scratch)
+
+Built *on top of* the existing Phase 11 reranking infrastructure (see the
+design-decisions section above for why the spec's requested fresh
+`app/services/reranking/` package was intentionally not created).
+
+```bash
+# Milestone 1/6 — verification domain + config
+#   app/models/verification_reason.py — VerificationReason (code + human message)
+#   app/models/duplicate_verification.py — DuplicateVerification (is_duplicate,
+#   confidence, cross_encoder_score, retrieval_similarity, matched_product, reasons)
+#   app/core/settings.py — DuplicateVerificationSettings (enabled/thresholds/
+#   hard gates/blend weights, weights validated to sum to 1.0)
+#   app/exceptions/errors.py — added DuplicateVerificationException
+#   backend/.env.example — documented the eight new DUPLICATE_VERIFICATION__ vars
+#   tests/models/, tests/core/test_settings.py
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add duplicate verification domain and config (Phase 15 milestone 1/6)"
+
+# Milestone 2/6 — cross-encoder warm-up inference
+#   app/services/model_manager_cross_encoder.py — one throwaway inference after
+#   first load (inside the lock, exactly once), non-fatal, gated by
+#   RERANKER__WARMUP_ENABLED
+#   app/core/settings.py — added RerankerSettings.warmup_enabled
+#   tests/services/test_model_manager_cross_encoder.py — extended
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add cross-encoder warm-up inference (Phase 15 milestone 2/6)"
+
+# Milestone 3/6 — reranking pipeline (confidence)
+#   app/services/duplicate/duplicate_verification_service.py — composes
+#   HybridSearchService + RerankerService: retrieval (reranking off) -> rerank ->
+#   cross_encoder_score/retrieval_similarity/threshold-based is_duplicate
+#   app/dependencies/duplicate.py — added get_duplicate_verification_service
+#   tests/services/duplicate/test_duplicate_verification_service.py,
+#   tests/dependencies/test_duplicate.py
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add duplicate verification reranking pipeline (Phase 15 milestone 3/6)"
+
+# Milestone 4/6 — business-rules verification
+#   app/services/duplicate/business_rules_evaluator.py — BusinessRulesEvaluator
+#   (brand/category/price/title/attribute overlap -> score + veto + reasons)
+#   app/services/duplicate/duplicate_verification_service.py — blends cross-encoder
+#   + business score into confidence; hard-gate veto overrides is_duplicate
+#   tests/services/duplicate/test_business_rules_evaluator.py + extended verification tests
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add business-rules duplicate verification (Phase 15 milestone 4/6)"
+
+# Milestone 5/6 — API integration
+#   app/services/duplicate/duplicate_check_service.py — returns a unified
+#   DuplicateVerification; delegates to verification when enabled, else adapts the
+#   weighted DuplicateDecision into that shape
+#   app/schemas/duplicate.py — DuplicateCheckResponse gained cross_encoder_score/
+#   retrieval_similarity/reasons (backward compatible)
+#   app/api/products.py — check-duplicate maps the new fields; added optional price form field
+#   tests/services/duplicate/test_duplicate_check_service.py, tests/api/test_check_duplicate.py
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: expose cross-encoder verification in check-duplicate API (Phase 15 milestone 5/6)"
+
+# Milestone 6/6 — metrics + documentation
+#   app/metrics/metric_names.py, metrics_registry.py — duplicate_verification_confidence
+#   (histogram) + duplicate_verification_decisions_total (counter); recorded by
+#   DuplicateVerificationService
+#   tests/metrics/test_metrics_registry.py, verification-service metrics tests
+#   backend/README.md — this section, the Phase 15 design-decisions section
+#   (architecture + sequence diagram + benchmark), and the Roadmap update
+#   (Phases 1-15 complete, 16-20 not yet specified)
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "feat: add duplicate-verification metrics and document Phase 15 (Phase 15 milestone 6/6)"
 git push
 ```

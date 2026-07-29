@@ -223,6 +223,59 @@ class TestRecordWorkerJob:
         )
 
 
+class TestRecordDuplicateVerification:
+    def test_records_confidence_and_a_duplicate_decision(self) -> None:
+        metrics = _registry()
+
+        metrics.record_duplicate_verification(confidence=0.98, is_duplicate=True)
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_duplicate_verification_confidence_count"
+            )
+            == 1.0
+        )
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_duplicate_verification_decisions_total",
+                {"decision": "duplicate"},
+            )
+            == 1.0
+        )
+
+    def test_records_a_not_duplicate_decision(self) -> None:
+        metrics = _registry()
+
+        metrics.record_duplicate_verification(confidence=0.10, is_duplicate=False)
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_duplicate_verification_decisions_total",
+                {"decision": "not_duplicate"},
+            )
+            == 1.0
+        )
+
+    def test_none_confidence_still_counts_the_decision_without_a_sample(self) -> None:
+        metrics = _registry()
+
+        metrics.record_duplicate_verification(confidence=None, is_duplicate=False)
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_duplicate_verification_confidence_count"
+            )
+            == 0.0
+        )
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_duplicate_verification_decisions_total",
+                {"decision": "not_duplicate"},
+            )
+            == 1.0
+        )
+
+
 class TestDisabledNoOpsEverywhere:
     def test_every_record_and_observe_method_no_ops_when_disabled(self) -> None:
         metrics = _registry(enabled=False)
@@ -233,6 +286,7 @@ class TestDisabledNoOpsEverywhere:
         metrics.record_duplicate_detection(similarity_scores=[0.5])
         metrics.observe_product_upload(1.0)
         metrics.record_worker_job(status="success", seconds=1.0)
+        metrics.record_duplicate_verification(confidence=0.9, is_duplicate=True)
 
         # `model_load_seconds`/`worker_jobs_total` are labeled — no sample
         # exists at all until `.labels(...)` is actually called.
@@ -241,6 +295,12 @@ class TestDisabledNoOpsEverywhere:
             is None
         )
         assert metrics._registry.get_sample_value("product_intelligence_worker_jobs_total") is None
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_duplicate_verification_confidence_count"
+            )
+            == 0.0
+        )
         # The rest are unlabeled — `prometheus_client` initializes them at
         # 0.0 on construction, so "no-op" means "still 0.0", not "no sample".
         assert (

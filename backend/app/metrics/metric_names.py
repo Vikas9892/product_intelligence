@@ -33,3 +33,7 @@ DUPLICATE_SIMILARITY_SCORE = "duplicate_similarity_score"
 WORKER_JOB_DURATION_SECONDS = "worker_job_duration_seconds"
 WORKER_JOBS_RUNNING = "worker_jobs_running"
 WORKER_DEAD_LETTER_SIZE = "worker_dead_letter_size"
+
+# --- Phase 15: cross-encoder duplicate verification metrics ---
+DUPLICATE_VERIFICATION_CONFIDENCE = "duplicate_verification_confidence"
+DUPLICATE_VERIFICATION_DECISIONS_TOTAL = "duplicate_verification_decisions_total"

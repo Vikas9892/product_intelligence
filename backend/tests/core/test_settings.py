@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core import paths
-from app.core.constants import DuplicateDetectionMode, Environment, LogLevel
+from app.core.constants import DuplicateDetectionMode, Environment, LogLevel, PricingStrategy
 from app.core.settings import (
     AIModelSettings,
     ApplicationSettings,
@@ -15,6 +15,7 @@ from app.core.settings import (
     EvaluationSettings,
     HybridSearchSettings,
     MetricsSettings,
+    PricingSettings,
     RecommendationSettings,
     RerankerSettings,
     SecuritySettings,
@@ -292,6 +293,27 @@ class TestAsyncPipelineSettings:
     def test_rejects_a_non_positive_worker_concurrency(self) -> None:
         with pytest.raises(ValidationError):
             AsyncPipelineSettings(worker_concurrency=0)
+
+
+class TestPricingSettings:
+    def test_defaults(self) -> None:
+        settings = PricingSettings()
+
+        assert settings.enabled is True
+        assert settings.strategy is PricingStrategy.TRIMMED_MEAN
+        assert settings.top_k == 20
+        assert settings.trim_ratio == 0.1
+        assert settings.min_comparables == 3
+        assert settings.outlier_iqr_multiplier == 1.5
+        assert settings.reranking_enabled is None
+
+    def test_rejects_a_trim_ratio_of_half_or_more(self) -> None:
+        with pytest.raises(ValidationError):
+            PricingSettings(trim_ratio=0.5)
+
+    def test_rejects_a_non_positive_top_k(self) -> None:
+        with pytest.raises(ValidationError):
+            PricingSettings(top_k=0)
 
 
 class TestMetricsSettings:

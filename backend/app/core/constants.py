@@ -50,6 +50,22 @@ class DuplicateDetectionMode(StrEnum):
     BLOCK = "block"
 
 
+class PricingStrategy(StrEnum):
+    """Which deterministic algorithm `PriceEstimator` uses to aggregate comparable prices (Phase 17).
+
+    A configuration-driven vocabulary (like `DuplicateDetectionMode`), not
+    a domain concept in its own right — hence living here rather than under
+    `app/models/`.
+    """
+
+    #: Mean of comparable prices, each weighted by its similarity to the target.
+    WEIGHTED_AVERAGE = "weighted_average"
+    #: Mean after trimming the cheapest/most-expensive `trim_ratio` fraction from each end.
+    TRIMMED_MEAN = "trimmed_mean"
+    #: Middle value — the most outlier-robust, ignores magnitude of extremes entirely.
+    MEDIAN = "median"
+
+
 # --- API ---
 API_V1_PREFIX = "/api/v1"
 

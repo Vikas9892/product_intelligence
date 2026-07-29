@@ -410,6 +410,34 @@ class MetricsSettings(BaseModel):
     namespace: str = "product_intelligence"
 
 
+class PricingSettings(BaseModel):
+    """Deterministic pricing-intelligence configuration for `PricingEngine` (Phase 17).
+
+    `enabled` gates the pricing endpoints; unlike the reranker/verification
+    flags it defaults `True`, because pricing itself runs no new model —
+    it reuses the retrieval pipeline (which is only *heavy* when
+    `RERANKER__ENABLED` adds a cross-encoder pass, itself off by default)
+    and then does plain arithmetic. `strategy` picks the aggregation
+    algorithm (`weighted_average`/`trimmed_mean`/`median`); `top_k` is how
+    many comparable products to retrieve; `trim_ratio` is the fraction
+    trimmed from each end for `TRIMMED_MEAN`; `min_comparables` is the
+    floor below which confidence can never exceed `LOW` (too little
+    evidence to trust); `outlier_iqr_multiplier` is the Tukey fence
+    multiplier for IQR-based outlier removal (`1.5` is the standard
+    "mild outlier" fence). `reranking_enabled` overrides whether the
+    comparable retrieval reranks with the cross-encoder — `None` follows
+    `RERANKER__ENABLED`.
+    """
+
+    enabled: bool = True
+    strategy: constants.PricingStrategy = constants.PricingStrategy.TRIMMED_MEAN
+    top_k: int = Field(default=20, gt=0)
+    trim_ratio: float = Field(default=0.1, ge=0, lt=0.5)
+    min_comparables: int = Field(default=3, gt=0)
+    outlier_iqr_multiplier: float = Field(default=1.5, ge=0)
+    reranking_enabled: bool | None = None
+
+
 class StorageSettings(BaseModel):
     """Local/object storage for uploaded product assets."""
 
@@ -484,6 +512,7 @@ class Settings(BaseSettings):
     )
     async_pipeline: AsyncPipelineSettings = Field(default_factory=AsyncPipelineSettings)
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
+    pricing: PricingSettings = Field(default_factory=PricingSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

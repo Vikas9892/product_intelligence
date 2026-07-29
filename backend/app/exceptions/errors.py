@@ -322,3 +322,21 @@ class DuplicateVerificationException(AppException):
     status_code = 500
     code = "duplicate_verification_error"
     message = "Failed to verify whether the product is a duplicate."
+
+
+class PricingException(AppException):
+    """Pricing estimation failed unexpectedly (Phase 17).
+
+    An infrastructure failure in deterministic, server-side processing —
+    comparable retrieval raising, or aggregating the comparable prices
+    failing unexpectedly — not a client input problem, the same reasoning
+    every other phase's own top-level exception establishes. Hence a 500.
+    Distinct from `ResourceNotFoundException` (404), raised when a
+    `GET /pricing/{product_id}` names a product that isn't indexed: having
+    *no priced comparables* is not an error (it yields a low-confidence,
+    zero estimate), so it never raises this.
+    """
+
+    status_code = 500
+    code = "pricing_error"
+    message = "Failed to estimate a price."

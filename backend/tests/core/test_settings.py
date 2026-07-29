@@ -11,6 +11,7 @@ from app.core.settings import (
     AsyncPipelineSettings,
     CatalogIntelligenceSettings,
     DuplicateDetectionSettings,
+    DuplicateVerificationSettings,
     EvaluationSettings,
     HybridSearchSettings,
     MetricsSettings,
@@ -243,6 +244,28 @@ class TestRerankerSettings:
     def test_rejects_a_non_positive_batch_size(self) -> None:
         with pytest.raises(ValidationError):
             RerankerSettings(batch_size=0)
+
+
+class TestDuplicateVerificationSettings:
+    def test_defaults(self) -> None:
+        settings = DuplicateVerificationSettings()
+
+        assert settings.enabled is False
+        assert settings.cross_encoder_threshold == 0.95
+        assert settings.require_same_brand is False
+        assert settings.require_same_category is False
+        assert settings.max_price_difference_ratio == 0.25
+        assert settings.cross_encoder_weight == 0.7
+        assert settings.business_rules_weight == 0.3
+        assert settings.title_similarity_threshold == 0.85
+
+    def test_rejects_weights_that_do_not_sum_to_one(self) -> None:
+        with pytest.raises(ValidationError, match=r"must sum to 1\.0"):
+            DuplicateVerificationSettings(cross_encoder_weight=0.5, business_rules_weight=0.3)
+
+    def test_rejects_a_threshold_above_one(self) -> None:
+        with pytest.raises(ValidationError):
+            DuplicateVerificationSettings(cross_encoder_threshold=1.5)
 
 
 class TestAsyncPipelineSettings:

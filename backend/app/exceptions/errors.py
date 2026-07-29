@@ -303,3 +303,22 @@ class ModelRegistryException(AppException):
     status_code = 500
     code = "model_registry_error"
     message = "Failed to process the model registry request."
+
+
+class DuplicateVerificationException(AppException):
+    """Cross-encoder + business-rules duplicate verification failed unexpectedly (Phase 15).
+
+    An infrastructure failure in deterministic, server-side processing —
+    the reranking model failing, or combining the cross-encoder score with
+    the business-rule signals raising unexpectedly — not a client input
+    problem, the same reasoning as `DuplicateDetectionException`/
+    `RerankException`. Hence a 500. Distinct from those two: this covers
+    the *verification* orchestration specifically (`DuplicateVerificationService`),
+    layered on top of the reranking and detection pipelines, each of which
+    still raises its own `RerankException`/`DuplicateDetectionException`
+    for its own failures.
+    """
+
+    status_code = 500
+    code = "duplicate_verification_error"
+    message = "Failed to verify whether the product is a duplicate."

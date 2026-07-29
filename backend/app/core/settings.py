@@ -297,6 +297,52 @@ class RerankerSettings(BaseModel):
     device: str = "auto"
 
 
+class DuplicateVerificationSettings(BaseModel):
+    """Cross-encoder + business-rules duplicate verification (Phase 15).
+
+    `enabled` defaults to `False` for the same reason `RerankerSettings.
+    enabled` does — the verification pipeline runs a real cross-encoder
+    model on every checked product, so defaulting it on would break this
+    project's "zero-config, runs locally" promise the first time
+    `POST /products/check-duplicate` is hit without the model downloaded.
+    When off, that endpoint keeps its pre-Phase-15 weighted-similarity
+    behavior and the new `cross_encoder_score`/`retrieval_similarity`/
+    `reasons` response fields are simply `None`/empty.
+
+    `cross_encoder_threshold` is the minimum cross-encoder relevance score
+    the best candidate must reach to be *eligible* as a duplicate;
+    `require_same_brand`/`require_same_category` are hard gates (when set,
+    a brand/category mismatch vetoes the duplicate verdict outright, no
+    matter how high the cross-encoder score). `max_price_difference_ratio`
+    is how far two prices may differ (as a fraction of the existing
+    product's price) and still count as a "close price" business signal.
+    `cross_encoder_weight`/`business_rules_weight` blend the two signals
+    into the final `confidence` and are required to sum to `1.0`
+    (validated below), matching `DuplicateDetectionSettings`'s own
+    weight-sum convention. `title_similarity_threshold` is the fuzzy
+    name-overlap ratio above which a "title similarity" reason is emitted.
+    """
+
+    enabled: bool = False
+    cross_encoder_threshold: float = Field(default=0.95, ge=0, le=1)
+    require_same_brand: bool = False
+    require_same_category: bool = False
+    max_price_difference_ratio: float = Field(default=0.25, ge=0)
+    cross_encoder_weight: float = Field(default=0.7, ge=0, le=1)
+    business_rules_weight: float = Field(default=0.3, ge=0, le=1)
+    title_similarity_threshold: float = Field(default=0.85, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _validate_weights_sum_to_one(self) -> "DuplicateVerificationSettings":
+        total = self.cross_encoder_weight + self.business_rules_weight
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                "duplicate_verification's cross_encoder_weight + business_rules_weight "
+                f"must sum to 1.0 (got {total})"
+            )
+        return self
+
+
 class AsyncPipelineSettings(BaseModel):
     """Background job/queue/worker pipeline configuration (Phase 12).
 
@@ -422,6 +468,9 @@ class Settings(BaseSettings):
     recommendation: RecommendationSettings = Field(default_factory=RecommendationSettings)
     evaluation: EvaluationSettings = Field(default_factory=EvaluationSettings)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
+    duplicate_verification: DuplicateVerificationSettings = Field(
+        default_factory=DuplicateVerificationSettings
+    )
     async_pipeline: AsyncPipelineSettings = Field(default_factory=AsyncPipelineSettings)
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)

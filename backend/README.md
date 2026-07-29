@@ -32,11 +32,11 @@ on every machine and in CI, before a single line of business logic exists.
 
 ## Roadmap
 
-This project is planned across 20 phases. Phases 1–13 are complete and
+This project is planned across 20 phases. Phases 1–14 are complete and
 documented below (see each phase's own "design decisions" section and
 its entry under
 [How this project was created from scratch](#how-this-project-was-created-from-scratch)).
-Phases 14–20 have not been specified yet — no milestone list, config
+Phases 15–20 have not been specified yet — no milestone list, config
 keys, or scope exists for them, so they're listed here only as
 placeholders in the numbering, not as a commitment to specific future
 functionality.
@@ -57,7 +57,8 @@ functionality.
 | 11 | Cross-Encoder Reranking | Complete |
 | 12 | Asynchronous AI Processing Pipeline | Complete |
 | 13 | Model Registry & AI Lifecycle Management | Complete |
-| 14–20 | Not yet specified | Planned |
+| 14 | AI Observability & Monitoring | Complete |
+| 15–20 | Not yet specified | Planned |
 
 ## Folder structure
 
@@ -3043,6 +3044,175 @@ A/B traffic splitting — matching the phase spec's own "Do NOT
 Implement" list. `ModelRegistry` stays exactly what its own docstring
 says: metadata and lifecycle bookkeeping, nothing more.
 
+## Phase 14 — AI Observability & Monitoring design decisions
+
+This phase adds a Prometheus-compatible metrics and health-reporting
+layer over everything built so far — API requests, AI inference,
+background workers, the Redis queue, and model/dependency health — while
+keeping that observability layer independent of the business logic it
+watches.
+
+### Architecture
+
+```
+                     Prometheus
+                          ▲  (scrapes GET /metrics)
+                          │
+      ┌───────────────────┼───────────────────┐
+      │                   │                   │
+   FastAPI            Worker Pool          AI Models
+ (http_request_*)   (worker_jobs_*)   (embedding/rerank/
+      │                   │            model_load metrics)
+      └───────────────────┼───────────────────┘
+                          ▼
+                   MetricsRegistry
+              (one process-wide set of
+               Prometheus collectors)
+                          │
+                          ▼
+              GET /metrics   +   GET /system/health,
+                                  GET /system/stats
+```
+
+### MetricsRegistry: One Registry, Idempotent Collectors
+
+`MetricsRegistry` (`app/metrics/metrics_registry.py`) owns every
+Prometheus collector this codebase records into, and is bare-constructed
+the same way `ModelRegistry`/`HybridSearchService` are — every
+instrumented service takes an optional `metrics_registry` parameter,
+defaulting to `MetricsRegistry()`. Because that means the class can be
+constructed many times per process (every `create_app()` in the test
+suite, every bare-constructed service), the collector factories in
+`app/metrics/base_metrics.py` are **idempotent**: the first construction
+registers a real `Counter`/`Gauge`/`Histogram` into `prometheus_client`'s
+process-wide default registry (the one `GET /metrics` exposes); every
+later one looks the collector up by name and reuses it, instead of
+raising `ValueError: Duplicated timeseries`. Metric names live as
+constants in `app/metrics/metric_names.py`, and `METRICS__NAMESPACE`
+(default `product_intelligence`) prefixes all of them —
+`product_upload_seconds` is exposed as
+`product_intelligence_product_upload_seconds`.
+
+### The Master Switch
+
+Every `record_*`/`observe_*` method checks `METRICS__ENABLED` once and
+no-ops if it's off — a single flag, checked in one place, rather than
+each of the dozen-plus instrumented call sites re-reading settings. So
+turning metrics off makes every instrumented service behave exactly as
+it did before this phase, with zero recording overhead.
+
+### Queue Gauges Are Polled, Not Pushed
+
+`queue_depth`, `worker_jobs_running`, and `worker_dead_letter_size`
+reflect *current* Redis state. Rather than incrementing/decrementing a
+counter from inside `RedisQueue`/`QueueManager` — which would couple the
+observability layer to the queue's own business logic and drift out of
+sync after any crash/restart — each of these three gauges is wired via
+`prometheus_client`'s `set_function()` to re-read the actual Redis
+list/hash length *fresh on every scrape*, through a small independent
+synchronous Redis connection that only reads `settings.async_pipeline`'s
+already-public `redis_url`/`queue_name`. That connection uses a short
+socket timeout so a `/metrics` scrape fast-fails (reporting `0.0`) when
+Redis is down — a scrape must never hang or 500 just because a dependency
+is unreachable. This is the same "never raises" contract
+`QdrantVectorStore.health()` already establishes for itself.
+
+### What Gets Measured Where
+
+| Layer | Metric | Where it's recorded |
+|---|---|---|
+| API | `http_request_*` (count, latency, in-progress) | `prometheus-fastapi-instrumentator` middleware |
+| Upload | `product_upload_seconds` | `MetricsRegistry.observe_product_upload` |
+| Image/text embeddings | `embedding_latency_seconds`, `embedding_inference_total` (per model, per outcome) | `CLIPEmbeddingService`/`SentenceTransformerEmbeddingService` |
+| Model loading | `model_load_seconds` (per model type, first load only) | the three `*ModelManager`s |
+| Reranking | `rerank_latency_seconds`, `rerank_inference_total` | `RerankerService` |
+| Recommendations | `recommendation_requests_total` | `RecommendationEngineService` |
+| Duplicate detection | `duplicate_detection_total`, `duplicate_similarity_score` | `DuplicateDetectionService` |
+| Workers | `worker_jobs_total` (success/failure), `worker_job_duration_seconds` | `ProductWorker` |
+| Queue | `queue_depth`, `worker_jobs_running`, `worker_dead_letter_size` | `MetricsRegistry` (polled) |
+
+Cross-encoder inference is measured once, at the `RerankerService` level
+(where a rerank pass *is* one cross-encoder inference call), rather than
+also inside `CrossEncoderService.score_pairs` — measuring both would
+double-count the same work.
+
+### GET /metrics
+
+`_register_metrics` (`app/application.py`) wires
+`prometheus-fastapi-instrumentator` into the app behind
+`METRICS__PROMETHEUS_ENABLED`: it adds the standard `http_request_*`
+series and exposes `GET /metrics`, which serves those alongside every
+custom collector in the default registry. `get_metrics_registry()` is
+called at startup so all custom metrics appear even on a freshly-started
+idle process (at their zero values), rather than materializing only once
+some request has lazily constructed the service that owns them. The
+instrumentator's middleware sits outermost of the whole stack (it times
+the entire request), and `/metrics` is kept out of the OpenAPI schema —
+it's an operational endpoint, not part of the business API contract, the
+same treatment the unversioned health probes get.
+
+### Health Dashboard
+
+`GET /system/health` and `GET /system/stats` (`app/api/system.py`, gated
+on `METRICS__HEALTH_ENDPOINTS_ENABLED`) are backed by
+`SystemHealthService` — read-only and failure-tolerant: it pings Redis,
+asks the vector store whether it's reachable, reads current queue
+lengths, and counts active models, degrading any failed check to
+`"unhealthy"`/`0` rather than raising. Both routes always return `200`; a
+degraded dependency is reported in the *body* (`"redis": "unhealthy"`),
+not as an HTTP error, so a monitoring scrape of the dashboard itself
+never fails because a dependency is down. These are distinct from the
+unversioned `/health`/`/ready` liveness/readiness probes (Phase 1): those
+answer "is this process alive / able to serve," while these expose a
+richer operational view of the whole platform's dependencies.
+
+`workers` in the health payload is the configured `WORKER_CONCURRENCY`,
+**not** a live count of running worker processes — the API and the worker
+pool are separate processes (`scripts/run_workers.py`), and the API has
+no direct handle on how many workers are actually alive. A true liveness
+count would need workers to heartbeat into Redis, which is beyond this
+phase's scope; the field is documented as the configured target rather
+than silently implying more than it knows.
+
+### Grafana Dashboards & Alerting Ideas
+
+No Grafana dashboards or alert rules are shipped in this repo (they live
+in a monitoring deployment, not application code), but the metrics above
+are named and labeled to make the obvious ones straightforward to build:
+
+- **Throughput/latency panels**: `rate(http_request_total[5m])`,
+  histogram quantiles over `product_upload_seconds`,
+  `embedding_latency_seconds`, `rerank_latency_seconds`.
+- **Queue health**: `queue_depth` and `worker_dead_letter_size` over
+  time; a steadily-rising `queue_depth` means workers aren't keeping up.
+- **Error rate**: `worker_jobs_total{status="failure"}` vs.
+  `{status="success"}`; `embedding_inference_total{status="failure"}`.
+- **Alerting ideas**: page on `worker_dead_letter_size > 0` (jobs are
+  being permanently lost), on `queue_depth` growing monotonically for N
+  minutes (worker starvation), on a high `http_request` 5xx rate, or on
+  `product_intelligence_up`-style scrape failures (Prometheus's own
+  `up == 0` for this target — Redis/Qdrant down shows up as `unhealthy`
+  in `/system/health` but the process still scrapes).
+
+### Configuration
+
+New settings, all under `MetricsSettings` (`app/core/settings.py`), env
+prefix `METRICS__`:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `METRICS__ENABLED` | `true` | Master switch for recording any metric at all |
+| `METRICS__PROMETHEUS_ENABLED` | `true` | Whether `GET /metrics` is exposed (independent of recording) |
+| `METRICS__HEALTH_ENDPOINTS_ENABLED` | `true` | Whether `GET /system/health` and `/system/stats` are registered |
+| `METRICS__NAMESPACE` | `product_intelligence` | Prefix prepended to every custom metric name |
+
+### Explicitly out of scope this phase
+
+No Jaeger, Zipkin, Datadog, New Relic, Kubernetes monitoring,
+OpenTelemetry collectors, or CloudWatch — matching the phase spec's own
+"Do NOT Implement" list. The implementation stays focused on
+Prometheus-compatible metrics and health reporting, nothing more.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -4420,5 +4590,91 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden model registry test coverage and document Phase 13 (Phase 13 milestone 6/6)"
+git push
+```
+
+## Phase 14 — AI Observability & Monitoring (built from scratch)
+
+```bash
+# Milestone 1/6 — metrics infrastructure
+#   pyproject.toml — added prometheus-client + prometheus-fastapi-instrumentator
+#   app/metrics/base_metrics.py — idempotent get_or_create_counter/gauge/histogram
+#   app/metrics/metric_names.py — metric name constants (namespaced at registration)
+#   app/metrics/metrics_registry.py — MetricsRegistry: every collector this codebase
+#   records into; queue-state gauges poll Redis fresh per scrape (never coupling to
+#   RedisQueue/QueueManager); master switch (METRICS__ENABLED) no-ops every record
+#   app/core/settings.py — added MetricsSettings (enabled/prometheus_enabled/
+#   health_endpoints_enabled/namespace)
+#   backend/.env.example — documented the four new METRICS__ variables
+#   app/dependencies/metrics.py — cached-singleton provider
+#   tests/metrics/, tests/dependencies/test_metrics.py, tests/core/test_settings.py
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add metrics infrastructure (Phase 14 milestone 1/6)"
+
+# Milestone 2/6 — AI metrics
+#   app/services/embeddings/clip_service.py, sentence_transformer_service.py —
+#   per-model embedding latency/count/failures
+#   app/services/embeddings/model_manager.py, text_model_manager.py,
+#   app/services/model_manager_cross_encoder.py — model-load time (first load only)
+#   app/services/reranker_service.py — rerank latency + success/failure
+#   app/services/recommendation/recommendation_engine_service.py — request count
+#   app/services/duplicate/duplicate_detection_service.py — check count + per-candidate
+#   overall_similarity; every service gained an optional metrics_registry parameter
+#   tests/services/** — extended with per-service metrics assertions
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: instrument AI services with metrics (Phase 14 milestone 2/6)"
+
+# Milestone 3/6 — worker metrics
+#   app/workers/product_worker.py — worker_jobs_total (success/failure) +
+#   worker_job_duration_seconds; the queue-state gauges were already covered by
+#   MetricsRegistry's Redis polling in Milestone 1
+#   tests/workers/test_product_worker.py — extended
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: instrument worker jobs with metrics (Phase 14 milestone 3/6)"
+
+# Milestone 4/6 — Prometheus integration
+#   app/application.py — _register_metrics wires prometheus-fastapi-instrumentator
+#   behind METRICS__PROMETHEUS_ENABLED, exposes GET /metrics (http_request_* series
+#   plus every custom collector), instrumentator middleware outermost
+#   app/metrics/metrics_registry.py — short Redis socket timeout so a scrape fast-fails
+#   tests/api/test_metrics_endpoint.py — hand-written
+#   tests/test_application.py — expected middleware order updated for the new outermost
+#   Prometheus middleware
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: expose Prometheus /metrics endpoint (Phase 14 milestone 4/6)"
+
+# Milestone 5/6 — health dashboard
+#   app/services/system_health_service.py — SystemHealthService: Redis/Qdrant health,
+#   queue depth, active-model count, uptime; read-only + failure-tolerant
+#   app/schemas/system.py — SystemHealthResponse/SystemStatsResponse
+#   app/api/system.py — GET /system/health, GET /system/stats (always 200)
+#   app/application.py — system_router registered behind METRICS__HEALTH_ENDPOINTS_ENABLED
+#   app/dependencies/system.py — cached-singleton provider
+#   tests/services/test_system_health_service.py, tests/api/test_system.py,
+#   tests/dependencies/test_system.py — hand-written
+#   tests/test_application.py — extended for the two new business routes
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add system health dashboard endpoints (Phase 14 milestone 5/6)"
+
+# Milestone 6/6 — test hardening + documentation
+#   Coverage audit against the phase's own test-coverage checklist (metrics
+#   registration, concurrent updates, health endpoints, Prometheus output, worker
+#   metrics, model metrics) — satisfied by Milestones 1-5's own tests
+#   backend/README.md — this section, the Phase 14 design-decisions section, and the
+#   Roadmap update (Phases 1-14 complete, 15-20 not yet specified)
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden observability test coverage and document Phase 14 (Phase 14 milestone 6/6)"
 git push
 ```

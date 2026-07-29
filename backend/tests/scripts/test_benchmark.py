@@ -14,6 +14,8 @@ from pathlib import Path
 from app.models.benchmark_report import BenchmarkReport
 from app.models.evaluation_query import EvaluationTaskType
 from app.models.evaluation_result import EvaluationQueryResult
+from app.models.model_info import ModelInfo
+from app.models.model_type import ModelType
 from app.models.rerank_comparison_report import RerankComparisonReport
 from app.models.retrieval_metrics import RetrievalMetrics
 from scripts import benchmark
@@ -24,6 +26,7 @@ def _report(
     failure_count: int = 0,
     query_results: list[EvaluationQueryResult] | None = None,
     total_duration_seconds: float = 0.5,
+    models: list[ModelInfo] | None = None,
 ) -> BenchmarkReport:
     return BenchmarkReport(
         generated_at=datetime.now(UTC),
@@ -42,6 +45,7 @@ def _report(
         query_results=query_results if query_results is not None else [],
         total_duration_seconds=total_duration_seconds,
         failure_count=failure_count,
+        models=models if models is not None else [],
     )
 
 
@@ -72,6 +76,29 @@ class TestRenderMarkdown:
         assert "## Retrieval" in markdown
         assert "Precision@K" in markdown
         assert "| 1 | 1.0000 | 0.2000 | 1.0000 | 1.0000 |" in markdown
+
+    def test_omits_a_models_section_when_none_were_recorded(self) -> None:
+        markdown = benchmark.render_markdown(_report())
+
+        assert "## Models" not in markdown
+
+    def test_includes_a_models_section_listing_each_active_model(self) -> None:
+        report = _report(
+            models=[
+                ModelInfo(
+                    model_name="openai/clip-vit-base-patch32",
+                    version="1.0.0",
+                    model_type=ModelType.IMAGE_EMBEDDING,
+                    dimension=512,
+                )
+            ]
+        )
+
+        markdown = benchmark.render_markdown(report)
+
+        assert "## Models" in markdown
+        assert "openai/clip-vit-base-patch32" in markdown
+        assert "v1.0.0" in markdown
 
     def test_omits_a_failures_section_when_there_are_none(self) -> None:
         markdown = benchmark.render_markdown(_report(failure_count=0))

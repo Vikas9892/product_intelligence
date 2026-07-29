@@ -39,15 +39,18 @@ from uuid import UUID
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.exceptions.errors import EvaluationException
+from app.exceptions.errors import EvaluationException, ResourceNotFoundException
 from app.models.benchmark_report import BenchmarkReport
 from app.models.evaluation_query import EvaluationQuery, EvaluationTaskType
 from app.models.evaluation_result import EvaluationQueryResult
+from app.models.model_info import ModelInfo
+from app.models.model_type import ModelType
 from app.models.recommendation_type import RecommendationType
 from app.models.rerank_comparison_report import RerankComparisonReport
 from app.models.retrieval_metrics import RetrievalMetrics
 from app.services.duplicate.duplicate_detection_service import DuplicateDetectionService
 from app.services.evaluation.dataset_loader import DatasetLoader
+from app.services.model_registry import ModelRegistry
 from app.services.recommendation.recommendation_engine_service import RecommendationEngineService
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
 
@@ -70,6 +73,7 @@ class RetrievalEvaluator:
         dataset_loader: DatasetLoader | None = None,
         k_values: tuple[int, ...] | None = None,
         latency_metrics_enabled: bool | None = None,
+        model_registry: ModelRegistry | None = None,
     ) -> None:
         self._hybrid_search_service = (
             hybrid_search_service if hybrid_search_service is not None else HybridSearchService()
@@ -91,6 +95,7 @@ class RetrievalEvaluator:
             if latency_metrics_enabled is not None
             else settings.evaluation.latency_metrics_enabled
         )
+        self._model_registry = model_registry if model_registry is not None else ModelRegistry()
 
     async def evaluate(
         self,
@@ -140,6 +145,7 @@ class RetrievalEvaluator:
             query_results=query_results,
             total_duration_seconds=total_duration,
             failure_count=failure_count,
+            models=_active_models(self._model_registry),
         )
 
     async def compare_reranking(
@@ -268,6 +274,23 @@ def _aggregate(
 def _mean(values: Iterable[float]) -> float:
     resolved = list(values)
     return sum(resolved) / len(resolved) if resolved else 0.0
+
+
+def _active_models(model_registry: ModelRegistry) -> list[ModelInfo]:
+    """Snapshot whichever model is currently `ACTIVE`, per `ModelType`.
+
+    A type with no active model (every version explicitly deactivated) is
+    silently omitted rather than failing the whole evaluation run — the
+    model registry's own lifecycle state, not something evaluation should
+    have an opinion about.
+    """
+    active: list[ModelInfo] = []
+    for model_type in ModelType:
+        try:
+            active.append(model_registry.get_active_model(model_type))
+        except ResourceNotFoundException:
+            continue
+    return active
 
 
 def _compute_improvement(

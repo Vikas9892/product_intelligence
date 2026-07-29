@@ -56,6 +56,16 @@ def render_markdown(report: BenchmarkReport) -> str:
         lines.append(f"- Throughput: {throughput:.2f} queries/second")
     lines.append("")
 
+    if report.models:
+        lines.append("## Models")
+        lines.append("")
+        for model_info in sorted(report.models, key=lambda info: info.model_type.value):
+            lines.append(
+                f"- {model_info.model_type.value}: {model_info.model_name} "
+                f"(v{model_info.version}, {model_info.status.value})"
+            )
+        lines.append("")
+
     for task_type in sorted(report.overall_metrics):
         metrics = report.overall_metrics[task_type]
         lines.append(f"## {task_type.title()}")

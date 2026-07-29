@@ -21,6 +21,8 @@ from app.dependencies.evaluation import get_dataset_loader, get_retrieval_evalua
 from app.models.benchmark_report import BenchmarkReport
 from app.models.evaluation_query import EvaluationQuery, GroundTruth
 from app.models.evaluation_result import EvaluationQueryResult
+from app.models.model_info import ModelInfo
+from app.models.model_type import ModelType
 from app.models.rerank_comparison_report import RerankComparisonReport
 from app.models.retrieval_metrics import RetrievalMetrics
 from app.services.evaluation.dataset_loader import DatasetLoader
@@ -78,6 +80,14 @@ class _EchoingFakeRetrievalEvaluator(RetrievalEvaluator):
             ],
             total_duration_seconds=0.02,
             failure_count=0,
+            models=[
+                ModelInfo(
+                    model_name="openai/clip-vit-base-patch32",
+                    version="1.0.0",
+                    model_type=ModelType.IMAGE_EMBEDDING,
+                    dimension=512,
+                )
+            ],
         )
 
     async def compare_reranking(
@@ -190,6 +200,19 @@ class TestRunEvaluation:
         assert body["average_latency_seconds"] == pytest.approx(0.01)
         assert len(body["query_results"]) == 3
 
+    def test_response_includes_the_active_model_snapshot(
+        self, evaluation_client: tuple[TestClient, _EchoingFakeRetrievalEvaluator]
+    ) -> None:
+        client, _evaluator = evaluation_client
+
+        response = client.post(_RUN_URL)
+
+        body = response.json()
+        assert len(body["models"]) == 1
+        assert body["models"][0]["model_name"] == "openai/clip-vit-base-patch32"
+        assert body["models"][0]["model_type"] == "image_embedding"
+        assert body["models"][0]["version"] == "1.0.0"
+
     def test_never_returns_a_raw_vector_or_embedding(
         self, evaluation_client: tuple[TestClient, _EchoingFakeRetrievalEvaluator]
     ) -> None:
@@ -197,8 +220,12 @@ class TestRunEvaluation:
 
         response = client.post(_RUN_URL)
 
+        # "embedding" alone now legitimately appears in `models[].model_type`
+        # (e.g. "image_embedding") — Phase 13 metadata, not a raw vector.
+        # `"vector"`/`"embedding_vector"` would only appear if an actual
+        # embedding array leaked into the response.
         assert "vector" not in response.text
-        assert "embedding" not in response.text
+        assert "embedding_vector" not in response.text
 
 
 class TestCompareReranking:
@@ -245,5 +272,9 @@ class TestCompareReranking:
 
         response = client.post(_COMPARE_URL)
 
+        # "embedding" alone now legitimately appears in `models[].model_type`
+        # (e.g. "image_embedding") — Phase 13 metadata, not a raw vector.
+        # `"vector"`/`"embedding_vector"` would only appear if an actual
+        # embedding array leaked into the response.
         assert "vector" not in response.text
-        assert "embedding" not in response.text
+        assert "embedding_vector" not in response.text

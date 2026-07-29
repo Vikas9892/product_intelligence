@@ -19,6 +19,9 @@ from app.models.benchmark_report import BenchmarkReport
 from app.models.duplicate_candidate import DuplicateCandidate
 from app.models.duplicate_decision import DuplicateDecision
 from app.models.evaluation_query import EvaluationQuery, EvaluationTaskType, GroundTruth
+from app.models.model_info import ModelInfo
+from app.models.model_status import ModelStatus
+from app.models.model_type import ModelType
 from app.models.recommendation_candidate import RecommendationCandidate
 from app.models.recommendation_reason import RecommendationReason
 from app.models.recommendation_result import RecommendationResult
@@ -30,6 +33,7 @@ from app.services.duplicate.duplicate_detection_service import DuplicateDetectio
 from app.services.evaluation.dataset_loader import DatasetLoader
 from app.services.evaluation.retrieval_evaluator import (
     RetrievalEvaluator,
+    _active_models,
     _compute_improvement,
     _hit_rate_at_k,
     _ndcg_at_k,
@@ -37,6 +41,7 @@ from app.services.evaluation.retrieval_evaluator import (
     _recall_at_k,
     _reciprocal_rank,
 )
+from app.services.model_registry import ModelRegistry
 from app.services.recommendation.recommendation_engine_service import RecommendationEngineService
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
 
@@ -175,6 +180,7 @@ def _evaluator(
     recommendation_engine_service: RecommendationEngineService | None = None,
     dataset_loader: DatasetLoader | None = None,
     latency_metrics_enabled: bool = False,
+    model_registry: ModelRegistry | None = None,
 ) -> RetrievalEvaluator:
     return RetrievalEvaluator(
         hybrid_search_service=(
@@ -194,6 +200,11 @@ def _evaluator(
         ),
         dataset_loader=dataset_loader if dataset_loader is not None else _FakeDatasetLoader(),
         latency_metrics_enabled=latency_metrics_enabled,
+        model_registry=(
+            model_registry
+            if model_registry is not None
+            else ModelRegistry(seed_from_settings=False)
+        ),
     )
 
 
@@ -554,6 +565,67 @@ class TestEmptyDataset:
         assert report.query_results == []
         assert report.overall_metrics == {}
         assert report.failure_count == 0
+
+
+def _model_info(
+    *,
+    model_type: ModelType,
+    model_name: str = "some-model",
+    version: str = "1.0.0",
+    dimension: int = 4,
+) -> ModelInfo:
+    return ModelInfo(
+        model_name=model_name,
+        version=version,
+        model_type=model_type,
+        dimension=dimension,
+        status=ModelStatus.ACTIVE,
+    )
+
+
+class TestActiveModels:
+    def test_returns_one_entry_per_type_with_an_active_model(self) -> None:
+        registry = ModelRegistry(seed_from_settings=False)
+        registry.register(_model_info(model_type=ModelType.IMAGE_EMBEDDING))
+        registry.register(_model_info(model_type=ModelType.TEXT_EMBEDDING))
+
+        active = _active_models(registry)
+
+        assert {info.model_type for info in active} == {
+            ModelType.IMAGE_EMBEDDING,
+            ModelType.TEXT_EMBEDDING,
+        }
+
+    def test_omits_types_with_no_active_model(self) -> None:
+        registry = ModelRegistry(seed_from_settings=False)
+
+        assert _active_models(registry) == []
+
+
+class TestModelSnapshot:
+    async def test_report_records_the_active_model_snapshot(self) -> None:
+        registry = ModelRegistry(seed_from_settings=False)
+        registry.register(
+            _model_info(
+                model_type=ModelType.IMAGE_EMBEDDING,
+                model_name="openai/clip-vit-base-patch32",
+                version="1.0.0",
+            )
+        )
+        evaluator = _evaluator(model_registry=registry)
+
+        report = await evaluator.evaluate([])
+
+        assert len(report.models) == 1
+        assert report.models[0].model_name == "openai/clip-vit-base-patch32"
+        assert report.models[0].model_type is ModelType.IMAGE_EMBEDDING
+
+    async def test_report_records_no_models_when_none_are_registered(self) -> None:
+        evaluator = _evaluator(model_registry=ModelRegistry(seed_from_settings=False))
+
+        report = await evaluator.evaluate([])
+
+        assert report.models == []
 
 
 class TestLatencyMetrics:

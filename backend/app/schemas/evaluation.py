@@ -11,6 +11,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.schemas.model import ModelInfoResponse
+
 
 class EvaluationRunRequest(BaseModel):
     """Optionally restricts one evaluation run to a subset of the configured dataset.
@@ -67,6 +69,9 @@ class EvaluationRunResponse(BaseModel):
     evaluated query regardless of task type — a single top-level number
     alongside `overall_metrics`' own per-task-type breakdown, per the
     phase spec's own "Latency" bullet distinct from "Overall Metrics."
+    `models` (Phase 13) records which model was active, per type, when
+    this run happened — a client can compare `models`/`overall_metrics`
+    across two runs to see which model version produced which score.
     """
 
     summary: str
@@ -76,6 +81,7 @@ class EvaluationRunResponse(BaseModel):
     failure_count: int
     overall_metrics: dict[str, EvaluationMetricsInfo] = Field(default_factory=dict)
     query_results: list[EvaluationQueryResultInfo] = Field(default_factory=list)
+    models: list[ModelInfoResponse] = Field(default_factory=list)
 
 
 class RerankComparisonResponse(BaseModel):

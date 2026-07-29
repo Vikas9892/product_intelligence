@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from app.models.benchmark_report import BenchmarkReport
 from app.models.evaluation_query import EvaluationTaskType
 from app.models.evaluation_result import EvaluationQueryResult
+from app.models.model_info import ModelInfo
+from app.models.model_type import ModelType
 from app.models.retrieval_metrics import RetrievalMetrics
 
 
@@ -36,6 +38,24 @@ class TestBenchmarkReport:
         assert report.overall_metrics == {}
         assert report.query_results == []
         assert report.failure_count == 0
+        assert report.models == []
+
+    def test_records_the_models_snapshot(self) -> None:
+        model_info = ModelInfo(
+            model_name="openai/clip-vit-base-patch32",
+            version="1.0.0",
+            model_type=ModelType.IMAGE_EMBEDDING,
+            dimension=512,
+        )
+
+        report = BenchmarkReport(
+            generated_at=datetime.now(UTC),
+            dataset_size=0,
+            total_duration_seconds=0.0,
+            models=[model_info],
+        )
+
+        assert report.models == [model_info]
 
     def test_rejects_a_negative_dataset_size(self) -> None:
         with pytest.raises(ValidationError):

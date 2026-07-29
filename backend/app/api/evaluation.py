@@ -33,6 +33,7 @@ from app.schemas.evaluation import (
     EvaluationRunResponse,
     RerankComparisonResponse,
 )
+from app.schemas.model import ModelInfoResponse
 from app.services.evaluation.dataset_loader import DatasetLoader
 from app.services.evaluation.retrieval_evaluator import RetrievalEvaluator
 
@@ -157,4 +158,5 @@ def _to_response(report: BenchmarkReport) -> EvaluationRunResponse:
             )
             for result in report.query_results
         ],
+        models=[ModelInfoResponse.from_model_info(model_info) for model_info in report.models],
     )

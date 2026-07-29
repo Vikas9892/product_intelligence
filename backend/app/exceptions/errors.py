@@ -284,3 +284,22 @@ class JobException(AppException):
     status_code = 500
     code = "job_error"
     message = "Failed to process the background job."
+
+
+class ModelRegistryException(AppException):
+    """The model registry failed unexpectedly — a misconfigured startup seed
+    (a blank/invalid configured model name) or another internal failure that
+    isn't one of the registry's own well-defined 404/409 cases.
+
+    Looking up a version/active model that was never registered raises
+    `ResourceNotFoundException` (404) instead, and registering a version
+    that already exists raises `ConflictException` (409) — both reuse
+    this codebase's existing generic exceptions rather than inventing
+    registry-specific ones, the same "one flag, not two disagreeing ones"
+    reasoning applied to error types here: a 404/409 is a 404/409
+    regardless of which subsystem raised it.
+    """
+
+    status_code = 500
+    code = "model_registry_error"
+    message = "Failed to process the model registry request."

@@ -38,11 +38,13 @@ from app.exceptions.errors import DuplicateVerificationException, RerankExceptio
 from app.metrics.metrics_registry import MetricsRegistry
 from app.models.duplicate_candidate import DuplicateCandidate
 from app.models.duplicate_verification import DuplicateVerification
+from app.models.product_attributes import ProductAttributes
 from app.models.reranked_candidate import RerankedCandidate
 from app.models.search import HybridSearchResult
 from app.models.verification_reason import VerificationReason
 from app.schemas.product import ProductImage
 from app.services.base_reranker import BaseReranker
+from app.services.duplicate.business_rules_evaluator import BusinessRulesEvaluator
 from app.services.reranker_service import RerankerService
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
 from app.utils.text import build_text_representation
@@ -51,26 +53,45 @@ logger = get_logger(__name__)
 
 
 class DuplicateVerificationService:
-    """Retrieves candidates, reranks them with a cross-encoder, and reports duplicate confidence."""
+    """Retrieves, reranks (cross-encoder), validates (business rules), and reports duplicate confidence."""
 
     def __init__(
         self,
         *,
         hybrid_search_service: HybridSearchService | None = None,
         reranker: BaseReranker | None = None,
+        business_rules_evaluator: BusinessRulesEvaluator | None = None,
         top_k: int | None = None,
         cross_encoder_threshold: float | None = None,
+        cross_encoder_weight: float | None = None,
+        business_rules_weight: float | None = None,
         metrics_registry: MetricsRegistry | None = None,
     ) -> None:
+        verification = settings.duplicate_verification
         self._hybrid_search_service = (
             hybrid_search_service if hybrid_search_service is not None else HybridSearchService()
         )
         self._reranker: BaseReranker = reranker if reranker is not None else RerankerService()
+        self._business_rules_evaluator = (
+            business_rules_evaluator
+            if business_rules_evaluator is not None
+            else BusinessRulesEvaluator()
+        )
         self._top_k = top_k if top_k is not None else settings.duplicate_detection.top_k
         self._cross_encoder_threshold = (
             cross_encoder_threshold
             if cross_encoder_threshold is not None
-            else settings.duplicate_verification.cross_encoder_threshold
+            else verification.cross_encoder_threshold
+        )
+        self._cross_encoder_weight = (
+            cross_encoder_weight
+            if cross_encoder_weight is not None
+            else verification.cross_encoder_weight
+        )
+        self._business_rules_weight = (
+            business_rules_weight
+            if business_rules_weight is not None
+            else verification.business_rules_weight
         )
         self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
@@ -82,21 +103,29 @@ class DuplicateVerificationService:
         category: str | None,
         description: str | None,
         image: ProductImage,
+        price: float | None = None,
+        attributes: ProductAttributes | None = None,
         top_k: int | None = None,
     ) -> DuplicateVerification:
-        """Retrieve, rerank, and report whether the described product is a likely duplicate.
+        """Retrieve, rerank, validate, and report whether the described product is a likely duplicate.
 
         `image` must describe a file already written under the upload
         directory (the same contract `DuplicateDetectionService.detect`
         has). Uses the *raw* submitted name/brand/category/description to
         build the retrieval and cross-encoder query text, exactly as
-        `DuplicateDetectionService` does. Raises
-        `DuplicateVerificationException` if reranking the otherwise
-        successfully-retrieved candidates fails unexpectedly (an actual
-        `RerankException` propagates as itself).
+        `DuplicateDetectionService` does. `price`/`attributes` feed the
+        business-rule validation of the best candidate. The final
+        `confidence` blends the cross-encoder score and the business-rule
+        score by the configured weights; `is_duplicate` requires the
+        cross-encoder score to clear its threshold *and* no configured
+        hard gate (`require_same_brand`/`require_same_category`) to be
+        vetoed. Raises `DuplicateVerificationException` if reranking the
+        otherwise successfully-retrieved candidates fails unexpectedly (an
+        actual `RerankException` propagates as itself).
         """
         start = time.monotonic()
         resolved_top_k = top_k if top_k is not None else self._top_k
+        resolved_attributes = attributes if attributes is not None else ProductAttributes()
         text = build_text_representation(name, brand, category, description)
 
         # Retrieve with reranking off — this service runs its own explicit
@@ -138,11 +167,31 @@ class DuplicateVerificationService:
         best = rerank_result.candidates[0]
         cross_encoder_score = best.rerank_score
         retrieval_similarity = best.original_score
-        is_duplicate = cross_encoder_score >= self._cross_encoder_threshold
+
+        business_result = self._business_rules_evaluator.evaluate(
+            name=name,
+            brand=brand,
+            category=category,
+            price=price,
+            attributes=resolved_attributes,
+            candidate_metadata=best.metadata,
+        )
+
+        confidence = (
+            self._cross_encoder_weight * cross_encoder_score
+            + self._business_rules_weight * business_result.score
+        )
+        # A configured hard gate (brand/category mismatch) vetoes the
+        # verdict outright, no matter how confident the cross-encoder is —
+        # the phase's own "if cross_encoder > 0.95 AND brand same AND
+        # category same" rule made absolute.
+        is_duplicate = (
+            cross_encoder_score >= self._cross_encoder_threshold and not business_result.veto
+        )
 
         verification = DuplicateVerification(
             is_duplicate=is_duplicate,
-            confidence=cross_encoder_score,
+            confidence=confidence,
             cross_encoder_score=cross_encoder_score,
             retrieval_similarity=retrieval_similarity,
             matched_product=best.product_id,
@@ -151,10 +200,11 @@ class DuplicateVerificationService:
                     code="cross_encoder",
                     message=(
                         f"Cross-encoder relevance {cross_encoder_score:.2f} "
-                        f"{'meets' if is_duplicate else 'is below'} the "
-                        f"{self._cross_encoder_threshold:.2f} threshold."
+                        f"{'meets' if cross_encoder_score >= self._cross_encoder_threshold else 'is below'} "
+                        f"the {self._cross_encoder_threshold:.2f} threshold."
                     ),
-                )
+                ),
+                *business_result.reasons,
             ],
             top_candidates=[
                 _to_candidate(reranked, by_id.get(reranked.product_id))
@@ -163,10 +213,14 @@ class DuplicateVerificationService:
         )
 
         logger.info(
-            "Duplicate verification complete: is_duplicate=%s, cross_encoder_score=%.2f, "
-            "candidates=%d, processing_time=%.4fs",
+            "Duplicate verification complete: is_duplicate=%s, confidence=%.2f, "
+            "cross_encoder_score=%.2f, business_score=%.2f, veto=%s, candidates=%d, "
+            "processing_time=%.4fs",
             verification.is_duplicate,
+            confidence,
             cross_encoder_score,
+            business_result.score,
+            business_result.veto,
             len(rerank_result.candidates),
             time.monotonic() - start,
         )

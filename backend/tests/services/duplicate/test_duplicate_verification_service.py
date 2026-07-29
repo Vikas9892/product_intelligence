@@ -12,12 +12,14 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.exceptions.errors import DuplicateVerificationException, RerankException
+from app.models.product_attributes import ProductAttributes
 from app.models.rerank_reason import RerankReason
 from app.models.rerank_result import RerankResult
 from app.models.reranked_candidate import RerankedCandidate
 from app.models.search import HybridSearchResult, ProductFilters, SearchModality
 from app.schemas.product import ProductImage
 from app.services.base_reranker import BaseReranker
+from app.services.duplicate.business_rules_evaluator import BusinessRulesEvaluator
 from app.services.duplicate.duplicate_verification_service import DuplicateVerificationService
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
 
@@ -107,8 +109,14 @@ def _service(
     *,
     hybrid_search_service: HybridSearchService | None = None,
     reranker: BaseReranker | None = None,
+    business_rules_evaluator: BusinessRulesEvaluator | None = None,
     cross_encoder_threshold: float = 0.95,
+    cross_encoder_weight: float = 1.0,
+    business_rules_weight: float = 0.0,
 ) -> DuplicateVerificationService:
+    # Weights default to 1.0/0.0 so the reranking-focused tests assert
+    # `confidence == cross_encoder_score` cleanly; the business-rules
+    # combination is exercised with realistic weights in its own class.
     return DuplicateVerificationService(
         hybrid_search_service=(
             hybrid_search_service
@@ -116,7 +124,10 @@ def _service(
             else _FakeHybridSearchService()
         ),
         reranker=reranker if reranker is not None else _FakeReranker(),
+        business_rules_evaluator=business_rules_evaluator,
         cross_encoder_threshold=cross_encoder_threshold,
+        cross_encoder_weight=cross_encoder_weight,
+        business_rules_weight=business_rules_weight,
     )
 
 
@@ -238,3 +249,77 @@ class TestErrorHandling:
             await service.verify(
                 name="Widget", brand=None, category=None, description=None, image=_image()
             )
+
+
+class TestBusinessRulesCombination:
+    async def test_confidence_blends_cross_encoder_and_business_scores(self) -> None:
+        product_id = uuid4()
+        # Candidate metadata matches brand + category + name -> business
+        # score contributes; blended confidence = 0.7*ce + 0.3*business.
+        results = [
+            HybridSearchResult(
+                product_id=product_id,
+                score=0.5,
+                metadata={"brand": "Nike", "category": "Shoes", "name": "Nike Air Max"},
+                matched_modalities=[SearchModality.TEXT],
+            )
+        ]
+        service = _service(
+            hybrid_search_service=_FakeHybridSearchService(results=results),
+            reranker=_FakeReranker(scores={product_id: 0.90}),
+            business_rules_evaluator=BusinessRulesEvaluator(),
+            cross_encoder_weight=0.7,
+            business_rules_weight=0.3,
+        )
+
+        verification = await service.verify(
+            name="Nike Air Max",
+            brand="Nike",
+            category="Shoes",
+            description=None,
+            image=_image(),
+        )
+
+        # brand/category/title all satisfied -> business score 1.0.
+        assert verification.confidence == pytest.approx(0.7 * 0.90 + 0.3 * 1.0)
+        assert {r.code for r in verification.reasons} >= {
+            "cross_encoder",
+            "same_brand",
+            "same_category",
+            "title_similarity",
+        }
+
+    async def test_a_hard_gate_veto_overrides_a_high_cross_encoder_score(self) -> None:
+        product_id = uuid4()
+        results = [
+            HybridSearchResult(
+                product_id=product_id,
+                score=0.5,
+                metadata={"brand": "Adidas"},
+                matched_modalities=[SearchModality.TEXT],
+            )
+        ]
+        evaluator = BusinessRulesEvaluator(require_same_brand=True)
+        service = _service(
+            hybrid_search_service=_FakeHybridSearchService(results=results),
+            reranker=_FakeReranker(scores={product_id: 0.99}),
+            business_rules_evaluator=evaluator,
+            cross_encoder_threshold=0.95,
+            cross_encoder_weight=0.7,
+            business_rules_weight=0.3,
+        )
+
+        verification = await service.verify(
+            name="Widget",
+            brand="Nike",
+            category=None,
+            description=None,
+            image=_image(),
+            attributes=ProductAttributes(),
+        )
+
+        # Cross-encoder 0.99 clears the 0.95 threshold, but the brand
+        # mismatch veto forces is_duplicate False.
+        assert verification.cross_encoder_score == 0.99
+        assert verification.is_duplicate is False
+        assert "brand_mismatch" in {r.code for r in verification.reasons}

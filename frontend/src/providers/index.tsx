@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 
 import { AuthInitializer } from "@/components/auth/auth-initializer";
+import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 import { QueryProvider } from "./query-provider";
@@ -23,6 +24,7 @@ export function Providers({ children }: { children: ReactNode }) {
         <TooltipProvider>
           <AuthInitializer />
           {children}
+          <Toaster />
         </TooltipProvider>
       </ThemeProvider>
     </QueryProvider>

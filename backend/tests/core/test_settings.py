@@ -13,6 +13,7 @@ from app.core.settings import (
     CatalogIntelligenceSettings,
     DuplicateDetectionSettings,
     DuplicateVerificationSettings,
+    EnterpriseSettings,
     EvaluationSettings,
     HybridSearchSettings,
     MetricsSettings,
@@ -294,6 +295,21 @@ class TestAsyncPipelineSettings:
     def test_rejects_a_non_positive_worker_concurrency(self) -> None:
         with pytest.raises(ValidationError):
             AsyncPipelineSettings(worker_concurrency=0)
+
+
+class TestEnterpriseSettings:
+    def test_defaults(self) -> None:
+        settings = EnterpriseSettings()
+
+        assert settings.enabled is False
+        assert settings.api_key_header == "X-API-Key"
+        assert settings.daily_request_quota == 10000
+        assert settings.rate_limit_per_minute == 120
+        assert settings.collection_prefix == "tenant"
+
+    def test_rejects_a_negative_quota(self) -> None:
+        with pytest.raises(ValidationError):
+            EnterpriseSettings(daily_request_quota=-1)
 
 
 class TestAnalyticsSettings:

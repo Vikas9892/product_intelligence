@@ -410,6 +410,30 @@ class MetricsSettings(BaseModel):
     namespace: str = "product_intelligence"
 
 
+class EnterpriseSettings(BaseModel):
+    """Opt-in multi-tenancy, RBAC, audit, and quota configuration (Phase 19).
+
+    `enabled` defaults to **`False`**: with it off, the platform behaves
+    exactly as it did before Phase 19 — no authentication, no tenant
+    scoping, every existing endpoint open — so nothing that worked before
+    breaks. Turning it on activates API-key authentication + RBAC on the
+    enterprise-gated routes, tenant isolation, audit logging, and quotas.
+
+    `api_key_header` is the request header the raw key is read from;
+    `daily_request_quota` is the per-tenant per-day request ceiling
+    (`0` disables the daily quota); `rate_limit_per_minute` is the
+    per-tenant sliding-per-minute ceiling (`0` disables rate limiting);
+    `collection_prefix` namespaces a tenant's Qdrant collections
+    (`{prefix}_{tenant_id}_{collection}`).
+    """
+
+    enabled: bool = False
+    api_key_header: str = "X-API-Key"
+    daily_request_quota: int = Field(default=10000, ge=0)
+    rate_limit_per_minute: int = Field(default=120, ge=0)
+    collection_prefix: str = "tenant"
+
+
 class AnalyticsSettings(BaseModel):
     """Analytics-platform configuration (Phase 18).
 
@@ -527,6 +551,7 @@ class Settings(BaseSettings):
     async_pipeline: AsyncPipelineSettings = Field(default_factory=AsyncPipelineSettings)
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
     analytics: AnalyticsSettings = Field(default_factory=AnalyticsSettings)
+    enterprise: EnterpriseSettings = Field(default_factory=EnterpriseSettings)
     pricing: PricingSettings = Field(default_factory=PricingSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)

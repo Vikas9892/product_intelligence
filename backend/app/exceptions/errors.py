@@ -340,3 +340,45 @@ class PricingException(AppException):
     status_code = 500
     code = "pricing_error"
     message = "Failed to estimate a price."
+
+
+class AuthenticationException(AppException):
+    """A request to an enterprise-gated route presented no valid API key (Phase 19).
+
+    A `401` — a missing, malformed, unknown, or revoked API key. Distinct
+    from `AuthorizationException` (403): 401 means "we don't know who you
+    are," 403 means "we know who you are, but you may not do this." Only
+    raised when `ENTERPRISE__ENABLED` is on; with it off, no route requires
+    a key.
+    """
+
+    status_code = 401
+    code = "authentication_error"
+    message = "A valid API key is required."
+
+
+class AuthorizationException(AppException):
+    """An authenticated key lacks the permission its target route requires (Phase 19).
+
+    A `403` — the caller is known (a valid API key) but its `Role` doesn't
+    grant the `Permission` the route asked for. Distinct from
+    `AuthenticationException` (401): identity is established, authority is
+    not.
+    """
+
+    status_code = 403
+    code = "authorization_error"
+    message = "You do not have permission to perform this action."
+
+
+class QuotaExceededException(AppException):
+    """A tenant exceeded its request quota or per-minute rate limit (Phase 19).
+
+    A `429` — the tenant is over its `DAILY_REQUEST_QUOTA` or
+    `RATE_LIMIT_PER_MINUTE`. A throttling signal, not a failure: the
+    request was well-formed and authorized, just too frequent.
+    """
+
+    status_code = 429
+    code = "quota_exceeded"
+    message = "Request quota or rate limit exceeded."

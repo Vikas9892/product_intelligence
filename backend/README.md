@@ -32,11 +32,11 @@ on every machine and in CI, before a single line of business logic exists.
 
 ## Roadmap
 
-This project is planned across 20 phases. Phases 1–17 are complete and
+This project is planned across 20 phases. Phases 1–18 are complete and
 documented below (see each phase's own "design decisions" section and
 its entry under
 [How this project was created from scratch](#how-this-project-was-created-from-scratch)).
-Phases 18–20 have not been specified yet — no milestone list, config
+Phases 19–20 have not been specified yet — no milestone list, config
 keys, or scope exists for them, so they're listed here only as
 placeholders in the numbering, not as a commitment to specific future
 functionality.
@@ -61,7 +61,8 @@ functionality.
 | 15 | Cross-Encoder Re-ranking & Intelligent Duplicate Verification | Complete |
 | 16 | Explainable AI & Decision Intelligence | Complete |
 | 17 | Pricing Intelligence Engine | Complete |
-| 18–20 | Not yet specified | Planned |
+| 18 | Analytics & Business Intelligence Platform | Complete |
+| 19–20 | Not yet specified | Planned |
 
 ## Folder structure
 
@@ -3628,6 +3629,102 @@ No ML price model, no training, no time-series/seasonal modeling, no
 currency conversion — deterministic retrieval-plus-arithmetic only, per
 the phase's own "no ML training, deterministic algorithms" requirement.
 
+## Phase 18 — Analytics & Business Intelligence Platform design decisions
+
+This phase turns operational activity into business insights over a
+REST-only surface: per-day usage counts, a live dashboard, model
+inventory analytics, and daily/weekly/monthly trend reports with
+JSON/Markdown export.
+
+### Historical Reporting on Redis, No Database
+
+Historical analytics needs *persisted* daily history, but this project
+has no database (the Redis-only decision from Phase 12). So the analytics
+layer stores its history in **Redis daily buckets**:
+`AnalyticsRepository` increments a per-day counter per event
+(`analytics:count:{event}:{YYYY-MM-DD}`) and accumulates
+product-processing latency into per-day sum/count keys, each with a
+90-day TTL so history self-prunes. `AnalyticsEngine` reads those buckets
+to aggregate any window. This keeps analytics consistent with the rest of
+the platform's lightweight, no-DB architecture while still supporting
+real historical reporting.
+
+### Recording Is Fail-Soft
+
+The upload / duplicate-check / recommendation / search endpoints each
+record their event, and `ProductWorker` records processing latency — but
+recording is **fail-soft**: a Redis write that fails is logged and
+swallowed, never breaking the request that triggered it (an upload
+succeeds even if the analytics counter can't be written). Analytics is an
+observation of the business, never a dependency of it.
+
+### Architecture
+
+```
+   upload / check-duplicate / recommendation / search endpoints
+   ProductWorker (latency)
+             │  record_event / record_latency (fail-soft)
+             ▼
+      AnalyticsRepository  ── Redis daily buckets (TTL'd) ──┐
+                                                            │  read
+                                                            ▼
+                                                     AnalyticsEngine
+                                                     (+ ModelRegistry)
+                                                            │
+             ┌──────────────┬───────────────┬──────────────┤
+             ▼              ▼               ▼              ▼
+      /analytics/      /analytics/     /analytics/    /analytics/
+       dashboard         models         pipeline        trends
+                                                    (JSON | Markdown)
+```
+
+`AnalyticsEngine` is a pure reader — it never records an event and never
+runs a model. Per-model *inference counts* stay in Prometheus
+(`embedding_inference_total{model}`, Phase 14); the analytics `models`
+view is about model *lifecycle/inventory* (active version + registered
+count per type, from the Phase 13 registry), not re-counting inference.
+
+### The Endpoints
+
+- `GET /analytics/dashboard` — today's usage, the trailing window's usage,
+  and how many models are active.
+- `GET /analytics/models` — per model type: the active version, lifecycle
+  status, and registered-version count, plus window usage.
+- `GET /analytics/pipeline` — the window's throughput and average
+  product-processing latency, as a labeled report.
+- `GET /analytics/trends?metric=&granularity=&periods=&format=` — a
+  daily/weekly/monthly trend for one metric, as JSON or a Markdown table.
+  Granularities are **fixed-length windows** (1/7/30 days), not calendar
+  months, so buckets are deterministic and trivially derived from the
+  per-day counters.
+
+All read endpoints are additive `GET`s, registered only when
+`ANALYTICS__ENABLED` is on.
+
+### Metrics
+
+Per the phase's "reuse existing metrics" requirement, no new Prometheus
+metrics are added: the `/analytics` endpoints are covered by the standard
+`http_request_*` series (Phase 14), and the events they report on already
+have their own metrics (`worker_jobs_total`,
+`duplicate_verification_decisions_total`, ...). The analytics layer's own
+job is the *historical* view Prometheus counters can't provide.
+
+### Configuration
+
+New settings under `AnalyticsSettings` (env prefix `ANALYTICS__`):
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `ANALYTICS__ENABLED` | `true` | Registers the `/analytics` endpoints |
+| `ANALYTICS__WINDOW_DAYS` | `7` | Default trailing window for the dashboard/pipeline aggregates |
+
+### Explicitly out of scope this phase
+
+No frontend (REST-only, per the phase requirement), no database, no
+real-time streaming or per-minute granularity — day-grained historical
+reporting over Redis buckets, nothing heavier.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -5311,5 +5408,70 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "feat: add pricing metrics and document Phase 17 (Phase 17 milestone 6/6)"
+git push
+```
+
+## Phase 18 — Analytics & Business Intelligence Platform (built from scratch)
+
+Redis-only persistence (no database) for historical daily buckets — see
+the design-decisions section above.
+
+```bash
+# Milestone 1/6 — analytics domain
+#   app/models/analytics_event.py (enum), usage_metrics.py, analytics_report.py
+#   (AnalyticsReport/DashboardSummary/TrendReport/TrendPoint); tests/models/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add analytics domain (Phase 18 milestone 1/6)"
+
+# Milestone 2/6 — analytics engine + Redis daily buckets
+#   app/repositories/analytics_repository.py — per-day counters + latency sum/count,
+#   TTL'd, fail-soft recording
+#   app/services/analytics/analytics_engine.py — usage/dashboard/report aggregation
+#   app/core/settings.py — AnalyticsSettings; app/dependencies/analytics.py
+#   app/api/products.py, search.py, app/workers/product_worker.py — record events/latency
+#   tests/repositories/, tests/services/analytics/, tests/core/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add analytics engine and Redis daily buckets (Phase 18 milestone 2/6)"
+
+# Milestone 3/6 — model analytics
+#   app/models/model_analytics.py; app/services/analytics/analytics_engine.py —
+#   model_analytics() reads active version + registered count per type from ModelRegistry
+#   tests/models/, tests/services/analytics/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add model analytics (Phase 18 milestone 3/6)"
+
+# Milestone 4/6 — dashboard APIs
+#   app/schemas/analytics.py; app/api/analytics.py — GET /analytics/dashboard,
+#   /analytics/models, /analytics/pipeline; app/application.py — analytics_router
+#   behind ANALYTICS__ENABLED; tests/api/test_analytics.py, tests/test_application.py
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add analytics dashboard API (Phase 18 milestone 4/6)"
+
+# Milestone 5/6 — trend reports + export
+#   app/core/constants.py — TrendGranularity/ExportFormat enums
+#   app/services/analytics/analytics_engine.py — trend(); trend_exporter.py — Markdown
+#   app/api/analytics.py — GET /analytics/trends (JSON | Markdown)
+#   tests/services/analytics/, tests/api/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add trend reports and export (Phase 18 milestone 5/6)"
+
+# Milestone 6/6 — tests + documentation
+#   Coverage audit; backend/.env.example — ANALYTICS__ variables
+#   backend/README.md — this section, the Phase 18 design-decisions section, and the
+#   Roadmap update (Phases 1-18 complete, 19-20 not yet specified)
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden analytics coverage and document Phase 18 (Phase 18 milestone 6/6)"
 git push
 ```

@@ -28,6 +28,7 @@ from app.api.explanations import router as explanations_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
 from app.api.models import router as models_router
+from app.api.pricing import router as pricing_router
 from app.api.products import router as products_router
 from app.api.search import router as search_router
 from app.api.system import router as system_router
@@ -115,6 +116,8 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(jobs_router, prefix=settings.application.api_prefix)
     app.include_router(models_router, prefix=settings.application.api_prefix)
     app.include_router(explanations_router, prefix=settings.application.api_prefix)
+    if settings.pricing.enabled:
+        app.include_router(pricing_router, prefix=settings.application.api_prefix)
     if settings.metrics.health_endpoints_enabled:
         app.include_router(system_router, prefix=settings.application.api_prefix)
 

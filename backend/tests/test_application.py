@@ -46,6 +46,8 @@ _BUSINESS_ROUTE_PATHS = {
     f"{settings.application.api_prefix}/recommendations/{{product_id}}/trace",
     f"{settings.application.api_prefix}/duplicates/{{product_id}}/trace",
     f"{settings.application.api_prefix}/products/{{product_id}}/explanations",
+    f"{settings.application.api_prefix}/pricing/estimate",
+    f"{settings.application.api_prefix}/pricing/{{product_id}}",
 }
 
 # Expected middleware stack, outermost first — see

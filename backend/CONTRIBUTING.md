@@ -80,7 +80,8 @@ uv run pytest              # full test suite with coverage
 
 > [!IMPORTANT]
 > Do not bypass pre-commit hooks. If a hook reformats files, re-stage and re-commit.
-> There is no CI pipeline yet, so this local gate is the source of truth — keep it green.
+> A GitHub Actions workflow (`.github/workflows/ci.yml`) runs this same gate on every push
+> and pull request to `main`, so keeping it green locally keeps CI green.
 
 ---
 

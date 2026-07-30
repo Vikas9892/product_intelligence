@@ -3,7 +3,7 @@
 This document covers how to configure and run the Product Intelligence Platform backend, and what production concerns are — and are **not** — yet implemented in the repository.
 
 > [!IMPORTANT]
-> The repository currently ships the **application and its worker process only**. There is no Dockerfile, no CI/CD workflow, no Kubernetes/Terraform, no relational database, and no cloud/AWS configuration in the repo. Sections describing those are explicitly marked **Planned — not implemented** and act as placeholders for the production-deployment phase.
+> Continuous integration **is** implemented (GitHub Actions — see [below](#continuous-integration-github-actions)). What the repository does **not** yet contain is a Dockerfile, Kubernetes/Terraform manifests, a relational database, or any cloud/AWS configuration. Sections describing those are explicitly marked **Planned — not implemented** and act as placeholders for the production-deployment phase.
 
 ---
 
@@ -19,9 +19,9 @@ This document covers how to configure and run the Product Intelligence Platform 
 - [Running the workers](#running-the-workers)
 - [Production configuration checklist](#production-configuration-checklist)
 - [Observability in production](#observability-in-production)
+- [Continuous integration (GitHub Actions)](#continuous-integration-github-actions)
 - [Planned — Docker](#planned--docker)
 - [Planned — relational database](#planned--relational-database)
-- [Planned — CI/CD (GitHub Actions)](#planned--cicd-github-actions)
 - [Planned — infrastructure and cloud](#planned--infrastructure-and-cloud)
 - [Deployment strategy (target)](#deployment-strategy-target)
 
@@ -204,22 +204,26 @@ _Placeholder — no database deployment steps apply today._
 
 ---
 
-## Planned — CI/CD (GitHub Actions)
+## Continuous integration (GitHub Actions)
 
-> **Status: not implemented.** There is no `.github/workflows/` directory.
+> **Status: implemented.** Workflow: `.github/workflows/ci.yml` (at the repository root).
 
-The quality gate currently runs **locally** and via pre-commit hooks:
+A single `backend` job runs on every **push** and **pull request** to `main`, with its
+working directory set to `backend/`. It uses `uv` with a cached, **locked** dependency
+install (`uv sync --locked`, so dependency drift fails CI rather than being papered over)
+and Python pinned via `backend/.python-version`. The job runs the full quality gate:
 
-```bash
-uv run ruff check .
-uv run black --check .
-uv run mypy .
-uv run pytest
+```yaml
+- uv run ruff check .      # lint
+- uv run black --check .   # format check
+- uv run mypy .            # type check
+- uv run pytest            # tests with coverage
 ```
 
-Target CI once added: run the gate above on every push/PR and block merges on failure.
-
-_Placeholder — add workflow files and badges here when implemented._
+The workflow declares least-privilege `contents: read` permissions — it only reads the
+repository and never writes back. The same gate runs locally as pre-commit hooks, so a
+clean local commit should produce a green CI run. Build status is shown by the CI badge
+at the top of the [README](./README.md).
 
 ---
 

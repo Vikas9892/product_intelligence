@@ -2,7 +2,7 @@
 
 This document describes the technical design of the Product Intelligence Platform backend: its layering, request and worker pipelines, retrieval and ranking flows, the enterprise layer, observability, and the responsibilities of each service and folder.
 
-> Everything here reflects the current implementation. Components that do not exist in the repository (containerization, CI, orchestration, cloud, relational database) are **not** described as if they do — see [DEPLOYMENT.md](./DEPLOYMENT.md) for those planned placeholders.
+> Everything here reflects the current implementation. Components that do not exist in the repository (containerization, orchestration, cloud, relational database) are **not** described as if they do — see [DEPLOYMENT.md](./DEPLOYMENT.md) for those planned placeholders. Continuous integration (GitHub Actions) is in place and is covered in DEPLOYMENT.md.
 
 ---
 

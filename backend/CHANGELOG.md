@@ -21,8 +21,10 @@ by 1327 tests at 99% branch coverage.
   `DEMO.md`, `CHANGELOG.md`, `CONTRIBUTING.md`.
 
 ### Notes
-- No relational database, containerization, CI/CD, or cloud deployment is included yet;
-  these are tracked as the remaining production-deployment work (see `DEPLOYMENT.md`).
+- Continuous integration (GitHub Actions) runs the full quality gate on every push and
+  pull request to `main`.
+- No relational database, containerization, or cloud deployment is included yet; these are
+  tracked as the remaining production-deployment work (see `DEPLOYMENT.md`).
 
 ---
 

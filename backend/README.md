@@ -3,6 +3,7 @@
 > A multi-modal product intelligence engine that turns a product image and its metadata into search, recommendations, duplicate detection, and price estimates — built as a fully-typed, test-driven FastAPI backend.
 
 <p>
+  <a href="https://github.com/Vikas9892/product_intelligence/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Vikas9892/product_intelligence/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.139-009688?logo=fastapi&logoColor=white">
   <img alt="Qdrant" src="https://img.shields.io/badge/Qdrant-Vector%20Search-DC244C">
@@ -339,10 +340,9 @@ A `scripts/benchmark.py` harness exists for measuring the retrieval pipeline. **
 
 ## Future work
 
-The remaining planned milestone is **production deployment**, none of which currently exists in the repository:
+Continuous integration is already in place — a GitHub Actions workflow runs the full quality gate (ruff, black, mypy, pytest) on every push and pull request to `main`. The remaining planned milestone is **production deployment**, none of which currently exists in the repository:
 
 - Containerization (Docker / Compose)
-- CI/CD pipeline (GitHub Actions)
 - Orchestration (Kubernetes) and infrastructure-as-code (Terraform)
 - Cloud deployment (AWS) and a hosted demo
 - A frontend client

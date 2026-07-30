@@ -18,6 +18,13 @@ export const env = {
   apiPrefix: process.env.NEXT_PUBLIC_API_PREFIX ?? "/api/v1",
   /** Header name used for API-key auth when the enterprise layer is enabled. */
   apiKeyHeader: process.env.NEXT_PUBLIC_API_KEY_HEADER ?? "X-API-Key",
+  /**
+   * Whether the deployment runs against a backend with the enterprise layer
+   * enabled. `false` (the default) is single-tenant demo mode: no auth gate,
+   * no API key required. Set to `true` when the backend has
+   * `ENTERPRISE__ENABLED=true` so the UI activates API-key auth and RBAC gating.
+   */
+  enterpriseEnabled: process.env.NEXT_PUBLIC_ENTERPRISE_ENABLED === "true",
   /** Display name used in the UI shell and document title. */
   appName: process.env.NEXT_PUBLIC_APP_NAME ?? "Product Intelligence",
 } as const;

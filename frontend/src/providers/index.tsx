@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 
+import { AuthInitializer } from "@/components/auth/auth-initializer";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 import { QueryProvider } from "./query-provider";
@@ -19,7 +20,10 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <QueryProvider>
       <ThemeProvider>
-        <TooltipProvider>{children}</TooltipProvider>
+        <TooltipProvider>
+          <AuthInitializer />
+          {children}
+        </TooltipProvider>
       </ThemeProvider>
     </QueryProvider>
   );

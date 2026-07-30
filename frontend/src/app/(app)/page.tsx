@@ -1,16 +1,9 @@
-import { LayoutDashboard } from "lucide-react";
+import type { Metadata } from "next";
 
-import { PageHeader } from "@/components/common/page-header";
-import { PagePlaceholder } from "@/components/common/page-placeholder";
+import { DashboardView } from "@/features/dashboard/dashboard-view";
+
+export const metadata: Metadata = { title: "Dashboard" };
 
 export default function DashboardPage() {
-  return (
-    <>
-      <PageHeader
-        title="Dashboard"
-        description="Overview of catalog activity, pipeline health, and usage."
-      />
-      <PagePlaceholder icon={LayoutDashboard} stage="Stage 4" />
-    </>
-  );
+  return <DashboardView />;
 }

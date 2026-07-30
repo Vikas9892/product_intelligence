@@ -15,9 +15,13 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Product Intelligence",
+  title: {
+    default: "Product Intelligence",
+    template: "%s · Product Intelligence",
+  },
   description:
     "Multi-modal product intelligence — search, recommendations, duplicate detection, and pricing.",
+  applicationName: "Product Intelligence",
 };
 
 // `suppressHydrationWarning` is required for the theme provider added in

@@ -9,10 +9,15 @@ from fakeredis import aioredis as fake_aioredis
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
 from app.dependencies.enterprise import (
+    enforce_quota,
     get_api_key_repository,
+    get_audit_repository,
+    get_auth_context,
     get_authentication_service,
     get_organization_repository,
+    get_quota_repository,
     require_permission,
 )
 from app.exceptions.base import AppException
@@ -20,18 +25,21 @@ from app.exceptions.handlers import register_exception_handlers
 from app.models.auth_context import AuthContext
 from app.models.role import Permission, Role
 from app.repositories.api_key_repository import ApiKeyRepository
+from app.repositories.quota_repository import QuotaRepository
 from app.services.enterprise.authentication_service import AuthenticationService
 
 
 class TestProviders:
     def test_singletons_are_cached(self) -> None:
-        get_organization_repository.cache_clear()
-        get_api_key_repository.cache_clear()
-        get_authentication_service.cache_clear()
-
-        assert get_organization_repository() is get_organization_repository()
-        assert get_api_key_repository() is get_api_key_repository()
-        assert get_authentication_service() is get_authentication_service()
+        for provider in (
+            get_organization_repository,
+            get_api_key_repository,
+            get_authentication_service,
+            get_audit_repository,
+            get_quota_repository,
+        ):
+            provider.cache_clear()
+            assert provider() is provider()
 
 
 @pytest.fixture
@@ -95,3 +103,73 @@ def test_app_exception_is_registered() -> None:
     from app.exceptions.errors import AuthenticationException
 
     assert issubclass(AuthenticationException, AppException)
+
+
+_CONTEXT = AuthContext(
+    organization_id=uuid4(),
+    tenant_id=uuid4(),
+    role=Role.MEMBER,
+    api_key_id=uuid4(),
+    api_key_prefix="pik_abc",
+)
+
+
+@pytest.fixture
+def quota_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.get("/quota-guarded")
+    async def guarded(
+        context: Annotated[AuthContext, Depends(enforce_quota)],
+    ) -> dict[str, str]:
+        return {"tenant_id": str(context.tenant_id)}
+
+    quota_repo = QuotaRepository(redis_client=fake_aioredis.FakeRedis(decode_responses=True))
+    # Bypass real authentication — quota enforcement is what's under test here.
+    app.dependency_overrides[get_auth_context] = lambda: _CONTEXT
+    app.dependency_overrides[get_quota_repository] = lambda: quota_repo
+    with TestClient(app, raise_server_exceptions=False) as client:
+        yield client
+
+
+class TestEnforceQuota:
+    def test_allows_requests_under_the_limits(
+        self, quota_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings.enterprise, "daily_request_quota", 100)
+        monkeypatch.setattr(settings.enterprise, "rate_limit_per_minute", 100)
+
+        assert quota_client.get("/quota-guarded").status_code == 200
+
+    def test_429_when_the_rate_limit_is_exceeded(
+        self, quota_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings.enterprise, "daily_request_quota", 0)  # daily disabled
+        monkeypatch.setattr(settings.enterprise, "rate_limit_per_minute", 1)
+
+        assert quota_client.get("/quota-guarded").status_code == 200  # 1st hit ok
+        response = quota_client.get("/quota-guarded")  # 2nd hit over the per-minute limit
+
+        assert response.status_code == 429
+        assert response.json()["error"]["code"] == "quota_exceeded"
+
+    def test_429_when_the_daily_quota_is_exceeded(
+        self, quota_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings.enterprise, "daily_request_quota", 1)
+        monkeypatch.setattr(settings.enterprise, "rate_limit_per_minute", 0)  # rate limit disabled
+
+        assert quota_client.get("/quota-guarded").status_code == 200
+        assert quota_client.get("/quota-guarded").status_code == 429
+
+    def test_disabled_limits_never_throttle(
+        self, quota_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings.enterprise, "daily_request_quota", 0)
+        monkeypatch.setattr(settings.enterprise, "rate_limit_per_minute", 0)
+
+        for _ in range(5):
+            assert quota_client.get("/quota-guarded").status_code == 200

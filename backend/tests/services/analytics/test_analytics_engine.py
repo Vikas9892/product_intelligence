@@ -4,6 +4,7 @@ from datetime import date
 
 from fakeredis import aioredis as fake_aioredis
 
+from app.core.constants import TrendGranularity
 from app.models.analytics_event import AnalyticsEvent
 from app.models.model_info import ModelInfo
 from app.models.model_status import ModelStatus
@@ -113,3 +114,54 @@ class TestReport:
         assert report.period == "last_7_days"
         assert report.end_date == _END
         assert report.start_date == date(2026, 1, 4)
+
+
+class TestTrend:
+    async def test_daily_trend_has_one_point_per_day(self) -> None:
+        engine, repo = await _engine()
+        await repo.record_event(AnalyticsEvent.UPLOAD, day=_END)
+        await repo.record_event(AnalyticsEvent.UPLOAD, day=_END)
+
+        trend = await engine.trend(
+            event=AnalyticsEvent.UPLOAD,
+            granularity=TrendGranularity.DAILY,
+            periods=3,
+            end=_END,
+        )
+
+        assert trend.granularity == "daily"
+        assert len(trend.points) == 3
+        # Oldest first; the newest point (end day) has the two recorded uploads.
+        assert trend.points[-1].period_start == _END
+        assert trend.points[-1].value == 2.0
+        assert trend.points[0].value == 0.0
+
+    async def test_weekly_trend_sums_each_seven_day_window(self) -> None:
+        engine, repo = await _engine()
+        # Two uploads in the most recent 7-day window (end and end-3).
+        await repo.record_event(AnalyticsEvent.UPLOAD, day=_END)
+        await repo.record_event(AnalyticsEvent.UPLOAD, day=date(2026, 1, 7))
+
+        trend = await engine.trend(
+            event=AnalyticsEvent.UPLOAD,
+            granularity=TrendGranularity.WEEKLY,
+            periods=2,
+            end=_END,
+        )
+
+        assert len(trend.points) == 2
+        assert trend.points[-1].value == 2.0  # newest 7-day window
+        assert trend.points[0].value == 0.0
+
+    async def test_points_are_oldest_first(self) -> None:
+        engine, _repo = await _engine()
+
+        trend = await engine.trend(
+            event=AnalyticsEvent.SEARCH,
+            granularity=TrendGranularity.DAILY,
+            periods=3,
+            end=_END,
+        )
+
+        starts = [p.period_start for p in trend.points]
+        assert starts == sorted(starts)

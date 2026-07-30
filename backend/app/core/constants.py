@@ -66,6 +66,34 @@ class PricingStrategy(StrEnum):
     MEDIAN = "median"
 
 
+class TrendGranularity(StrEnum):
+    """The period length one point in an analytics trend report spans (Phase 18).
+
+    Fixed-length windows (not calendar months) keep the buckets
+    deterministic and trivially derivable from the per-day counters:
+    `DAILY` is one day, `WEEKLY` seven, `MONTHLY` thirty.
+    """
+
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+
+
+#: Days per period for each `TrendGranularity`.
+TREND_GRANULARITY_DAYS: dict[TrendGranularity, int] = {
+    TrendGranularity.DAILY: 1,
+    TrendGranularity.WEEKLY: 7,
+    TrendGranularity.MONTHLY: 30,
+}
+
+
+class ExportFormat(StrEnum):
+    """Response format for the analytics trend export (Phase 18)."""
+
+    JSON = "json"
+    MARKDOWN = "markdown"
+
+
 # --- API ---
 API_V1_PREFIX = "/api/v1"
 

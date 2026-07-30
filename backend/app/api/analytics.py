@@ -15,17 +15,22 @@ whole router is registered only when `ANALYTICS__ENABLED` is on.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi.responses import PlainTextResponse
 
 from app.core.config import settings
+from app.core.constants import ExportFormat, TrendGranularity
 from app.core.logging import get_logger
 from app.dependencies.analytics import get_analytics_engine
+from app.models.analytics_event import AnalyticsEvent
 from app.schemas.analytics import (
     AnalyticsReportResponse,
     DashboardResponse,
     ModelAnalyticsResponse,
+    TrendReportResponse,
 )
 from app.services.analytics.analytics_engine import AnalyticsEngine
+from app.services.analytics.trend_exporter import to_markdown
 
 logger = get_logger(__name__)
 
@@ -82,3 +87,33 @@ async def pipeline(
     )
     logger.info("Pipeline analytics requested.")
     return AnalyticsReportResponse.from_report(report)
+
+
+@router.get(
+    "/trends",
+    response_model=None,
+    status_code=status.HTTP_200_OK,
+    summary="Trend report for one metric",
+    description="Returns a daily/weekly/monthly trend for one event metric, as JSON "
+    "(default) or a Markdown table (format=markdown).",
+)
+async def trends(
+    analytics_engine: Annotated[AnalyticsEngine, Depends(get_analytics_engine)],
+    metric: Annotated[AnalyticsEvent, Query(description="Which event to trend.")] = (
+        AnalyticsEvent.UPLOAD
+    ),
+    granularity: Annotated[TrendGranularity, Query()] = TrendGranularity.DAILY,
+    periods: Annotated[int, Query(gt=0, le=90, description="How many periods to include.")] = 7,
+    export_format: Annotated[ExportFormat, Query(alias="format")] = ExportFormat.JSON,
+) -> TrendReportResponse | Response:
+    """Return a trend report for `metric`, as JSON or Markdown."""
+    report = await analytics_engine.trend(event=metric, granularity=granularity, periods=periods)
+    logger.info(
+        "Trend report requested: metric=%s, granularity=%s, format=%s",
+        metric.value,
+        granularity.value,
+        export_format.value,
+    )
+    if export_format is ExportFormat.MARKDOWN:
+        return PlainTextResponse(to_markdown(report), media_type="text/markdown")
+    return TrendReportResponse.from_trend(report)

@@ -11,7 +11,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
-from app.models.analytics_report import AnalyticsReport, DashboardSummary
+from app.models.analytics_report import AnalyticsReport, DashboardSummary, TrendReport
 from app.models.model_analytics import ModelAnalytics
 from app.models.usage_metrics import UsageMetrics
 
@@ -109,5 +109,32 @@ class AnalyticsReportResponse(BaseModel):
             start_date=report.start_date,
             end_date=report.end_date,
             usage=UsageMetricsInfo.from_usage(report.usage),
+            generated_at=report.generated_at,
+        )
+
+
+class TrendPointInfo(BaseModel):
+    """API-safe view of one `TrendPoint`."""
+
+    period_start: date
+    value: float
+
+
+class TrendReportResponse(BaseModel):
+    """Response body for `GET /analytics/trends` (JSON format)."""
+
+    metric: str
+    granularity: str
+    points: list[TrendPointInfo] = Field(default_factory=list)
+    generated_at: datetime
+
+    @classmethod
+    def from_trend(cls, report: TrendReport) -> "TrendReportResponse":
+        return cls(
+            metric=report.metric,
+            granularity=report.granularity,
+            points=[
+                TrendPointInfo(period_start=p.period_start, value=p.value) for p in report.points
+            ],
             generated_at=report.generated_at,
         )

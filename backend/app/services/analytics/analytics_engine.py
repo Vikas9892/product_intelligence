@@ -10,10 +10,17 @@ share across concurrent requests.
 
 from datetime import UTC, date, datetime, timedelta
 
+from app.core import constants
 from app.core.config import settings
+from app.core.constants import TrendGranularity
 from app.core.logging import get_logger
 from app.models.analytics_event import AnalyticsEvent
-from app.models.analytics_report import AnalyticsReport, DashboardSummary
+from app.models.analytics_report import (
+    AnalyticsReport,
+    DashboardSummary,
+    TrendPoint,
+    TrendReport,
+)
 from app.models.model_analytics import ModelAnalytics, ModelUsage
 from app.models.model_status import ModelStatus
 from app.models.model_type import ModelType
@@ -106,6 +113,38 @@ class AnalyticsEngine:
             usage=usage,
         )
 
+    async def trend(
+        self,
+        *,
+        event: AnalyticsEvent,
+        granularity: TrendGranularity,
+        periods: int,
+        end: date | None = None,
+    ) -> TrendReport:
+        """Build a `TrendReport` for `event` over `periods` fixed-length windows, oldest first.
+
+        Each point sums `event`'s daily counts over one
+        `granularity`-length window (1/7/30 days); the newest window ends
+        on `end` (inclusive, default today).
+        """
+        window_days = constants.TREND_GRANULARITY_DAYS[granularity]
+        end_date = end if end is not None else _today()
+        points: list[TrendPoint] = []
+        for period_index in range(periods):
+            windows_from_newest = periods - 1 - period_index
+            period_end = end_date - timedelta(days=windows_from_newest * window_days)
+            period_start = period_end - timedelta(days=window_days - 1)
+            days = _days_in_range(period_start, period_end)
+            value = float(sum(await self._repository.count_range(event, days)))
+            points.append(TrendPoint(period_start=period_start, value=value))
+        logger.info(
+            "Trend report built: event=%s, granularity=%s, periods=%d",
+            event.value,
+            granularity.value,
+            periods,
+        )
+        return TrendReport(metric=event.value, granularity=granularity.value, points=points)
+
     async def _sum(self, event: AnalyticsEvent, days: list[date]) -> int:
         return sum(await self._repository.count_range(event, days))
 
@@ -118,3 +157,9 @@ def _last_n_days(days: int, *, end: date | None = None) -> list[date]:
     """Return the `days` dates ending on `end` (inclusive), oldest first."""
     end_date = end if end is not None else _today()
     return [end_date - timedelta(days=offset) for offset in range(days - 1, -1, -1)]
+
+
+def _days_in_range(start: date, end: date) -> list[date]:
+    """Return every date from `start` to `end` (inclusive), oldest first."""
+    span = (end - start).days + 1
+    return [start + timedelta(days=offset) for offset in range(span)]

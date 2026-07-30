@@ -51,6 +51,7 @@ _BUSINESS_ROUTE_PATHS = {
     f"{settings.application.api_prefix}/analytics/dashboard",
     f"{settings.application.api_prefix}/analytics/models",
     f"{settings.application.api_prefix}/analytics/pipeline",
+    f"{settings.application.api_prefix}/analytics/trends",
 }
 
 # Expected middleware stack, outermost first — see

@@ -1,7 +1,8 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/common/page-header";
@@ -25,28 +26,42 @@ type Phase = "idle" | "uploading" | "processing" | "failed";
  */
 export function UploadView() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [phase, setPhase] = useState<Phase>("idle");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [productId, setProductId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const upload = useUploadProduct(setUploadProgress);
+  const abortRef = useRef<AbortController | null>(null);
+  const cancelledRef = useRef(false);
+
+  const upload = useUploadProduct(setUploadProgress, () => abortRef.current?.signal);
   const jobStatus = useJobStatus(phase === "processing" ? productId : null);
   const job = jobStatus.data;
+
+  /** A completed upload changes catalog counts — refresh the dashboard's data. */
+  function invalidateDashboard() {
+    void queryClient.invalidateQueries({ queryKey: ["analytics"] });
+  }
 
   useEffect(() => {
     if (phase !== "processing" || !job) return;
     if (job.status === "completed") {
+      invalidateDashboard();
       toast.success("Product processed");
       router.push(`/products/${job.product_id}`);
     } else if (job.status === "failed") {
       setPhase("failed");
     }
+    // invalidateDashboard is stable enough; deps kept minimal intentionally.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, job, router]);
 
   function handleSubmit(formData: FormData) {
     setErrorMessage(null);
     setUploadProgress(0);
+    cancelledRef.current = false;
+    abortRef.current = new AbortController();
     setPhase("uploading");
     upload.mutate(formData, {
       onSuccess: (result) => {
@@ -54,15 +69,23 @@ export function UploadView() {
         if (isAccepted(result)) {
           setPhase("processing");
         } else {
+          invalidateDashboard();
           toast.success("Product processed");
           router.push(`/products/${result.product_id}`);
         }
       },
       onError: (error) => {
+        if (cancelledRef.current) return; // user-initiated cancel, not a failure
         setErrorMessage(parseApiError(error).message);
         setPhase("failed");
       },
     });
+  }
+
+  function cancelUpload() {
+    cancelledRef.current = true;
+    abortRef.current?.abort();
+    reset();
   }
 
   function reset() {
@@ -94,9 +117,12 @@ export function UploadView() {
           </CardHeader>
           <CardContent className="space-y-6">
             {phase === "uploading" ? (
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <p className="text-muted-foreground text-sm">Uploading image… {uploadProgress}%</p>
                 <Progress value={uploadProgress} aria-label="Upload progress" />
+                <Button variant="outline" size="sm" onClick={cancelUpload}>
+                  Cancel
+                </Button>
               </div>
             ) : null}
 

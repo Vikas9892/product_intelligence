@@ -13,11 +13,19 @@ export function isTerminal(status: string): boolean {
   return TERMINAL_STATUSES.has(status);
 }
 
-/** Upload mutation. `onProgress` receives 0..100 during the request body upload. */
-export function useUploadProduct(onProgress?: (percent: number) => void) {
+/**
+ * Upload mutation. `onProgress` receives 0..100 during the request body upload;
+ * `getSignal` supplies an AbortSignal so the in-flight upload can be cancelled
+ * (server-side processing cannot be cancelled — the backend has no such state).
+ */
+export function useUploadProduct(
+  onProgress?: (percent: number) => void,
+  getSignal?: () => AbortSignal | undefined,
+) {
   return useMutation<UploadResult, Error, FormData>({
     mutationFn: (formData) =>
       uploadProduct(formData, {
+        signal: getSignal?.(),
         onUploadProgress: (event) => {
           if (event.total) {
             onProgress?.(Math.round((event.loaded / event.total) * 100));

@@ -1,13 +1,9 @@
-import { Search } from "lucide-react";
+import type { Metadata } from "next";
 
-import { PageHeader } from "@/components/common/page-header";
-import { PagePlaceholder } from "@/components/common/page-placeholder";
+import { ProductSearchView } from "@/features/products/product-search-view";
+
+export const metadata: Metadata = { title: "Products" };
 
 export default function SearchPage() {
-  return (
-    <>
-      <PageHeader title="Search" description="Find similar products by image, text, or both." />
-      <PagePlaceholder icon={Search} stage="Stage 5" />
-    </>
-  );
+  return <ProductSearchView />;
 }

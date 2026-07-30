@@ -28,12 +28,18 @@ export function DataTable<T>({
   getRowKey,
   empty = "No data.",
   className,
+  onRowClick,
+  rowLabel,
 }: {
   columns: Column<T>[];
   rows: T[];
   getRowKey: (row: T, index: number) => string | number;
   empty?: ReactNode;
   className?: string;
+  /** When provided, rows become keyboard-activatable (Enter/Space) and clickable. */
+  onRowClick?: (row: T) => void;
+  /** Accessible label for a clickable row (required for good SR output). */
+  rowLabel?: (row: T) => string;
 }) {
   return (
     <div className={cn("overflow-x-auto rounded-lg border", className)}>
@@ -56,7 +62,24 @@ export function DataTable<T>({
             </TableRow>
           ) : (
             rows.map((row, index) => (
-              <TableRow key={getRowKey(row, index)}>
+              <TableRow
+                key={getRowKey(row, index)}
+                onClick={onRowClick ? () => onRowClick(row) : undefined}
+                role={onRowClick ? "button" : undefined}
+                tabIndex={onRowClick ? 0 : undefined}
+                aria-label={onRowClick ? rowLabel?.(row) : undefined}
+                onKeyDown={
+                  onRowClick
+                    ? (event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          onRowClick(row);
+                        }
+                      }
+                    : undefined
+                }
+                className={onRowClick ? "focus-visible:bg-muted/60 cursor-pointer" : undefined}
+              >
                 {columns.map((col, i) => (
                   <TableCell key={i} className={col.className}>
                     {col.cell(row)}

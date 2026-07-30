@@ -1,9 +1,10 @@
 import type { AxiosProgressEvent } from "axios";
 
 import { API_PREFIX, apiClient } from "../client";
-import { apiGet } from "../http";
+import { apiGet, apiPost } from "../http";
 import type {
   JobStatusResponse,
+  ProductSearchResponse,
   RecommendationsResponse,
   UploadAcceptedResponse,
   UploadResponse,
@@ -42,4 +43,30 @@ export function getJobStatus(productId: string): Promise<JobStatusResponse> {
 /** Recommendations for an already-processed product. */
 export function getRecommendations(productId: string): Promise<RecommendationsResponse> {
   return apiGet<RecommendationsResponse>(`${API_PREFIX}/products/${productId}/recommendations`);
+}
+
+export interface SearchParams {
+  query: string;
+  topK?: number;
+  brand?: string;
+  category?: string;
+  minPrice?: number;
+  maxPrice?: number;
+}
+
+/**
+ * Text search over indexed products (multipart). This is the only catalog
+ * retrieval the backend offers — there is no "list all" endpoint — so the
+ * product list is search-driven. Brand/category/price filters and `top_k` are
+ * real backend parameters; results are ranked by relevance.
+ */
+export function searchProducts(params: SearchParams): Promise<ProductSearchResponse> {
+  const body = new FormData();
+  body.append("query", params.query);
+  if (params.topK !== undefined) body.append("top_k", String(params.topK));
+  if (params.brand) body.append("brand", params.brand);
+  if (params.category) body.append("category", params.category);
+  if (params.minPrice !== undefined) body.append("min_price", String(params.minPrice));
+  if (params.maxPrice !== undefined) body.append("max_price", String(params.maxPrice));
+  return apiPost<ProductSearchResponse>(`${API_PREFIX}/products/search`, body);
 }

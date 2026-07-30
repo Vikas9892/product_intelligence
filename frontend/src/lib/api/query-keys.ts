@@ -16,6 +16,8 @@ export const queryKeys = {
     status: (id: string) => ["products", "status", id] as const,
     recommendations: (id: string) => ["products", "recommendations", id] as const,
     explanations: (id: string) => ["products", "explanations", id] as const,
+    // Metadata carried from a search result (no get-one endpoint exists).
+    meta: (id: string) => ["products", "meta", id] as const,
   },
   search: (params: Record<string, unknown>) => ["search", params] as const,
   pricing: {

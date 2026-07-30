@@ -42,3 +42,8 @@ DUPLICATE_VERIFICATION_DECISIONS_TOTAL = "duplicate_verification_decisions_total
 EXPLANATION_SECONDS = "explanation_seconds"
 EXPLANATIONS_TOTAL = "explanations_total"
 EXPLANATION_CONFIDENCE = "explanation_confidence"
+
+# --- Phase 17: pricing-intelligence metrics ---
+PRICING_SECONDS = "pricing_seconds"
+PRICING_ESTIMATES_TOTAL = "pricing_estimates_total"
+PRICING_CONFIDENCE = "pricing_confidence"

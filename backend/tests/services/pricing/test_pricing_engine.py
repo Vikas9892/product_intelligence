@@ -142,6 +142,37 @@ class TestEstimateForRequest:
             )
 
 
+class TestMetrics:
+    async def test_records_a_pricing_metric(self) -> None:
+        from prometheus_client import CollectorRegistry
+
+        from app.metrics.metrics_registry import MetricsRegistry
+
+        metrics = MetricsRegistry(registry=CollectorRegistry())
+        hybrid = _FakeHybridSearchService(results=[_priced(10.0), _priced(20.0)])
+        engine = PricingEngine(
+            hybrid_search_service=hybrid,
+            estimator=PriceEstimator(strategy=PricingStrategy.MEDIAN, min_comparables=1),
+            top_k=10,
+            metrics_registry=metrics,
+        )
+
+        estimate = await engine.estimate_for_request(
+            name="Widget", brand=None, category=None, description=None
+        )
+
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_pricing_estimates_total",
+                {"confidence": estimate.confidence.value},
+            )
+            == 1.0
+        )
+        assert (
+            metrics._registry.get_sample_value("product_intelligence_pricing_seconds_count") == 1.0
+        )
+
+
 class TestEstimateForProduct:
     async def test_estimates_from_by_id_comparables(self) -> None:
         hybrid = _FakeHybridSearchService(by_id_results=[_priced(50.0), _priced(70.0)])

@@ -222,6 +222,25 @@ class MetricsRegistry:
             namespace=self._namespace,
             registry=self._registry,
         )
+        self.pricing_seconds = get_or_create_histogram(
+            metric_names.PRICING_SECONDS,
+            "Time to produce one price estimate (retrieval + aggregation).",
+            namespace=self._namespace,
+            registry=self._registry,
+        )
+        self.pricing_estimates_total = get_or_create_counter(
+            metric_names.PRICING_ESTIMATES_TOTAL,
+            "Price estimates produced, per confidence band.",
+            ["confidence"],
+            namespace=self._namespace,
+            registry=self._registry,
+        )
+        self.pricing_confidence = get_or_create_histogram(
+            metric_names.PRICING_CONFIDENCE,
+            "Confidence score of each price estimate.",
+            namespace=self._namespace,
+            registry=self._registry,
+        )
 
         self.queue_depth.set_function(lambda: self._poll_queue_length("pending", llen=True))
         self.worker_jobs_running.set_function(
@@ -279,6 +298,14 @@ class MetricsRegistry:
             return
         self.worker_jobs_total.labels(status=status).inc()
         self.worker_job_duration_seconds.observe(seconds)
+
+    def record_pricing(self, *, seconds: float, confidence: str, confidence_score: float) -> None:
+        """Record one price estimate's latency, confidence band, and confidence score (Phase 17)."""
+        if not self._enabled:
+            return
+        self.pricing_seconds.observe(seconds)
+        self.pricing_estimates_total.labels(confidence=confidence).inc()
+        self.pricing_confidence.observe(confidence_score)
 
     def record_explanation(
         self, *, decision_type: str, seconds: float, confidence: float | None

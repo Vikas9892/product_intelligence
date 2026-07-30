@@ -32,11 +32,11 @@ on every machine and in CI, before a single line of business logic exists.
 
 ## Roadmap
 
-This project is planned across 20 phases. Phases 1–16 are complete and
+This project is planned across 20 phases. Phases 1–17 are complete and
 documented below (see each phase's own "design decisions" section and
 its entry under
 [How this project was created from scratch](#how-this-project-was-created-from-scratch)).
-Phases 17–20 have not been specified yet — no milestone list, config
+Phases 18–20 have not been specified yet — no milestone list, config
 keys, or scope exists for them, so they're listed here only as
 placeholders in the numbering, not as a commitment to specific future
 functionality.
@@ -60,7 +60,8 @@ functionality.
 | 14 | AI Observability & Monitoring | Complete |
 | 15 | Cross-Encoder Re-ranking & Intelligent Duplicate Verification | Complete |
 | 16 | Explainable AI & Decision Intelligence | Complete |
-| 17–20 | Not yet specified | Planned |
+| 17 | Pricing Intelligence Engine | Complete |
+| 18–20 | Not yet specified | Planned |
 
 ## Folder structure
 
@@ -3511,6 +3512,122 @@ pricing phase — the explainers are built so a `PriceEstimateExplainer`
 slots in the same way. No rewrite of any existing reason/signal type, no
 change to any inference path.
 
+## Phase 17 — Pricing Intelligence Engine design decisions
+
+This phase estimates a fair market price for a product from
+*semantically similar priced products* — retrieval-driven, not
+static rules — using deterministic algorithms over the comparables the
+existing search pipeline finds.
+
+### Reuses Retrieval, Trains Nothing
+
+Pricing runs **no ML training and no new model**. It reuses the
+retrieval pipeline (`HybridSearchService`, and the Phase 11 cross-encoder
+when reranking is on) to find comparable products, then applies plain,
+reproducible arithmetic. The same comparables and strategy always produce
+the same estimate — no randomness anywhere. That's why `PRICING__ENABLED`
+defaults **on** (unlike the reranker/verification flags): pricing itself
+adds no heavy model load; it's only as heavy as the retrieval it reuses.
+
+### Architecture
+
+```
+   POST /pricing/estimate (described)     GET /pricing/{id} (indexed)
+             │                                      │
+             ▼                                      ▼
+   HybridSearchService.search            search_by_product_id
+   (text query, optional rerank)         (reuses stored embedding)
+             └──────────────┬───────────────────────┘
+                            ▼
+                    PriceNormalizer
+              (keep positively-priced comparables)
+                            ▼
+                    PriceEstimator
+        IQR outlier removal ─► aggregate (strategy) ─► confidence
+                            ▼
+                      PriceEstimate
+             {price, confidence, comparables, reason}
+```
+
+`PricingEngine` is the concrete `BasePricingService`; a route depends on
+that interface, not the engine. Two entry points: price a *described*
+(not-yet-indexed) product from its text, or price an *already-indexed*
+product by ID (reusing its stored embedding, target excluded).
+
+### The Algorithms (deterministic)
+
+1. **Outlier removal** — a Tukey IQR fence drops comparables whose price
+   falls outside `[Q1 − k·IQR, Q3 + k·IQR]` (`k = OUTLIER_IQR_MULTIPLIER`,
+   default `1.5`), *before* aggregation, so even the mean-based strategies
+   aren't skewed by a mispriced listing. Skipped below four comparables
+   (quartiles aren't meaningful).
+2. **Aggregation** (`PRICING__STRATEGY`):
+   - **weighted average** — prices weighted by each comparable's
+     similarity, so a closer match pulls the estimate more.
+   - **trimmed mean** — drops the cheapest/most-expensive `TRIM_RATIO`
+     fraction from each end before averaging.
+   - **median** — the middle price, fully robust to extremes.
+3. **Confidence** — blends how many comparables survived (`count_factor`,
+   saturating at twice `MIN_COMPARABLES`) with how tightly their prices
+   agree (`spread_factor = 1 − coefficient_of_variation`). Plentiful *and*
+   consistent comparables score `HIGH`; below `MIN_COMPARABLES` the band
+   is forced `LOW` no matter how tight — too little evidence to trust.
+
+Every estimate carries a human-readable `pricing_reason` (strategy,
+comparable count, outliers removed, confidence band) — the phase's
+"explainable pricing" requirement.
+
+### API
+
+- `POST /pricing/estimate` — price a described product from a JSON body
+  (`name` required; `top_k` overridable).
+- `GET /pricing/{product_id}` — price an already-indexed product by ID
+  (`404` if not indexed).
+
+Both return `{estimated_price, confidence, confidence_score, strategy,
+comparable_count, pricing_reason, comparables[]}`. `estimated_price` is
+`0.0` with `confidence="low"` and no comparables when nothing priced could
+be found — distinguishable from a real (always `> 0`) estimate. The
+router is registered only when `PRICING__ENABLED` is on.
+
+### Metrics (Phase 14 integration)
+
+`PricingEngine` records three metrics through the existing
+`MetricsRegistry`: `pricing_seconds` (latency, retrieval + aggregation),
+`pricing_estimates_total{confidence=…}` (count + confidence-band
+distribution), and `pricing_confidence` (confidence-score distribution).
+
+### Benchmarking pricing accuracy
+
+No pricing dataset ships with the repo, so a full accuracy harness isn't
+built here (the same reason the retrieval benchmark, Phase 10, ships its
+own small dataset and pricing has none). The intended evaluation is
+standard and deterministic: hold out a set of already-priced products,
+call `GET /pricing/{id}` for each (its own price excluded, since
+`search_by_product_id` excludes the target), and compare the estimate
+against the true price with MAPE (mean absolute percentage error). Because
+the whole engine is deterministic, such a benchmark is fully reproducible
+run to run.
+
+### Configuration
+
+New settings under `PricingSettings` (env prefix `PRICING__`):
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `PRICING__ENABLED` | `true` | Registers the pricing endpoints |
+| `PRICING__STRATEGY` | `trimmed_mean` | Aggregation algorithm |
+| `PRICING__TOP_K` | `20` | How many comparables to retrieve |
+| `PRICING__TRIM_RATIO` | `0.1` | Fraction trimmed per end for trimmed mean (`0 ≤ x < 0.5`) |
+| `PRICING__MIN_COMPARABLES` | `3` | Below this, confidence can't exceed LOW |
+| `PRICING__OUTLIER_IQR_MULTIPLIER` | `1.5` | Tukey fence multiplier for outlier removal |
+
+### Explicitly out of scope this phase
+
+No ML price model, no training, no time-series/seasonal modeling, no
+currency conversion — deterministic retrieval-plus-arithmetic only, per
+the phase's own "no ML training, deterministic algorithms" requirement.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -5132,5 +5249,67 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden explanation coverage and document Phase 16 (Phase 16 milestone 6/6)"
+git push
+```
+
+## Phase 17 — Pricing Intelligence Engine (built from scratch)
+
+```bash
+# Milestone 1/6 — pricing domain + config
+#   app/core/constants.py — PricingStrategy enum
+#   app/models/price_confidence.py, comparable_product.py, price_estimate.py
+#   app/core/settings.py — PricingSettings; app/exceptions/errors.py — PricingException
+#   app/schemas/pricing.py — PricingRequest/PricingResponse
+#   backend/.env.example — PRICING__ variables; tests/models/, tests/schemas/, tests/core/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add pricing domain and config (Phase 17 milestone 1/6)"
+
+# Milestone 2/6 — price normalizer + estimator
+#   app/services/pricing/price_normalizer.py — extracts positively-priced comparables
+#   price_estimator.py — weighted average / trimmed mean / median + count-based confidence
+#   base_pricing_service.py — the interface; tests/services/pricing/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add price normalizer and estimator (Phase 17 milestone 2/6)"
+
+# Milestone 3/6 — comparable retrieval
+#   app/services/pricing/pricing_engine.py — reuses HybridSearchService.search /
+#   search_by_product_id, normalizes, estimates; app/dependencies/pricing.py
+#   tests/services/pricing/, tests/dependencies/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add pricing engine comparable retrieval (Phase 17 milestone 3/6)"
+
+# Milestone 4/6 — pricing algorithms
+#   app/services/pricing/price_estimator.py — IQR outlier removal + spread-aware
+#   confidence (count x price agreement); tests/services/pricing/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add outlier removal and spread-aware confidence (Phase 17 milestone 4/6)"
+
+# Milestone 5/6 — pricing API
+#   app/api/pricing.py — POST /pricing/estimate, GET /pricing/{product_id}
+#   app/application.py — pricing_router registered behind PRICING__ENABLED
+#   tests/api/test_pricing.py, tests/test_application.py
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add pricing API (Phase 17 milestone 5/6)"
+
+# Milestone 6/6 — metrics + documentation
+#   app/metrics/metric_names.py, metrics_registry.py — pricing_seconds,
+#   pricing_estimates_total (per confidence band), pricing_confidence
+#   app/services/pricing/pricing_engine.py — records pricing metrics
+#   backend/README.md — this section, the Phase 17 design-decisions section
+#   (architecture + algorithms + benchmark), and the Roadmap update
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "feat: add pricing metrics and document Phase 17 (Phase 17 milestone 6/6)"
 git push
 ```

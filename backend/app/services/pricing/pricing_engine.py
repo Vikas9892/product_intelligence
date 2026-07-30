@@ -85,6 +85,7 @@ class PricingEngine(BasePricingService):
         unexpectedly; an underlying `AppException` (e.g. a search failure)
         propagates as itself.
         """
+        start = time.monotonic()
         text = build_text_representation(name, brand, category, description)
         resolved_top_k = top_k if top_k is not None else self._top_k
         try:
@@ -95,7 +96,7 @@ class PricingEngine(BasePricingService):
             raise
         except Exception as exc:
             raise PricingException("Failed to retrieve comparable products.") from exc
-        return self._estimate(results)
+        return self._estimate(results, start=start)
 
     async def estimate_for_product(self, product_id: UUID) -> PriceEstimate:
         """Estimate a fair price for an already-indexed product, by ID.
@@ -106,6 +107,7 @@ class PricingEngine(BasePricingService):
         if `product_id` isn't indexed (propagated from the search), or
         `PricingException` (500) if retrieval fails unexpectedly.
         """
+        start = time.monotonic()
         try:
             results = await self._hybrid_search_service.search_by_product_id(
                 product_id, top_k=self._top_k
@@ -114,12 +116,17 @@ class PricingEngine(BasePricingService):
             raise
         except Exception as exc:
             raise PricingException("Failed to retrieve comparable products.") from exc
-        return self._estimate(results)
+        return self._estimate(results, start=start)
 
-    def _estimate(self, results: list[HybridSearchResult]) -> PriceEstimate:
-        start = time.monotonic()
+    def _estimate(self, results: list[HybridSearchResult], *, start: float) -> PriceEstimate:
         comparables = self._normalizer.to_comparables(results)
         estimate = self._estimator.estimate(comparables)
+        seconds = time.monotonic() - start
+        self._metrics.record_pricing(
+            seconds=seconds,
+            confidence=estimate.confidence.value,
+            confidence_score=estimate.confidence_score,
+        )
         logger.info(
             "Price estimate complete: retrieved=%d, priced=%d, price=%.2f, "
             "confidence=%s, processing_time=%.4fs",
@@ -127,6 +134,6 @@ class PricingEngine(BasePricingService):
             estimate.comparable_count,
             estimate.estimated_price,
             estimate.confidence.value,
-            time.monotonic() - start,
+            seconds,
         )
         return estimate

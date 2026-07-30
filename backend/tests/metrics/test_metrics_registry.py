@@ -314,6 +314,27 @@ class TestRecordExplanation:
         )
 
 
+class TestRecordPricing:
+    def test_records_latency_confidence_band_and_score(self) -> None:
+        metrics = _registry()
+
+        metrics.record_pricing(seconds=0.02, confidence="high", confidence_score=0.9)
+
+        assert (
+            metrics._registry.get_sample_value("product_intelligence_pricing_seconds_count") == 1.0
+        )
+        assert (
+            metrics._registry.get_sample_value(
+                "product_intelligence_pricing_estimates_total", {"confidence": "high"}
+            )
+            == 1.0
+        )
+        assert (
+            metrics._registry.get_sample_value("product_intelligence_pricing_confidence_count")
+            == 1.0
+        )
+
+
 class TestDisabledNoOpsEverywhere:
     def test_every_record_and_observe_method_no_ops_when_disabled(self) -> None:
         metrics = _registry(enabled=False)
@@ -326,6 +347,7 @@ class TestDisabledNoOpsEverywhere:
         metrics.record_worker_job(status="success", seconds=1.0)
         metrics.record_duplicate_verification(confidence=0.9, is_duplicate=True)
         metrics.record_explanation(decision_type="duplicate", seconds=1.0, confidence=0.9)
+        metrics.record_pricing(seconds=1.0, confidence="high", confidence_score=0.9)
 
         # `model_load_seconds`/`worker_jobs_total` are labeled — no sample
         # exists at all until `.labels(...)` is actually called.

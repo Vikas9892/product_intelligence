@@ -113,3 +113,61 @@ class TestStrategyOverride:
         estimate = estimator.estimate(comparables, strategy=PricingStrategy.TRIMMED_MEAN)
 
         assert estimate.strategy is PricingStrategy.TRIMMED_MEAN
+
+
+class TestOutlierRemoval:
+    def test_drops_a_clear_price_outlier(self) -> None:
+        estimator = PriceEstimator(
+            strategy=PricingStrategy.MEDIAN, min_comparables=1, outlier_iqr_multiplier=1.5
+        )
+        # Ten tightly-clustered prices plus one absurd listing.
+        comparables = [_comparable(float(p)) for p in range(10, 20)] + [_comparable(100000.0)]
+
+        estimate = estimator.estimate(comparables)
+
+        assert estimate.comparable_count == 10
+        assert "removing 1 price outlier" in estimate.reason
+        assert all(c.price < 1000 for c in estimate.comparables)
+
+    def test_disabled_when_multiplier_is_zero(self) -> None:
+        estimator = PriceEstimator(
+            strategy=PricingStrategy.MEDIAN, min_comparables=1, outlier_iqr_multiplier=0.0
+        )
+        comparables = [_comparable(float(p)) for p in range(10, 20)] + [_comparable(100000.0)]
+
+        estimate = estimator.estimate(comparables)
+
+        assert estimate.comparable_count == 11
+
+    def test_skipped_for_fewer_than_four_comparables(self) -> None:
+        estimator = PriceEstimator(
+            strategy=PricingStrategy.MEDIAN, min_comparables=1, outlier_iqr_multiplier=1.5
+        )
+        comparables = [_comparable(10.0), _comparable(11.0), _comparable(100000.0)]
+
+        estimate = estimator.estimate(comparables)
+
+        assert estimate.comparable_count == 3
+
+
+class TestSpreadConfidence:
+    def test_tight_spread_over_many_is_high(self) -> None:
+        estimator = PriceEstimator(strategy=PricingStrategy.MEDIAN, min_comparables=3)
+
+        estimate = estimator.estimate([_comparable(100.0) for _ in range(6)])
+
+        assert estimate.confidence is PriceConfidence.HIGH
+        assert estimate.confidence_score == 1.0
+
+    def test_wide_spread_lowers_confidence(self) -> None:
+        estimator = PriceEstimator(
+            strategy=PricingStrategy.MEDIAN, min_comparables=3, outlier_iqr_multiplier=0.0
+        )
+        wide = [_comparable(float(p)) for p in (10, 20, 30, 40, 50, 60)]
+
+        estimate = estimator.estimate(wide)
+
+        # cv ~ 0.49 -> spread_factor ~ 0.51 -> MEDIUM, and strictly below the
+        # confidence a same-count tight cluster would earn.
+        assert estimate.confidence is PriceConfidence.MEDIUM
+        assert estimate.confidence_score < 1.0

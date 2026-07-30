@@ -36,23 +36,23 @@
 The frontend consumes exactly the following surface. Nothing here is invented — each row is
 an existing route.
 
-| Domain | Method & path (under `/api/v1`) | Request | Response |
-|---|---|---|---|
-| Upload | `POST /products/upload` | `multipart/form-data`: `name`, `file`, `brand?`, `description?`, `category?`, `price?` | `202` `UploadAcceptedResponse` (async) **or** `201` `UploadResponse` (sync) |
-| Job status | `GET /products/{id}/status` | — | `JobStatusResponse` (`status`, `progress`, `current_stage`, `retry_count`, …) |
-| Search | `POST /products/search` | `multipart/form-data`: `file?`, `query?` (≥1 required), `top_k`, `brand?`, `category?`, `min_price?`, `max_price?` | `ProductSearchResponse` (`results[]`: `product_id`, `score`, `matched_modalities`, `metadata`) |
-| Recommendations | `GET /products/{id}/recommendations` | — | `RecommendationsResponse` (`recommendation_type`, `recommendations[]`) |
-| Duplicate check | `POST /products/check-duplicate` | `multipart/form-data` (like upload) | `DuplicateCheckResponse` (`duplicate`, `confidence`, `signals`, `top_candidates[]`, `cross_encoder_score?`, `reasons[]`) |
-| Pricing | `POST /pricing/estimate` | JSON `PricingRequest` (`name`, `brand?`, `category?`, `description?`, `top_k?`) | `PricingResponse` (`estimated_price`, `confidence`, `strategy`, `comparables[]`, …) |
-| Pricing (by id) | `GET /pricing/{product_id}` | — | `PricingResponse` |
-| Explanations | `GET /recommendations/{id}/trace` · `/duplicates/{id}/trace` · `/products/{id}/explanations` | — | `TraceBundleResponse` / `ProductExplanationsResponse` |
-| Jobs | `GET /jobs/{id}` · `GET /jobs/dead-letter` | — | `JobStatusResponse` / list |
-| Evaluation | `POST /evaluation/run` · `POST /evaluation/compare-reranking` | JSON | `EvaluationRunResponse` / `RerankComparisonResponse` |
-| Models | `GET /models` · `/models/{type}` · `/models/{type}/active` | — | `ModelInfoResponse`(s) |
-| Analytics | `GET /analytics/dashboard` · `/models` · `/pipeline` · `/trends` | — | `DashboardResponse`, `ModelAnalyticsResponse`, `AnalyticsReportResponse`, `TrendReportResponse` |
-| Enterprise | `POST/GET /organizations` · `POST/GET /api-keys` · `DELETE /api-keys/{prefix}` · `GET /audit` · `GET /usage` | JSON | `OrganizationBootstrapResponse`, `ApiKeyInfo[]`, `AuditEventInfo[]`, `UsageResponse`, … |
-| Ops | `GET /system/health` · `/system/stats` · `/health` · `/ready` · `/version` | — | `SystemHealthResponse`, `SystemStatsResponse`, … |
-| Metrics | `GET /metrics` | — | Prometheus text exposition (not a UI data source; see §12) |
+| Domain          | Method & path (under `/api/v1`)                                                                              | Request                                                                                                            | Response                                                                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| Upload          | `POST /products/upload`                                                                                      | `multipart/form-data`: `name`, `file`, `brand?`, `description?`, `category?`, `price?`                             | `202` `UploadAcceptedResponse` (async) **or** `201` `UploadResponse` (sync)                                              |
+| Job status      | `GET /products/{id}/status`                                                                                  | —                                                                                                                  | `JobStatusResponse` (`status`, `progress`, `current_stage`, `retry_count`, …)                                            |
+| Search          | `POST /products/search`                                                                                      | `multipart/form-data`: `file?`, `query?` (≥1 required), `top_k`, `brand?`, `category?`, `min_price?`, `max_price?` | `ProductSearchResponse` (`results[]`: `product_id`, `score`, `matched_modalities`, `metadata`)                           |
+| Recommendations | `GET /products/{id}/recommendations`                                                                         | —                                                                                                                  | `RecommendationsResponse` (`recommendation_type`, `recommendations[]`)                                                   |
+| Duplicate check | `POST /products/check-duplicate`                                                                             | `multipart/form-data` (like upload)                                                                                | `DuplicateCheckResponse` (`duplicate`, `confidence`, `signals`, `top_candidates[]`, `cross_encoder_score?`, `reasons[]`) |
+| Pricing         | `POST /pricing/estimate`                                                                                     | JSON `PricingRequest` (`name`, `brand?`, `category?`, `description?`, `top_k?`)                                    | `PricingResponse` (`estimated_price`, `confidence`, `strategy`, `comparables[]`, …)                                      |
+| Pricing (by id) | `GET /pricing/{product_id}`                                                                                  | —                                                                                                                  | `PricingResponse`                                                                                                        |
+| Explanations    | `GET /recommendations/{id}/trace` · `/duplicates/{id}/trace` · `/products/{id}/explanations`                 | —                                                                                                                  | `TraceBundleResponse` / `ProductExplanationsResponse`                                                                    |
+| Jobs            | `GET /jobs/{id}` · `GET /jobs/dead-letter`                                                                   | —                                                                                                                  | `JobStatusResponse` / list                                                                                               |
+| Evaluation      | `POST /evaluation/run` · `POST /evaluation/compare-reranking`                                                | JSON                                                                                                               | `EvaluationRunResponse` / `RerankComparisonResponse`                                                                     |
+| Models          | `GET /models` · `/models/{type}` · `/models/{type}/active`                                                   | —                                                                                                                  | `ModelInfoResponse`(s)                                                                                                   |
+| Analytics       | `GET /analytics/dashboard` · `/models` · `/pipeline` · `/trends`                                             | —                                                                                                                  | `DashboardResponse`, `ModelAnalyticsResponse`, `AnalyticsReportResponse`, `TrendReportResponse`                          |
+| Enterprise      | `POST/GET /organizations` · `POST/GET /api-keys` · `DELETE /api-keys/{prefix}` · `GET /audit` · `GET /usage` | JSON                                                                                                               | `OrganizationBootstrapResponse`, `ApiKeyInfo[]`, `AuditEventInfo[]`, `UsageResponse`, …                                  |
+| Ops             | `GET /system/health` · `/system/stats` · `/health` · `/ready` · `/version`                                   | —                                                                                                                  | `SystemHealthResponse`, `SystemStatsResponse`, …                                                                         |
+| Metrics         | `GET /metrics`                                                                                               | —                                                                                                                  | Prometheus text exposition (not a UI data source; see §12)                                                               |
 
 **Cross-cutting contract facts the frontend must honor:**
 
@@ -68,22 +68,22 @@ an existing route.
 
 > These are the recommended foundation. They are consequential; see [§17](#17-open-decisions) for the veto points. Everything downstream assumes this stack.
 
-| Concern | Choice | Why |
-|---|---|---|
-| Framework / build | **Next.js 15 (App Router) + React + TypeScript** | File-based routing, nested layouts, automatic code-splitting, image optimization, middleware, and SSR/RSC when useful — the strongest long-term and AWS-deployment story |
-| Routing | **Next.js App Router** (file-based segments, nested layouts, `loading`/`error` conventions) | Built into the framework; no separate router library |
-| Server state | **TanStack Query (React Query)** | Caching, polling (job status), retries, background refetch — ideal for this API |
-| Client/UI state | **Zustand** | Minimal global store for auth/theme/UI; avoids Redux boilerplate |
-| Styling | **Tailwind CSS** | Fast, consistent, themable via CSS variables |
-| Component primitives | **shadcn/ui (Radix UI)** | Accessible, unstyled primitives we own and theme; strong a11y baseline |
-| Theming | **next-themes** | SSR-safe light/dark/system with no flash-of-wrong-theme |
-| Forms | **React Hook Form + Zod** | Typed validation mirroring backend field constraints |
-| HTTP | **Axios** (single typed instance, client components) | Interceptors for auth header + error normalization |
-| **API types** | **`openapi-typescript`** — generated from the backend's `/openapi.json` | Frontend and backend never drift; API changes are caught at compile time |
-| Charts | **Recharts** | Analytics dashboards and trend lines |
-| Icons | **lucide-react** | Matches shadcn conventions |
-| Testing | **Vitest + React Testing Library + MSW** | Unit/integration with mocked API; **Playwright** for E2E |
-| Quality | **ESLint + Prettier + tsc** | Mirrors the backend's ruff/black/mypy discipline |
+| Concern              | Choice                                                                                      | Why                                                                                                                                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Framework / build    | **Next.js 15 (App Router) + React + TypeScript**                                            | File-based routing, nested layouts, automatic code-splitting, image optimization, middleware, and SSR/RSC when useful — the strongest long-term and AWS-deployment story |
+| Routing              | **Next.js App Router** (file-based segments, nested layouts, `loading`/`error` conventions) | Built into the framework; no separate router library                                                                                                                     |
+| Server state         | **TanStack Query (React Query)**                                                            | Caching, polling (job status), retries, background refetch — ideal for this API                                                                                          |
+| Client/UI state      | **Zustand**                                                                                 | Minimal global store for auth/theme/UI; avoids Redux boilerplate                                                                                                         |
+| Styling              | **Tailwind CSS**                                                                            | Fast, consistent, themable via CSS variables                                                                                                                             |
+| Component primitives | **shadcn/ui (Radix UI)**                                                                    | Accessible, unstyled primitives we own and theme; strong a11y baseline                                                                                                   |
+| Theming              | **next-themes**                                                                             | SSR-safe light/dark/system with no flash-of-wrong-theme                                                                                                                  |
+| Forms                | **React Hook Form + Zod**                                                                   | Typed validation mirroring backend field constraints                                                                                                                     |
+| HTTP                 | **Axios** (single typed instance, client components)                                        | Interceptors for auth header + error normalization                                                                                                                       |
+| **API types**        | **`openapi-typescript`** — generated from the backend's `/openapi.json`                     | Frontend and backend never drift; API changes are caught at compile time                                                                                                 |
+| Charts               | **Recharts**                                                                                | Analytics dashboards and trend lines                                                                                                                                     |
+| Icons                | **lucide-react**                                                                            | Matches shadcn conventions                                                                                                                                               |
+| Testing              | **Vitest + React Testing Library + MSW**                                                    | Unit/integration with mocked API; **Playwright** for E2E                                                                                                                 |
+| Quality              | **ESLint + Prettier + tsc**                                                                 | Mirrors the backend's ruff/black/mypy discipline                                                                                                                         |
 
 > [!NOTE]
 > Next.js runs the App Router as a **Node server**. Most business views are interactive
@@ -192,21 +192,21 @@ flowchart TD
     Root --> NotFound["* (404)"]
 ```
 
-| Route | Page | Gated by | Notes |
-|---|---|---|---|
-| `/` | Dashboard | — (analytics optional) | KPIs from analytics + system health; falls back gracefully |
-| `/upload` | Upload | — | Multipart upload + live job progress |
-| `/search` | Search | — | Image/text/hybrid search + filters |
-| `/products/:id` | Product detail | — | Status, recommendations, explanations tabs |
-| `/duplicates` | Duplicate check | — | Ad-hoc verification with signal breakdown |
-| `/pricing` | Pricing | `PRICING__ENABLED` | Estimate form + comparables |
-| `/analytics/*` | Analytics | `ANALYTICS__ENABLED` | Dashboard, models, pipeline, trends |
-| `/evaluation` | Evaluation | `EVALUATION__ENABLED` | Run + reranking comparison |
-| `/models` | Model registry | — | Active/registered models |
-| `/system` | System panel | `METRICS__HEALTH_ENDPOINTS_ENABLED` | Health/stats operational view |
-| `/enterprise/*` | Enterprise admin | `ENTERPRISE__ENABLED` + auth | API keys, audit, usage |
-| `/onboarding` | Onboarding | — | Bootstrap org / paste API key |
-| `*` | NotFound | — | 404 |
+| Route           | Page             | Gated by                            | Notes                                                      |
+| --------------- | ---------------- | ----------------------------------- | ---------------------------------------------------------- |
+| `/`             | Dashboard        | — (analytics optional)              | KPIs from analytics + system health; falls back gracefully |
+| `/upload`       | Upload           | —                                   | Multipart upload + live job progress                       |
+| `/search`       | Search           | —                                   | Image/text/hybrid search + filters                         |
+| `/products/:id` | Product detail   | —                                   | Status, recommendations, explanations tabs                 |
+| `/duplicates`   | Duplicate check  | —                                   | Ad-hoc verification with signal breakdown                  |
+| `/pricing`      | Pricing          | `PRICING__ENABLED`                  | Estimate form + comparables                                |
+| `/analytics/*`  | Analytics        | `ANALYTICS__ENABLED`                | Dashboard, models, pipeline, trends                        |
+| `/evaluation`   | Evaluation       | `EVALUATION__ENABLED`               | Run + reranking comparison                                 |
+| `/models`       | Model registry   | —                                   | Active/registered models                                   |
+| `/system`       | System panel     | `METRICS__HEALTH_ENDPOINTS_ENABLED` | Health/stats operational view                              |
+| `/enterprise/*` | Enterprise admin | `ENTERPRISE__ENABLED` + auth        | API keys, audit, usage                                     |
+| `/onboarding`   | Onboarding       | —                                   | Bootstrap org / paste API key                              |
+| `*`             | NotFound         | —                                   | 404                                                        |
 
 Gated routes are wrapped in a `<FeatureGate flag="...">` guard that resolves availability
 from a capabilities probe (see [§7](#7-authentication-flow) / [§12](#12-api-to-page-mapping)).
@@ -364,14 +364,14 @@ all.
 
 ## 8. State management
 
-| State kind | Tool | Examples |
-|---|---|---|
-| **Server state** | TanStack Query | search results, job status, analytics, models, api keys, usage, audit |
-| **Auth state** | Zustand (`authStore`) | api key, role, tenant/org id, `isAuthenticated` |
-| **UI state** | Zustand (`uiStore`) | sidebar open, active modals, global toasts |
-| **Theme state** | Zustand (`themeStore`) + CSS vars | light/dark/system |
-| **Form state** | React Hook Form | upload, search filters, pricing, api-key creation |
-| **URL state** | Next.js route params + `useSearchParams` | search query & filters, analytics window, pagination |
+| State kind       | Tool                                     | Examples                                                              |
+| ---------------- | ---------------------------------------- | --------------------------------------------------------------------- |
+| **Server state** | TanStack Query                           | search results, job status, analytics, models, api keys, usage, audit |
+| **Auth state**   | Zustand (`authStore`)                    | api key, role, tenant/org id, `isAuthenticated`                       |
+| **UI state**     | Zustand (`uiStore`)                      | sidebar open, active modals, global toasts                            |
+| **Theme state**  | Zustand (`themeStore`) + CSS vars        | light/dark/system                                                     |
+| **Form state**   | React Hook Form                          | upload, search filters, pricing, api-key creation                     |
+| **URL state**    | Next.js route params + `useSearchParams` | search query & filters, analytics window, pagination                  |
 
 Principles: **server data is never copied into Zustand** (Query owns it, single source of
 truth); filters live in the **URL** so views are shareable/back-button-friendly; global
@@ -412,15 +412,15 @@ flowchart TD
 
 ## 10. Loading strategy
 
-| Scenario | Pattern |
-|---|---|
-| Initial page data | **Skeleton** components matching final layout (no spinners-of-doom) |
-| Lists/tables/grids | Skeleton rows/cards; `EmptyState` when zero results |
-| Mutations (upload, search submit, key create) | Button pending state + disabled form |
-| **Async upload processing** | `useJobStatus` polls `GET /products/{id}/status` at ~1.5s interval with backoff, shows a **stepper** (Validating → Processing → Generating recommendations → Completed), stops on terminal state |
-| Background freshness | React Query `staleTime` per domain; silent background refetch |
-| Heavy AI actions (evaluation run) | Long-running progress affordance + optimistic "queued" feedback |
-| Route transitions | Prefetch on hover/intent where cheap; suspense-style fallback per route |
+| Scenario                                      | Pattern                                                                                                                                                                                          |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Initial page data                             | **Skeleton** components matching final layout (no spinners-of-doom)                                                                                                                              |
+| Lists/tables/grids                            | Skeleton rows/cards; `EmptyState` when zero results                                                                                                                                              |
+| Mutations (upload, search submit, key create) | Button pending state + disabled form                                                                                                                                                             |
+| **Async upload processing**                   | `useJobStatus` polls `GET /products/{id}/status` at ~1.5s interval with backoff, shows a **stepper** (Validating → Processing → Generating recommendations → Completed), stops on terminal state |
+| Background freshness                          | React Query `staleTime` per domain; silent background refetch                                                                                                                                    |
+| Heavy AI actions (evaluation run)             | Long-running progress affordance + optimistic "queued" feedback                                                                                                                                  |
+| Route transitions                             | Prefetch on hover/intent where cheap; suspense-style fallback per route                                                                                                                          |
 
 Global config: retry idempotent GETs (2×, exponential); **never** auto-retry non-idempotent
 mutations; `refetchOnWindowFocus` on for dashboards, off for one-shot results.
@@ -445,25 +445,25 @@ mutations; `refetchOnWindowFocus` on for dashboards, off for one-shot results.
 
 ## 12. API-to-page mapping
 
-| Page | Reads | Writes | Feature flag |
-|---|---|---|---|
-| **Dashboard** | `GET /analytics/dashboard`, `GET /system/health`, `GET /version` | — | analytics/system optional |
-| **Upload** | `GET /products/{id}/status` (poll) | `POST /products/upload` | — |
-| **Search** | — | `POST /products/search` | — |
-| **Product detail** | `GET /products/{id}/status`, `GET /products/{id}/recommendations`, `GET /products/{id}/explanations` | — | — |
-| **Duplicates** | — | `POST /products/check-duplicate` | — |
-| **Pricing** | `GET /pricing/{product_id}` | `POST /pricing/estimate` | `PRICING__ENABLED` |
-| **Analytics · Overview** | `GET /analytics/dashboard` | — | `ANALYTICS__ENABLED` |
-| **Analytics · Models** | `GET /analytics/models`, `GET /models` | — | analytics |
-| **Analytics · Pipeline** | `GET /analytics/pipeline` | — | analytics |
-| **Analytics · Trends** | `GET /analytics/trends` | — | analytics |
-| **Evaluation** | — | `POST /evaluation/run`, `POST /evaluation/compare-reranking` | `EVALUATION__ENABLED` |
-| **Models** | `GET /models`, `/models/{type}`, `/models/{type}/active` | — | — |
-| **System** | `GET /system/health`, `GET /system/stats` | — | `METRICS__HEALTH_ENDPOINTS_ENABLED` |
-| **Onboarding** | `GET /usage` (validate) | `POST /organizations` | enterprise |
-| **Enterprise · API keys** | `GET /api-keys` | `POST /api-keys`, `DELETE /api-keys/{prefix}` | `ENTERPRISE__ENABLED` |
-| **Enterprise · Audit** | `GET /audit` | — | enterprise |
-| **Enterprise · Usage** | `GET /usage` | — | enterprise |
+| Page                      | Reads                                                                                                | Writes                                                       | Feature flag                        |
+| ------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ----------------------------------- |
+| **Dashboard**             | `GET /analytics/dashboard`, `GET /system/health`, `GET /version`                                     | —                                                            | analytics/system optional           |
+| **Upload**                | `GET /products/{id}/status` (poll)                                                                   | `POST /products/upload`                                      | —                                   |
+| **Search**                | —                                                                                                    | `POST /products/search`                                      | —                                   |
+| **Product detail**        | `GET /products/{id}/status`, `GET /products/{id}/recommendations`, `GET /products/{id}/explanations` | —                                                            | —                                   |
+| **Duplicates**            | —                                                                                                    | `POST /products/check-duplicate`                             | —                                   |
+| **Pricing**               | `GET /pricing/{product_id}`                                                                          | `POST /pricing/estimate`                                     | `PRICING__ENABLED`                  |
+| **Analytics · Overview**  | `GET /analytics/dashboard`                                                                           | —                                                            | `ANALYTICS__ENABLED`                |
+| **Analytics · Models**    | `GET /analytics/models`, `GET /models`                                                               | —                                                            | analytics                           |
+| **Analytics · Pipeline**  | `GET /analytics/pipeline`                                                                            | —                                                            | analytics                           |
+| **Analytics · Trends**    | `GET /analytics/trends`                                                                              | —                                                            | analytics                           |
+| **Evaluation**            | —                                                                                                    | `POST /evaluation/run`, `POST /evaluation/compare-reranking` | `EVALUATION__ENABLED`               |
+| **Models**                | `GET /models`, `/models/{type}`, `/models/{type}/active`                                             | —                                                            | —                                   |
+| **System**                | `GET /system/health`, `GET /system/stats`                                                            | —                                                            | `METRICS__HEALTH_ENDPOINTS_ENABLED` |
+| **Onboarding**            | `GET /usage` (validate)                                                                              | `POST /organizations`                                        | enterprise                          |
+| **Enterprise · API keys** | `GET /api-keys`                                                                                      | `POST /api-keys`, `DELETE /api-keys/{prefix}`                | `ENTERPRISE__ENABLED`               |
+| **Enterprise · Audit**    | `GET /audit`                                                                                         | —                                                            | enterprise                          |
+| **Enterprise · Usage**    | `GET /usage`                                                                                         | —                                                            | enterprise                          |
 
 > **`GET /metrics`** is Prometheus exposition, **not** a UI data source. The UI uses the
 > JSON `system`/`analytics` endpoints for operational visuals and links out to Grafana/
@@ -645,13 +645,13 @@ Target **WCAG 2.1 AA**.
 
 The foundational forks have been decided and are now locked for Stage 3:
 
-| Decision | Choice | Status |
-|---|---|---|
-| **Framework / build** | **Next.js 15 (App Router)** + React + TypeScript | ✅ Confirmed |
-| **Styling / design system** | Tailwind CSS + shadcn/ui (Radix) + next-themes | ✅ Confirmed |
-| **Server / client state** | TanStack Query + Zustand | ✅ Confirmed |
-| **API types** | **Generated from the backend `/openapi.json`** via `openapi-typescript` | ✅ Confirmed |
-| **Primary demo persona** | **Single-tenant, no auth gate** — app opens to Dashboard/Upload; enterprise onboarding + RBAC are optional and only surface when `ENTERPRISE__ENABLED` | ✅ Confirmed |
+| Decision                    | Choice                                                                                                                                                 | Status       |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------ |
+| **Framework / build**       | **Next.js 15 (App Router)** + React + TypeScript                                                                                                       | ✅ Confirmed |
+| **Styling / design system** | Tailwind CSS + shadcn/ui (Radix) + next-themes                                                                                                         | ✅ Confirmed |
+| **Server / client state**   | TanStack Query + Zustand                                                                                                                               | ✅ Confirmed |
+| **API types**               | **Generated from the backend `/openapi.json`** via `openapi-typescript`                                                                                | ✅ Confirmed |
+| **Primary demo persona**    | **Single-tenant, no auth gate** — app opens to Dashboard/Upload; enterprise onboarding + RBAC are optional and only surface when `ENTERPRISE__ENABLED` | ✅ Confirmed |
 
 **Persona implication (single-tenant default):** the default landing is the **Dashboard**,
 and the full app is reachable without an auth gate. The onboarding flow, API-key handling,
@@ -661,14 +661,14 @@ This keeps the first-run demo friction-free while preserving the multi-tenant ca
 
 **Stage 3 milestone plan** (six commits, mirroring the backend's milestone discipline):
 
-| # | Milestone | Scope |
-|---|---|---|
-| 1 | Repository setup | Next.js 15 + TS + Tailwind + shadcn/ui + ESLint/Prettier + absolute imports + folder structure + env/build config. No pages, no logic, no backend calls. |
-| 2 | Application shell | Root layout, sidebar, top nav, breadcrumbs, theme provider, dark mode, responsive nav, error + loading boundaries. No business pages. |
-| 3 | API infrastructure | Axios client + interceptors, central API layer, **generated OpenAPI types**, error handling, retry policy, TanStack Query config. No feature pages. |
-| 4 | Auth infrastructure | Optional enterprise mode, API-key auth, Zustand auth store, route protection, user context, session handling. No login pages; demo mode needs no auth. |
-| 5 | Shared UI library | Buttons, cards, dialogs, forms, tables, badges, status chips, metric cards, skeletons, chart wrapper, empty/error states — all on shadcn/ui. No feature pages. |
-| 6 | Frontend quality | Accessibility, responsive, code-splitting, performance, theme consistency, loading/error UX, docs, tests. No new features. |
+| #   | Milestone           | Scope                                                                                                                                                          |
+| --- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Repository setup    | Next.js 15 + TS + Tailwind + shadcn/ui + ESLint/Prettier + absolute imports + folder structure + env/build config. No pages, no logic, no backend calls.       |
+| 2   | Application shell   | Root layout, sidebar, top nav, breadcrumbs, theme provider, dark mode, responsive nav, error + loading boundaries. No business pages.                          |
+| 3   | API infrastructure  | Axios client + interceptors, central API layer, **generated OpenAPI types**, error handling, retry policy, TanStack Query config. No feature pages.            |
+| 4   | Auth infrastructure | Optional enterprise mode, API-key auth, Zustand auth store, route protection, user context, session handling. No login pages; demo mode needs no auth.         |
+| 5   | Shared UI library   | Buttons, cards, dialogs, forms, tables, badges, status chips, metric cards, skeletons, chart wrapper, empty/error states — all on shadcn/ui. No feature pages. |
+| 6   | Frontend quality    | Accessibility, responsive, code-splitting, performance, theme consistency, loading/error UX, docs, tests. No new features.                                     |
 
 > With the above confirmed, **Stage 3** proceeds one milestone/commit at a time against this
 > design, keeping the backend untouched.

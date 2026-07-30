@@ -410,6 +410,20 @@ class MetricsSettings(BaseModel):
     namespace: str = "product_intelligence"
 
 
+class AnalyticsSettings(BaseModel):
+    """Analytics-platform configuration (Phase 18).
+
+    `enabled` registers the `/analytics` endpoints; `window_days` is the
+    default trailing window for the dashboard's aggregate usage. On by
+    default — analytics reads Redis daily buckets and the model registry,
+    running no model and adding no per-request work beyond a fail-soft
+    counter increment.
+    """
+
+    enabled: bool = True
+    window_days: int = Field(default=7, gt=0)
+
+
 class PricingSettings(BaseModel):
     """Deterministic pricing-intelligence configuration for `PricingEngine` (Phase 17).
 
@@ -512,6 +526,7 @@ class Settings(BaseSettings):
     )
     async_pipeline: AsyncPipelineSettings = Field(default_factory=AsyncPipelineSettings)
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
+    analytics: AnalyticsSettings = Field(default_factory=AnalyticsSettings)
     pricing: PricingSettings = Field(default_factory=PricingSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)

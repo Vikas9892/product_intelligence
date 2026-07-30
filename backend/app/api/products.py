@@ -52,6 +52,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile,
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.dependencies.analytics import get_analytics_repository
 from app.dependencies.duplicate import get_duplicate_check_service
 from app.dependencies.product import get_product_service
 from app.dependencies.queue import get_queue_manager
@@ -62,8 +63,10 @@ from app.dependencies.recommendation import (
 from app.dependencies.upload import get_upload_service
 from app.exceptions.errors import ResourceNotFoundException
 from app.jobs.base_job import Job
+from app.models.analytics_event import AnalyticsEvent
 from app.models.recommendation_type import RecommendationType
 from app.queue.queue_manager import QueueManager
+from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.recommendation_cache_repository import RecommendationCacheRepository
 from app.schemas.duplicate import (
     DuplicateCandidateInfo,
@@ -113,6 +116,7 @@ async def upload_product(
     upload_service: Annotated[UploadService, Depends(get_upload_service)],
     product_service: Annotated[ProductService, Depends(get_product_service)],
     queue_manager: Annotated[QueueManager, Depends(get_queue_manager)],
+    analytics_repository: Annotated[AnalyticsRepository, Depends(get_analytics_repository)],
     response: Response,
     brand: Annotated[str | None, Form(max_length=100)] = None,
     description: Annotated[str | None, Form(max_length=2000)] = None,
@@ -139,6 +143,7 @@ async def upload_product(
     )
 
     image = await upload_service.save_upload(file)
+    await analytics_repository.record_event(AnalyticsEvent.UPLOAD)
 
     if settings.async_pipeline.enabled:
         return await _queue_for_processing(product_input, image, queue_manager, response)
@@ -231,6 +236,7 @@ async def check_duplicate(
     file: Annotated[UploadFile, File(description="The product image file.")],
     upload_service: Annotated[UploadService, Depends(get_upload_service)],
     duplicate_check_service: Annotated[DuplicateCheckService, Depends(get_duplicate_check_service)],
+    analytics_repository: Annotated[AnalyticsRepository, Depends(get_analytics_repository)],
     brand: Annotated[str | None, Form(max_length=100)] = None,
     description: Annotated[str | None, Form(max_length=2000)] = None,
     category: Annotated[str | None, Form(max_length=100)] = None,
@@ -258,6 +264,7 @@ async def check_duplicate(
     """
     logger.info("Duplicate check requested: product_name=%s, filename=%s", name, file.filename)
 
+    await analytics_repository.record_event(AnalyticsEvent.DUPLICATE_CHECK)
     image = await upload_service.save_upload(file)
     verification = await duplicate_check_service.check(
         name=name,
@@ -356,6 +363,7 @@ async def get_recommendations(
     recommendation_cache_repository: Annotated[
         RecommendationCacheRepository, Depends(get_recommendation_cache_repository)
     ],
+    analytics_repository: Annotated[AnalyticsRepository, Depends(get_analytics_repository)],
     top_k: Annotated[int | None, Query(gt=0)] = None,
     recommendation_type: Annotated[RecommendationType, Query()] = RecommendationType.SIMILAR,
 ) -> RecommendationsResponse:
@@ -370,6 +378,7 @@ async def get_recommendations(
     indexed — this route stays a thin adapter, same as every other route
     in this module.
     """
+    await analytics_repository.record_event(AnalyticsEvent.RECOMMENDATION)
     result = None
     if recommendation_type is RecommendationType.SIMILAR and top_k is None:
         result = await recommendation_cache_repository.get(product_id)

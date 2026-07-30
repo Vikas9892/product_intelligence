@@ -7,6 +7,7 @@ from app.core import paths
 from app.core.constants import DuplicateDetectionMode, Environment, LogLevel, PricingStrategy
 from app.core.settings import (
     AIModelSettings,
+    AnalyticsSettings,
     ApplicationSettings,
     AsyncPipelineSettings,
     CatalogIntelligenceSettings,
@@ -293,6 +294,18 @@ class TestAsyncPipelineSettings:
     def test_rejects_a_non_positive_worker_concurrency(self) -> None:
         with pytest.raises(ValidationError):
             AsyncPipelineSettings(worker_concurrency=0)
+
+
+class TestAnalyticsSettings:
+    def test_defaults(self) -> None:
+        settings = AnalyticsSettings()
+
+        assert settings.enabled is True
+        assert settings.window_days == 7
+
+    def test_rejects_a_non_positive_window(self) -> None:
+        with pytest.raises(ValidationError):
+            AnalyticsSettings(window_days=0)
 
 
 class TestPricingSettings:

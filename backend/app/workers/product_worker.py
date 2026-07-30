@@ -48,6 +48,7 @@ from app.jobs.job_types import JobType
 from app.metrics.metrics_registry import MetricsRegistry
 from app.models.recommendation_type import RecommendationType
 from app.queue.queue_manager import QueueManager
+from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.recommendation_cache_repository import RecommendationCacheRepository
 from app.schemas.product import ProductCreate, ProductImage
 from app.services.product_service import ProductService
@@ -81,6 +82,7 @@ class ProductWorker:
         recommendation_engine_service: RecommendationEngineService | None = None,
         recommendation_cache_repository: RecommendationCacheRepository | None = None,
         metrics_registry: MetricsRegistry | None = None,
+        analytics_repository: AnalyticsRepository | None = None,
     ) -> None:
         self._queue_manager = queue_manager if queue_manager is not None else QueueManager()
         self._product_service = product_service if product_service is not None else ProductService()
@@ -95,6 +97,9 @@ class ProductWorker:
             else RecommendationCacheRepository()
         )
         self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
+        self._analytics = (
+            analytics_repository if analytics_repository is not None else AnalyticsRepository()
+        )
 
     async def process_one(self) -> bool:
         """Dequeue and fully process (at most) one job.
@@ -183,6 +188,7 @@ class ProductWorker:
         await self._queue_manager.update(job)
         await self._queue_manager.ack(job)
         self._metrics.record_worker_job(status="success", seconds=duration)
+        await self._analytics.record_latency(duration)
         logger.info(
             "Worker completed job: job_id=%s, product_id=%s, attempt=%d, duration=%.4fs",
             job.job_id,

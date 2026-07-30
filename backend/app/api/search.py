@@ -26,9 +26,12 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 
 from app.core import constants
 from app.core.logging import get_logger
+from app.dependencies.analytics import get_analytics_repository
 from app.dependencies.hybrid_search import get_hybrid_search_service
 from app.dependencies.upload import get_upload_service
+from app.models.analytics_event import AnalyticsEvent
 from app.models.search import ProductFilters
+from app.repositories.analytics_repository import AnalyticsRepository
 from app.schemas.product import ProductImage
 from app.schemas.search import ProductSearchResponse, ProductSearchResult
 from app.services.upload_service import UploadService
@@ -53,6 +56,7 @@ async def search_products(
     *,
     upload_service: Annotated[UploadService, Depends(get_upload_service)],
     hybrid_search_service: Annotated[HybridSearchService, Depends(get_hybrid_search_service)],
+    analytics_repository: Annotated[AnalyticsRepository, Depends(get_analytics_repository)],
     file: Annotated[UploadFile | None, File(description="Optional query image.")] = None,
     query: Annotated[str | None, Form(max_length=1000, description="Optional text query.")] = None,
     top_k: Annotated[
@@ -80,6 +84,7 @@ async def search_products(
         top_k,
     )
 
+    await analytics_repository.record_event(AnalyticsEvent.SEARCH)
     image: ProductImage | None = None
     if file is not None and file.filename:
         image = await upload_service.save_upload(file)

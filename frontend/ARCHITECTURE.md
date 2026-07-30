@@ -70,81 +70,95 @@ an existing route.
 
 | Concern | Choice | Why |
 |---|---|---|
-| Framework | **React 18 + TypeScript** | Ubiquitous, strongly typed against the API contract, best hiring signal |
-| Build tool | **Vite** | Fast dev server/HMR, first-class TS, simple static build for later Docker/CDN hosting |
-| Routing | **React Router v6** | Mature nested routing + data APIs; SPA fits an API-key/token model well |
+| Framework / build | **Next.js 15 (App Router) + React + TypeScript** | File-based routing, nested layouts, automatic code-splitting, image optimization, middleware, and SSR/RSC when useful — the strongest long-term and AWS-deployment story |
+| Routing | **Next.js App Router** (file-based segments, nested layouts, `loading`/`error` conventions) | Built into the framework; no separate router library |
 | Server state | **TanStack Query (React Query)** | Caching, polling (job status), retries, background refetch — ideal for this API |
 | Client/UI state | **Zustand** | Minimal global store for auth/theme/UI; avoids Redux boilerplate |
 | Styling | **Tailwind CSS** | Fast, consistent, themable via CSS variables |
 | Component primitives | **shadcn/ui (Radix UI)** | Accessible, unstyled primitives we own and theme; strong a11y baseline |
+| Theming | **next-themes** | SSR-safe light/dark/system with no flash-of-wrong-theme |
 | Forms | **React Hook Form + Zod** | Typed validation mirroring backend field constraints |
-| HTTP | **Axios** (single typed instance) | Interceptors for auth header + error normalization |
+| HTTP | **Axios** (single typed instance, client components) | Interceptors for auth header + error normalization |
+| **API types** | **`openapi-typescript`** — generated from the backend's `/openapi.json` | Frontend and backend never drift; API changes are caught at compile time |
 | Charts | **Recharts** | Analytics dashboards and trend lines |
 | Icons | **lucide-react** | Matches shadcn conventions |
 | Testing | **Vitest + React Testing Library + MSW** | Unit/integration with mocked API; **Playwright** for E2E |
 | Quality | **ESLint + Prettier + tsc** | Mirrors the backend's ruff/black/mypy discipline |
 
 > [!NOTE]
-> This is a **SPA** (not SSR/Next.js). The backend is a separate API service and auth is
-> API-key based, so server rendering adds cost without benefit here. The build output is
-> static assets, which slots cleanly into the planned Docker/CDN deployment (Stage 8–12).
+> Next.js runs the App Router as a **Node server**. Most business views are interactive
+> **client components** talking to the FastAPI backend through the typed API client; server
+> components/SSR are used where they add value (public landing surface, initial shells,
+> metadata/SEO). The production build uses `output: "standalone"`, so it packages into a
+> small self-contained Node image for the later Docker/AWS deployment stages (ECS/Fargate,
+> App Runner, or Amplify) without a separate static-hosting story.
 
 ---
 
 ## 3. Folder structure
 
-Feature-first organization: shared primitives at the root, each business domain isolated in
-`features/` so it can grow without cross-talk (mirrors the backend's service boundaries).
+Feature-first organization under the Next.js App Router: routes are folders in `src/app/`,
+shared primitives live under `src/components` and `src/lib`, and each business domain is
+isolated in `src/features/` so it can grow without cross-talk (mirroring the backend's
+service boundaries).
 
 ```
 frontend/
-├── public/                      # static assets, favicon
+├── public/                      # static assets, favicon, og-image
 ├── src/
-│   ├── app/                     # app shell
-│   │   ├── App.tsx              # providers + router outlet
-│   │   ├── router.tsx           # route tree (see §4)
-│   │   ├── providers.tsx        # QueryClient, Theme, Auth, Toast providers
-│   │   └── layouts/             # AppLayout (sidebar+topbar), AuthLayout, ErrorLayout
+│   ├── app/                     # Next.js App Router — each route is a folder
+│   │   ├── layout.tsx           # root layout (<html>, providers, theme)
+│   │   ├── page.tsx             # "/" dashboard (Stage 4)
+│   │   ├── globals.css          # tailwind base + CSS-variable tokens
+│   │   ├── loading.tsx          # root loading boundary
+│   │   ├── error.tsx            # root error boundary
+│   │   ├── not-found.tsx        # 404
+│   │   ├── (app)/               # route group sharing the AppShell layout
+│   │   │   ├── layout.tsx       # sidebar + topbar + breadcrumbs
+│   │   │   ├── upload/page.tsx
+│   │   │   ├── search/page.tsx
+│   │   │   ├── products/[id]/page.tsx
+│   │   │   ├── duplicates/page.tsx
+│   │   │   ├── pricing/page.tsx
+│   │   │   ├── analytics/(overview|models|pipeline|trends)/page.tsx
+│   │   │   ├── models/page.tsx
+│   │   │   ├── system/page.tsx
+│   │   │   └── enterprise/(api-keys|audit|usage)/page.tsx
+│   │   └── onboarding/page.tsx  # org bootstrap / enter key (enterprise only)
+│   ├── middleware.ts            # coarse redirects (enterprise mode); see §7
 │   ├── lib/
 │   │   ├── api/
 │   │   │   ├── client.ts        # Axios instance + interceptors
-│   │   │   ├── endpoints.ts     # typed endpoint fns (one per backend route)
-│   │   │   ├── types.ts         # TS types mirroring backend schemas
-│   │   │   ├── errors.ts        # ApiError, error-envelope parsing
+│   │   │   ├── endpoints.ts     # typed fns (one per backend route)
+│   │   │   ├── schema.d.ts      # GENERATED from /openapi.json (openapi-typescript)
+│   │   │   ├── types.ts         # ergonomic aliases over the generated schema
+│   │   │   ├── errors.ts        # ApiError + error-envelope parsing
 │   │   │   └── queryKeys.ts     # centralized React Query keys
-│   │   ├── auth/                # api-key storage, auth store bindings
-│   │   ├── theme/               # theme provider, tokens, useTheme
+│   │   ├── auth/                # api-key storage, auth-store bindings, capability probe
+│   │   ├── theme/               # next-themes config + design tokens
 │   │   ├── format/              # currency, dates, numbers, percentages
 │   │   └── utils/               # cn(), file helpers, polling helper
 │   ├── components/
 │   │   ├── ui/                  # shadcn primitives (Button, Card, Dialog, …)
-│   │   ├── common/              # AppShell, Sidebar, Topbar, PageHeader
+│   │   ├── common/              # AppShell, Sidebar, Topbar, Breadcrumbs, PageHeader
 │   │   ├── feedback/            # Spinner, Skeleton, EmptyState, ErrorState, Toast
-│   │   ├── data/                # DataTable, StatCard, ScoreBar, ConfidenceBadge
+│   │   ├── data/                # DataTable, StatCard, ScoreBar, ConfidenceBadge, ChartCard
 │   │   └── forms/               # FileDropzone, ImagePreview, FormField wrappers
-│   ├── features/
-│   │   ├── upload/              # components + hooks (useUploadProduct, useJobStatus)
-│   │   ├── search/              # useSearch, filters, result grid
-│   │   ├── product/            # product detail, recommendations, explanations
-│   │   ├── duplicates/          # duplicate-check form + signal breakdown
-│   │   ├── pricing/             # pricing form + comparables table
-│   │   ├── analytics/           # dashboard, models, pipeline, trends
-│   │   ├── evaluation/          # run + rerank comparison
-│   │   ├── models/              # model registry views
-│   │   ├── enterprise/          # org bootstrap, api keys, audit, usage
-│   │   └── system/              # health/stats operational panel
-│   ├── pages/                   # thin route components composing feature modules
-│   ├── stores/                  # zustand stores (auth, ui, theme)
-│   ├── hooks/                   # cross-feature hooks (useMediaQuery, useDebounce)
-│   ├── config/                  # env, feature-flag detection, constants
-│   ├── styles/                  # tailwind base, css variables (tokens)
-│   └── main.tsx                 # entrypoint
-├── tests/                       # setup, msw handlers, e2e
-├── .env.example                 # VITE_API_BASE_URL, VITE_API_KEY_HEADER
-├── index.html
+│   ├── features/                # business logic per domain (built in Stages 4-7)
+│   │   ├── upload/ search/ product/ duplicates/ pricing/
+│   │   ├── analytics/ evaluation/ models/ enterprise/ system/
+│   ├── providers/               # QueryClientProvider, ThemeProvider, Toaster
+│   ├── stores/                  # zustand stores (auth, ui)
+│   ├── hooks/                   # useMediaQuery, useDebounce, useJobStatus
+│   └── config/                  # env, feature-flag detection, constants
+├── tests/                       # vitest setup, msw handlers, playwright e2e
+├── .env.example                 # NEXT_PUBLIC_API_BASE_URL, NEXT_PUBLIC_API_KEY_HEADER
+├── components.json              # shadcn config
+├── next.config.ts               # output: "standalone", image config
 ├── tailwind.config.ts
-├── tsconfig.json
-├── vite.config.ts
+├── tsconfig.json                # paths: "@/*" -> "src/*"
+├── eslint.config.mjs
+├── .prettierrc
 └── package.json
 ```
 
@@ -268,12 +282,16 @@ flowchart LR
 
 **Layers**
 
-1. **`client.ts`** — one Axios instance. Base URL from `VITE_API_BASE_URL`. Request
-   interceptor injects the API key header (name from `VITE_API_KEY_HEADER`, default
+1. **`client.ts`** — one Axios instance. Base URL from `NEXT_PUBLIC_API_BASE_URL`. Request
+   interceptor injects the API key header (name from `NEXT_PUBLIC_API_KEY_HEADER`, default
    `X-API-Key`) when a key is present. Response interceptor unwraps the error envelope into
    a typed `ApiError`.
-2. **`types.ts`** — hand-written TS interfaces mirroring backend schemas (source of truth is
-   the backend; optionally generated from the live OpenAPI at `/openapi.json` in CI later).
+2. **Generated types** — `schema.d.ts` is generated from the backend's `/openapi.json` via
+   `openapi-typescript` (an `npm run gen:api` script; committed and regenerated when the API
+   changes). `types.ts` exposes ergonomic aliases (e.g. `PricingResponse`,
+   `DuplicateCheckResponse`) over the generated schema. The backend is the **single source
+   of truth** — a schema change surfaces as a TypeScript compile error, so the two never
+   drift and there are no hand-maintained models to keep in sync.
 3. **`endpoints.ts`** — one function per route, e.g. `searchProducts(params)`,
    `getJobStatus(id)`, `estimatePrice(body)`, `listApiKeys()`. Handles multipart vs JSON.
 4. **Feature hooks** — thin wrappers over `useQuery`/`useMutation` with centralized
@@ -335,6 +353,13 @@ from the created key or an org lookup — drives conditional rendering. Manageme
 (create/revoke keys, view audit) are hidden/disabled for insufficient roles, but the UI
 treats server `403` as the source of truth (client checks are UX only, never the gate).
 
+**Next.js middleware:** `middleware.ts` handles only **coarse** redirects (e.g. enterprise
+mode with no key → `/onboarding`). Because the API key is a **client-held** credential
+(session/local storage, deliberately not a cookie), fine-grained protection stays
+client-side via the auth store and `<FeatureGate>`; the server `403`/`401` remains the real
+enforcement boundary. In the confirmed single-tenant demo default, no gate is applied at
+all.
+
 ---
 
 ## 8. State management
@@ -346,7 +371,7 @@ treats server `403` as the source of truth (client checks are UX only, never the
 | **UI state** | Zustand (`uiStore`) | sidebar open, active modals, global toasts |
 | **Theme state** | Zustand (`themeStore`) + CSS vars | light/dark/system |
 | **Form state** | React Hook Form | upload, search filters, pricing, api-key creation |
-| **URL state** | React Router params/search | search query & filters, analytics window, pagination |
+| **URL state** | Next.js route params + `useSearchParams` | search query & filters, analytics window, pagination |
 
 Principles: **server data is never copied into Zustand** (Query owns it, single source of
 truth); filters live in the **URL** so views are shareable/back-button-friendly; global
@@ -407,10 +432,10 @@ mutations; `refetchOnWindowFocus` on for dashboards, off for one-shot results.
 - **Tokens as CSS variables** in `styles/` (`--color-bg`, `--color-fg`, `--color-primary`,
   `--color-muted`, `--radius`, spacing/typography scales). Tailwind maps to these variables
   so one token set drives everything.
-- **Modes**: `light`, `dark`, and `system` (via `prefers-color-scheme`). The active mode
-  stamps `data-theme` on `<html>`; a toggle in the topbar persists the choice
-  (`themeStore` + `localStorage`), with no flash-of-wrong-theme (inline pre-hydration
-  script sets the attribute before paint).
+- **Modes**: `light`, `dark`, and `system` (via `prefers-color-scheme`), managed by
+  **next-themes**, which stamps the theme attribute/class on `<html>` before paint (no
+  flash-of-wrong-theme, SSR-safe) and persists the choice. A toggle in the topbar switches
+  modes.
 - **Semantic colors** for AI signals: consistent scales for confidence
   (low/medium/high), similarity scores, and status (healthy/degraded/down) reused across
   duplicate, pricing, recommendation, and system views.
@@ -622,9 +647,10 @@ The foundational forks have been decided and are now locked for Stage 3:
 
 | Decision | Choice | Status |
 |---|---|---|
-| **Framework / build** | React + TypeScript + Vite (SPA, React Router) | ✅ Confirmed |
-| **Styling / design system** | Tailwind CSS + shadcn/ui (Radix) | ✅ Confirmed |
+| **Framework / build** | **Next.js 15 (App Router)** + React + TypeScript | ✅ Confirmed |
+| **Styling / design system** | Tailwind CSS + shadcn/ui (Radix) + next-themes | ✅ Confirmed |
 | **Server / client state** | TanStack Query + Zustand | ✅ Confirmed |
+| **API types** | **Generated from the backend `/openapi.json`** via `openapi-typescript` | ✅ Confirmed |
 | **Primary demo persona** | **Single-tenant, no auth gate** — app opens to Dashboard/Upload; enterprise onboarding + RBAC are optional and only surface when `ENTERPRISE__ENABLED` | ✅ Confirmed |
 
 **Persona implication (single-tenant default):** the default landing is the **Dashboard**,
@@ -633,10 +659,16 @@ and enterprise admin pages in this document remain fully specified but are **con
 mounted** — they activate only when the backend reports the enterprise layer is enabled.
 This keeps the first-run demo friction-free while preserving the multi-tenant capability.
 
-**Still open (minor, non-blocking):**
+**Stage 3 milestone plan** (six commits, mirroring the backend's milestone discipline):
 
-- **API types** — hand-written now vs. generated from the backend's `/openapi.json`. Default:
-  hand-written for Stage 3, with OpenAPI generation as a later hardening step.
+| # | Milestone | Scope |
+|---|---|---|
+| 1 | Repository setup | Next.js 15 + TS + Tailwind + shadcn/ui + ESLint/Prettier + absolute imports + folder structure + env/build config. No pages, no logic, no backend calls. |
+| 2 | Application shell | Root layout, sidebar, top nav, breadcrumbs, theme provider, dark mode, responsive nav, error + loading boundaries. No business pages. |
+| 3 | API infrastructure | Axios client + interceptors, central API layer, **generated OpenAPI types**, error handling, retry policy, TanStack Query config. No feature pages. |
+| 4 | Auth infrastructure | Optional enterprise mode, API-key auth, Zustand auth store, route protection, user context, session handling. No login pages; demo mode needs no auth. |
+| 5 | Shared UI library | Buttons, cards, dialogs, forms, tables, badges, status chips, metric cards, skeletons, chart wrapper, empty/error states — all on shadcn/ui. No feature pages. |
+| 6 | Frontend quality | Accessibility, responsive, code-splitting, performance, theme consistency, loading/error UX, docs, tests. No new features. |
 
-> With the above confirmed, **Stage 3 — Frontend Foundation** scaffolds the project
-> (tooling, app shell, API client, auth store, theme, base components) against this design.
+> With the above confirmed, **Stage 3** proceeds one milestone/commit at a time against this
+> design, keeping the backend untouched.

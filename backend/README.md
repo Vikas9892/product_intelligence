@@ -32,14 +32,13 @@ on every machine and in CI, before a single line of business logic exists.
 
 ## Roadmap
 
-This project is planned across 20 phases. Phases 1–18 are complete and
+This project is planned across 20 phases. Phases 1–19 are complete and
 documented below (see each phase's own "design decisions" section and
 its entry under
 [How this project was created from scratch](#how-this-project-was-created-from-scratch)).
-Phases 19–20 have not been specified yet — no milestone list, config
-keys, or scope exists for them, so they're listed here only as
-placeholders in the numbering, not as a commitment to specific future
-functionality.
+Phase 20 has not been specified yet — no milestone list, config keys, or
+scope exists for it, so it's listed here only as a placeholder in the
+numbering, not as a commitment to specific future functionality.
 
 | Phase | Title | Status |
 |---|---|---|
@@ -62,7 +61,8 @@ functionality.
 | 16 | Explainable AI & Decision Intelligence | Complete |
 | 17 | Pricing Intelligence Engine | Complete |
 | 18 | Analytics & Business Intelligence Platform | Complete |
-| 19–20 | Not yet specified | Planned |
+| 19 | Enterprise Platform Features (multi-tenancy, RBAC, audit, quotas) | Complete |
+| 20 | Not yet specified | Planned |
 
 ## Folder structure
 
@@ -3725,6 +3725,125 @@ No frontend (REST-only, per the phase requirement), no database, no
 real-time streaming or per-minute granularity — day-grained historical
 reporting over Redis buckets, nothing heavier.
 
+## Phase 19 — Enterprise Platform Features design decisions
+
+This phase adds multi-tenancy, RBAC, API-key authentication, audit
+logging, and per-tenant quotas/rate limiting — as an **opt-in layer** that
+leaves the pre-Phase-19 platform untouched when disabled.
+
+### Opt-In, So Nothing Breaks
+
+`ENTERPRISE__ENABLED` defaults to **`False`**. With it off, the platform
+is exactly what it was through Phase 18: unauthenticated, single-tenant,
+every endpoint open. The enterprise router isn't even registered, and no
+existing route gains an auth requirement. Turning it on activates
+API-key auth + RBAC on the enterprise-gated routes, tenant isolation,
+audit logging, and quotas. This is what let the whole phase be **additive**
+— honoring the standing "never rewrite completed phases" rule and the
+phase's own "maintain backward compatibility." Deep tenant isolation
+(threading a `tenant_id` through every Phase 2–18 service) was explicitly
+*not* done; instead the layer provides an isolation **mechanism**
+(`TenantScope`) an enterprise-aware caller uses, leaving existing
+single-tenant callers on their unscoped defaults.
+
+### Architecture
+
+```
+   request ─► get_auth_context ──► AuthContext (org, tenant, role, key)
+                    │  (X-API-Key → AuthenticationService, 401 on bad key)
+      ┌─────────────┼─────────────────────────┐
+      ▼             ▼                          ▼
+ require_permission   enforce_quota      TenantScope.from_auth
+ (RBAC, 403)          (429 over limit)   (tenant-scoped names)
+      │                                        │
+      ▼                                        ▼
+  /organizations //api-keys //audit //usage    tenant-scoped Qdrant
+  (audit-logged)                                collections + Redis keys
+```
+
+Everything persists in **Redis** (no database), matching the Phase 12
+decision: organizations, tenants, API-key records, audit logs, and quota
+counters are all Redis-backed.
+
+### API-Key Security
+
+- Keys are **high-entropy** random tokens (`pik_` + 24 random bytes,
+  url-safe ≈ 192 bits) — not user-chosen, so a plain **SHA-256** hash is a
+  sound at-rest representation (a slow salted KDF is for low-entropy
+  passwords, not this).
+- Only the **hash** and a short non-secret **prefix** are stored; the raw
+  key is returned **exactly once** at creation and is never stored,
+  recoverable, or logged.
+- Verification recomputes the hash and compares it in **constant time**
+  (`hmac.compare_digest`), so a wrong key doesn't leak timing.
+- The prefix is the lookup index, so authenticating a key is a single
+  Redis GET plus one hash comparison.
+
+### RBAC & No Privilege Escalation
+
+`Role` (owner ⊇ admin ⊇ member ⊇ viewer) maps to a set of `Permission`s;
+a route guards itself with `require_permission(Permission.X)` and a key
+whose role lacks `X` gets a **403** (distinct from the **401** a missing
+key gets). Creating a key can never mint one with **more** authority than
+the caller: `POST /api-keys` rejects a requested role whose permissions
+aren't a subset of the caller's own.
+
+### Tenant Isolation
+
+Every tenant-scoped operation partitions on the authenticated
+`tenant_id`: API-key listing/revocation only ever touches the caller's
+tenant (revoking another tenant's key `404`s — it's indistinguishable
+from "doesn't exist," so a caller can't even probe for it), the audit log
+and quota counters are per-tenant Redis keys, and `TenantScope` derives
+physically-separate Qdrant collection names
+(`{prefix}_{tenant_id}_{base}`) for an enterprise-aware vector store.
+
+### Audit & Quotas
+
+Key-management actions (`create_api_key`, `revoke_api_key`) append an
+append-only `AuditEvent` to the tenant's Redis log (newest first, capped).
+`enforce_quota` records each request against the tenant's per-day and
+per-minute Redis counters and returns **429** when either limit is
+exceeded (a configured limit of `0` disables that check). Quota
+enforcement is **fail-closed** — if Redis is unreachable the guarded
+request errors rather than silently allowing unlimited traffic.
+
+### Security Review Notes
+
+- **Bootstrap is open.** `POST /organizations` requires no key — it's how
+  a new account obtains its first (owner) key. In a real deployment this
+  would sit behind a platform-admin gate (a deploy-time bootstrap token);
+  here it's the documented bootstrap entry point, and it's the *only* open
+  enterprise route.
+- **No secret ever leaves except once.** Raw keys appear only in the
+  create responses; listings expose prefix + metadata only. Audit events
+  and logs never carry a raw key, embedding, or product payload.
+- **Auth vs. authorization are distinct** (401 vs. 403), and identity is
+  established before quota is consumed (an unauthenticated request never
+  counts against a tenant's quota).
+- **Backward compatibility.** With the layer off, there is no
+  authentication surface at all — the security posture is unchanged from
+  Phase 18.
+
+### Configuration
+
+New settings under `EnterpriseSettings` (env prefix `ENTERPRISE__`):
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `ENTERPRISE__ENABLED` | `false` | Master switch — off preserves the pre-Phase-19 platform exactly |
+| `ENTERPRISE__API_KEY_HEADER` | `X-API-Key` | Header the raw key is read from |
+| `ENTERPRISE__DAILY_REQUEST_QUOTA` | `10000` | Per-tenant per-day request ceiling (`0` disables) |
+| `ENTERPRISE__RATE_LIMIT_PER_MINUTE` | `120` | Per-tenant per-minute ceiling (`0` disables) |
+| `ENTERPRISE__COLLECTION_PREFIX` | `tenant` | Namespaces a tenant's Qdrant collections |
+
+### Explicitly out of scope this phase
+
+No deep per-service tenant retrofit (the isolation mechanism is provided,
+not force-wired through Phase 2–18 services), no OAuth/OIDC/SSO, no
+external identity provider, no database — API-key + RBAC + Redis-backed
+tenancy, opt-in and additive.
+
 ## Setup instructions
 
 Prerequisites: [`uv`](https://docs.astral.sh/uv/) installed (`uv` manages
@@ -5473,5 +5592,73 @@ cd ..
 uv run --project backend pre-commit run --all-files
 git add -A
 git commit -m "test: harden analytics coverage and document Phase 18 (Phase 18 milestone 6/6)"
+git push
+```
+
+## Phase 19 — Enterprise Platform Features (built from scratch)
+
+An opt-in enterprise layer (ENTERPRISE__ENABLED, default off) — additive,
+Redis-backed, no rewrite of any completed phase (see the design-decisions
+section above).
+
+```bash
+# Milestone 1/6 — organization domain
+#   app/models/role.py (Role/Permission + ROLE_PERMISSIONS), organization.py
+#   (Organization/Tenant), api_key.py (ApiKey/ApiKeyCreation), audit_event.py
+#   app/core/settings.py — EnterpriseSettings; app/exceptions/errors.py —
+#   AuthenticationException(401)/AuthorizationException(403)/QuotaExceededException(429)
+#   backend/.env.example — ENTERPRISE__ variables; tests/models/, tests/core/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add enterprise organization domain (Phase 19 milestone 1/6)"
+
+# Milestone 2/6 — API-key auth + RBAC
+#   app/services/enterprise/api_keys.py (generate/hash/verify), authentication_service.py
+#   app/models/auth_context.py; app/repositories/organization_repository.py,
+#   api_key_repository.py (Redis, indexed by prefix)
+#   app/dependencies/enterprise.py — require_permission RBAC guard (401/403)
+#   tests/services/enterprise/, tests/repositories/, tests/dependencies/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add API-key authentication and RBAC (Phase 19 milestone 2/6)"
+
+# Milestone 3/6 — tenant isolation mechanism
+#   app/services/enterprise/tenant_scope.py — tenant-scoped Qdrant collection names +
+#   Redis namespaces derived from the tenant; tests/services/enterprise/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add tenant isolation mechanism (Phase 19 milestone 3/6)"
+
+# Milestone 4/6 — audit logging + quotas
+#   app/repositories/audit_repository.py (per-tenant append-only log),
+#   quota_repository.py (per-day + per-minute counters)
+#   app/dependencies/enterprise.py — shared get_auth_context + enforce_quota (429)
+#   tests/repositories/, tests/dependencies/
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add audit logging and quotas (Phase 19 milestone 4/6)"
+
+# Milestone 5/6 — enterprise management API
+#   app/schemas/enterprise.py; app/api/enterprise.py — /organizations (bootstrap),
+#   /api-keys (create/list/revoke, no privilege escalation, audit-logged), /audit, /usage
+#   app/application.py — enterprise_router registered behind ENTERPRISE__ENABLED
+#   tests/api/test_enterprise.py
+cd backend && uv run ruff check . && uv run black --check . && uv run mypy . && uv run pytest && cd ..
+git add -A
+git commit -m "feat: add enterprise management API (Phase 19 milestone 5/6)"
+
+# Milestone 6/6 — tests, security review, documentation
+#   Coverage audit; backend/README.md — this section, the Phase 19 design-decisions
+#   section (architecture + API-key security + RBAC + tenant isolation + security review),
+#   and the Roadmap update (Phases 1-19 complete, 20 not yet specified)
+cd backend
+uv run ruff check .
+uv run black --check .
+uv run mypy .
+uv run pytest
+cd ..
+uv run --project backend pre-commit run --all-files
+git add -A
+git commit -m "test: harden enterprise coverage and document Phase 19 (Phase 19 milestone 6/6)"
 git push
 ```

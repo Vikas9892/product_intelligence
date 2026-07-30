@@ -14,7 +14,9 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.analytics_event import AnalyticsEvent
 from app.models.analytics_report import AnalyticsReport, DashboardSummary
+from app.models.model_analytics import ModelAnalytics, ModelUsage
 from app.models.model_status import ModelStatus
+from app.models.model_type import ModelType
 from app.models.usage_metrics import UsageMetrics
 from app.repositories.analytics_repository import AnalyticsRepository
 from app.services.model_registry import ModelRegistry
@@ -73,6 +75,25 @@ class AnalyticsEngine:
             window_days=self._window_days,
             active_models=active_models,
         )
+
+    async def model_analytics(self) -> ModelAnalytics:
+        """Report each model type's active version and registered-version count, plus window usage."""
+        models: list[ModelUsage] = []
+        for model_type in ModelType:
+            versions = self._model_registry.list_models(model_type)
+            active = next((m for m in versions if m.status is ModelStatus.ACTIVE), None)
+            models.append(
+                ModelUsage(
+                    model_type=model_type.value,
+                    active_model=active.model_name if active is not None else None,
+                    active_version=active.version if active is not None else None,
+                    status=active.status.value if active is not None else None,
+                    registered_versions=len(versions),
+                )
+            )
+        window = await self.usage(days=self._window_days)
+        logger.info("Model analytics built: model_types=%d", len(models))
+        return ModelAnalytics(models=models, window=window, window_days=self._window_days)
 
     async def report(self, *, days: int, period: str, end: date | None = None) -> AnalyticsReport:
         """Build a labeled `AnalyticsReport` over the last `days` days."""

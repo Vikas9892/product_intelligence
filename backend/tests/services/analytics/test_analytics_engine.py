@@ -87,6 +87,23 @@ class TestDashboard:
         assert summary.active_models == 1  # one ACTIVE, one EXPERIMENTAL
 
 
+class TestModelAnalytics:
+    async def test_reports_active_versions_and_counts_per_type(self) -> None:
+        engine, _repo = await _engine()
+
+        analytics = await engine.model_analytics()
+
+        by_type = {m.model_type: m for m in analytics.models}
+        image = by_type["image_embedding"]
+        assert image.active_model == "clip"
+        assert image.active_version == "1.0.0"
+        assert image.status == "active"
+        assert image.registered_versions == 2  # one ACTIVE + one EXPERIMENTAL
+        # A type with no registered model reports None.
+        assert by_type["reranker"].active_model is None
+        assert by_type["reranker"].registered_versions == 0
+
+
 class TestReport:
     async def test_labels_the_date_range(self) -> None:
         engine, _repo = await _engine()

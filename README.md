@@ -67,38 +67,64 @@ flowchart LR
 ```
 .
 ├── backend/                  # FastAPI service + worker pool (see backend/README.md)
+├── frontend/                 # Next.js 15 web client (see frontend/README.md)
+├── docker-compose.yml        # Local backing services: Qdrant + Redis
 ├── .github/workflows/ci.yml  # GitHub Actions: ruff, black --check, mypy, pytest
 ├── .pre-commit-config.yaml   # Repo-wide git hooks (ruff, black, mypy, hygiene)
 ├── .editorconfig             # Repo-wide editor formatting rules
-├── Makefile                  # make install / run / lint / format / typecheck / test / clean
+├── Makefile                  # make install / run / services-up / lint / test / clean
 ├── storage/                  # Runtime image artifacts (uploads / processed)
 └── README.md                 # You are here
 ```
 
-`backend/` is the only application component today. A frontend and deployment/infra
-tooling are planned future additions and would arrive as sibling directories at this level
-without disturbing `backend/`.
+`docker-compose.yml` provisions **only** the two stateful backing services. The API, the
+worker pool, and the frontend all run on the host, so reloading, debugging, and the
+Hugging Face model cache keep working as normal.
 
 ---
 
 ## Getting started
 
-Prerequisites: **Python 3.12**, [`uv`](https://docs.astral.sh/uv/), and — to run the full
-stack — **Redis** and **Qdrant**. From the repo root:
+Prerequisites: **Python 3.12**, [`uv`](https://docs.astral.sh/uv/), and **Docker** (which
+provides the two backing services — Redis and Qdrant — so you don't have to install them
+natively). From the repo root:
 
 ```bash
-make install    # uv sync + pre-commit install
-make run        # uvicorn app.main:app --reload  (http://localhost:8000/docs)
+make install       # uv sync + pre-commit install
+make services-up   # start Qdrant + Redis, wait until both are healthy
+make run           # uvicorn app.main:app --reload  (http://localhost:8000/docs)
+```
+
+The async upload pipeline also needs the worker process, in a second terminal:
+
+```bash
+make worker        # uv run python scripts/run_workers.py
+```
+
+**Backing services** — `docker-compose.yml` runs Qdrant (`:6333` REST, `:6334` gRPC) and
+Redis (`:6379`), matching the defaults in `backend/.env.example`, so an empty
+`backend/.env` works against them unchanged. Data lives in named Docker volumes and
+survives `services-down`.
+
+```bash
+make services-status  # health of both services
+make services-logs    # tail their logs
+make services-down    # stop them (data is preserved)
+make services-reset   # DESTRUCTIVE: stop and delete all vector/Redis data
+```
+
+> [!IMPORTANT]
+> Redis is **not** just a queue here — it is the platform's primary datastore (job state,
+> cache, analytics buckets, enterprise data). The compose file therefore enables AOF
+> persistence. `make services-reset` erases that data along with the vectors.
+
+**Quality gates:**
+
+```bash
 make lint       # ruff check
 make format     # ruff format + black
 make typecheck  # mypy
 make test       # pytest with coverage
-```
-
-The async upload pipeline also needs the worker process:
-
-```bash
-uv run --directory backend python scripts/run_workers.py
 ```
 
 See **[backend/README.md](backend/README.md)** for full setup, configuration, and the

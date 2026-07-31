@@ -1,0 +1,69 @@
+# Local infrastructure for the Multi-Modal Product Intelligence Engine.
+#
+# This file provisions only the two stateful backing services the backend
+# requires — it does NOT run the API or the workers. Those are run from the
+# host with `make run` and `scripts/run_workers.py`, so that code reloading,
+# debugging, and the Hugging Face model cache keep working normally.
+#
+#   make services-up       # start Qdrant + Redis in the background
+#   make services-status   # health of both
+#   make services-down     # stop (data is preserved in named volumes)
+#
+# Defaults match backend/.env.example exactly, so an empty backend/.env is a
+# working configuration against this stack.
+
+name: product-intelligence
+
+services:
+  qdrant:
+    # Vector store for the image (512-d CLIP) and text (384-d BGE) collections.
+    # Both are auto-created with cosine distance on first use by the backend.
+    # Pinned to the 1.18 line to match the pinned qdrant-client 1.18.0.
+    image: qdrant/qdrant:v1.18.1
+    container_name: pi-qdrant
+    restart: unless-stopped
+    ports:
+      # 6333 = REST (VECTOR_STORE__URL points here). 6334 = gRPC, exposed so
+      # the client can be switched to it without editing this file.
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    healthcheck:
+      # The image ships no curl/wget, so probe the REST port over bash's
+      # /dev/tcp rather than making an HTTP request.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  redis:
+    # Not just a queue: Redis is this platform's primary datastore. It holds
+    # the job queue, product/job state, the recommendation cache, analytics
+    # daily buckets, and enterprise tenant data (there is no relational
+    # database — see backend/README.md). Persistence is therefore required,
+    # not optional, which is why AOF is enabled below.
+    image: redis:8.2-alpine
+    container_name: pi-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  qdrant_storage:
+  redis_data:

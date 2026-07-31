@@ -1,10 +1,11 @@
 .DEFAULT_GOAL := help
 BACKEND := backend
 
-.PHONY: help install run lint format typecheck test clean
+.PHONY: help install run worker lint format typecheck test clean \
+	services-up services-down services-status services-logs services-reset
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 install: ## Install backend dependencies (including dev tools) via uv
 	uv sync --directory $(BACKEND)
@@ -16,6 +17,24 @@ install: ## Install backend dependencies (including dev tools) via uv
 
 run: ## Run the backend dev server
 	uv run --directory $(BACKEND) uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+worker: ## Run the async pipeline worker pool (needs services-up)
+	uv run --directory $(BACKEND) python scripts/run_workers.py
+
+services-up: ## Start Qdrant + Redis (Docker) and wait until both are healthy
+	docker compose up -d --wait
+
+services-down: ## Stop Qdrant + Redis (named volumes, and therefore data, are kept)
+	docker compose down
+
+services-status: ## Show the status and health of the backing services
+	docker compose ps
+
+services-logs: ## Tail the backing-service logs
+	docker compose logs -f
+
+services-reset: ## DESTRUCTIVE: stop the services and delete all vector/Redis data
+	docker compose down --volumes
 
 lint: ## Lint the backend with Ruff
 	uv run --directory $(BACKEND) ruff check .

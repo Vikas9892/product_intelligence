@@ -246,8 +246,9 @@ Interactive OpenAPI docs are served at `/docs` when the app is running.
 
 - Python 3.12
 - [`uv`](https://docs.astral.sh/uv/)
-- A running **Redis** instance (for the async pipeline)
-- A running **Qdrant** instance (for search)
+- **Docker**, which supplies the two backing services below (or native installs of them)
+  - **Redis** — async pipeline, state, cache, analytics, enterprise data
+  - **Qdrant** — image + text vector search
 
 **Install**
 
@@ -264,7 +265,23 @@ cp .env.example .env   # every value defaults sensibly; edit only what you need
 
 ## Running locally
 
-**1. Start Redis and Qdrant** (defaults: `redis://localhost:6379/0`, `http://localhost:6333`).
+**1. Start Redis and Qdrant** — from the **repo root** (one level up), the committed
+compose file starts both on the expected defaults (`redis://localhost:6379/0`,
+`http://localhost:6333`) and waits until they report healthy:
+
+```bash
+make services-up          # or: docker compose up -d --wait
+```
+
+Verify:
+
+```bash
+curl http://localhost:6333/collections   # {"result":{"collections":[]},"status":"ok",...}
+docker exec pi-redis redis-cli ping      # PONG
+```
+
+The two collections (`product_images`, 512-d and `product_text`, 384-d) are auto-created
+on first use, so an empty Qdrant is the expected starting state.
 
 **2. Start the API**
 

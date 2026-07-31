@@ -255,9 +255,9 @@ Expected behaviors to demonstrate:
 ## Observability
 
 ```bash
-curl http://localhost:8000/metrics          # Prometheus exposition
-curl http://localhost:8000/system/health     # operational health
-curl http://localhost:8000/system/stats      # operational stats
+curl http://localhost:8000/metrics                  # Prometheus exposition (unprefixed)
+curl http://localhost:8000/api/v1/system/health     # operational health
+curl http://localhost:8000/api/v1/system/stats      # operational stats
 ```
 
 ---

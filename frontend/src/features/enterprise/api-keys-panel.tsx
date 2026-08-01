@@ -2,6 +2,7 @@
 
 import { KeyRound, Info, TriangleAlert } from "lucide-react";
 import { useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { DataTable, type Column } from "@/components/data/data-table";
 import { EmptyState } from "@/components/feedback/empty-state";
@@ -72,6 +73,12 @@ function CreateKeyForm({ onCreated }: { onCreated: (secret: string) => void }) {
         onSuccess: (result) => {
           onCreated(result.key);
           setName("");
+          // The panel already shows the secret; the toast confirms the write
+          // landed and repeats the one-shot warning, because the secret panel
+          // can be dismissed before it is read.
+          toast.success(`API key "${result.api_key.name}" created`, {
+            description: "Copy the secret now — it cannot be shown again.",
+          });
         },
       },
     );

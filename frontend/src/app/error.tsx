@@ -32,6 +32,15 @@ export default function Error({
         <p className="text-muted-foreground max-w-md text-sm">
           An unexpected error occurred while rendering this page. You can try again.
         </p>
+        {error.digest ? (
+          /*
+           * The digest is an opaque id Next assigns to the server-side error —
+           * it carries no message or stack, so it is safe to display, and it is
+           * the only thing that lets a reported problem be matched to a log
+           * line. Without it a bug report is just "it broke".
+           */
+          <p className="text-muted-foreground pt-1 font-mono text-xs">Reference: {error.digest}</p>
+        ) : null}
       </div>
       <Button onClick={reset}>Try again</Button>
     </div>

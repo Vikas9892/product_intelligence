@@ -491,3 +491,16 @@ test("a zero quota is reported as no ceiling, not as 0% used", async ({ page }) 
   await expect(page.getByText("Not enforced")).toBeVisible();
   await expect(page.getByText("Daily quota exhausted")).toBeHidden();
 });
+
+test("creating a key repeats the one-shot warning in a toast", async ({ page }) => {
+  await signedIn(page);
+  await page.goto("/enterprise");
+
+  await page.getByLabel("Key name").fill("ci-pipeline");
+  await page.getByRole("button", { name: "Create key" }).click();
+
+  await expect(page.getByText('API key "ci-pipeline" created')).toBeVisible();
+  // The secret panel is dismissible, so the warning is repeated where it
+  // cannot be missed.
+  await expect(page.getByText("Copy the secret now — it cannot be shown again.")).toBeVisible();
+});

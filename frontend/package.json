@@ -16,7 +16,11 @@
     "gen:api": "openapi-typescript http://localhost:8000/openapi.json -o src/lib/api/schema.d.ts",
     "e2e": "playwright test",
     "e2e:install": "playwright install chromium",
-    "check": "npm run lint && npm run format:check && npm run typecheck && npm run test"
+    "check": "npm run lint && npm run format:check && npm run typecheck && npm run test",
+    "clean": "node -e \"require('fs').rmSync('.next',{recursive:true,force:true})\"",
+    "build:clean": "npm run clean && next build",
+    "postbuild:standalone": "node -e \"const fs=require('fs');fs.cpSync('.next/static','.next/standalone/.next/static',{recursive:true});if(fs.existsSync('public'))fs.cpSync('public','.next/standalone/public',{recursive:true})\"",
+    "start:standalone": "npm run postbuild:standalone && node .next/standalone/server.js"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.5.7",

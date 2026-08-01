@@ -21,9 +21,17 @@ export default function AppLayout({ children }: { children: ReactNode }) {
       <SidebarInset>
         <AppTopbar />
         <OfflineIndicator />
-        <main id="main-content" tabIndex={-1} className="flex-1 p-4 outline-none sm:p-6">
+        {/*
+          A plain div, not a second <main>. shadcn's SidebarInset already
+          renders the page's <main> landmark, so wrapping the content in
+          another one produced two main regions — invalid, and it gives
+          assistive technology two "main" landmarks to choose between. The id
+          and tabIndex stay so the skip link still targets and focuses the
+          content region.
+        */}
+        <div id="main-content" tabIndex={-1} className="flex-1 p-4 outline-none sm:p-6">
           <div className="mx-auto w-full max-w-6xl space-y-6">{children}</div>
-        </main>
+        </div>
       </SidebarInset>
     </SidebarProvider>
   );

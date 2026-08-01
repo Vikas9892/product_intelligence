@@ -57,7 +57,7 @@ export function CandidatesTable({
       header: "",
       cell: (c) =>
         c.product_id === matchedId ? (
-          <Badge className="border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-400">
+          <Badge className="bg-warning-soft text-warning-foreground border-transparent">
             Matched
           </Badge>
         ) : null,

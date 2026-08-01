@@ -8,12 +8,12 @@ const MODALITY_META: Record<string, { label: string; icon: LucideIcon; className
   image: {
     label: "Image",
     icon: ImageIcon,
-    className: "border-transparent bg-violet-500/15 text-violet-700 dark:text-violet-300",
+    className: "border-transparent bg-info-soft text-info-foreground",
   },
   text: {
     label: "Text",
     icon: Type,
-    className: "border-transparent bg-sky-500/15 text-sky-700 dark:text-sky-300",
+    className: "border-transparent bg-success-soft text-success-foreground",
   },
 };
 

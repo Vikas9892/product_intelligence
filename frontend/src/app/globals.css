@@ -27,6 +27,21 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  /* Semantic status tones. `-soft` is the tinted surface a status badge sits
+     on; the matching `-foreground` is guaranteed readable against it in both
+     themes. Use these instead of raw palette steps so status colour is
+     themeable in one place. */
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning-soft: var(--warning-soft);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-info-soft: var(--info-soft);
+  --color-danger-foreground: var(--danger-foreground);
+  --color-danger-soft: var(--danger-soft);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -64,6 +79,19 @@
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
+  /* Status tones (light). Foregrounds sit around L .43-.48 on soft surfaces
+     around L .95, which clears 4.5:1 comfortably. */
+  --success: oklch(0.6 0.14 155);
+  --success-foreground: oklch(0.44 0.11 155);
+  --success-soft: oklch(0.95 0.03 155);
+  --warning: oklch(0.68 0.14 75);
+  --warning-foreground: oklch(0.46 0.1 65);
+  --warning-soft: oklch(0.96 0.04 85);
+  --info: oklch(0.6 0.14 245);
+  --info-foreground: oklch(0.45 0.13 245);
+  --info-soft: oklch(0.95 0.03 245);
+  --danger-foreground: oklch(0.45 0.18 27);
+  --danger-soft: oklch(0.95 0.03 27);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -99,6 +127,20 @@
   --accent: oklch(0.269 0 0);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
+  /* Status tones (dark). Not an automatic inversion: foregrounds are lifted to
+     L ~.83 and the soft surfaces dropped to L ~.28 so contrast holds against
+     the dark card surface rather than merely flipping the light values. */
+  --success: oklch(0.72 0.15 155);
+  --success-foreground: oklch(0.84 0.13 155);
+  --success-soft: oklch(0.29 0.05 155);
+  --warning: oklch(0.79 0.14 80);
+  --warning-foreground: oklch(0.86 0.12 85);
+  --warning-soft: oklch(0.3 0.04 75);
+  --info: oklch(0.72 0.13 245);
+  --info-foreground: oklch(0.83 0.11 245);
+  --info-soft: oklch(0.3 0.05 245);
+  --danger-foreground: oklch(0.82 0.12 22);
+  --danger-soft: oklch(0.3 0.06 22);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);

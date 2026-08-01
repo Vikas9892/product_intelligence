@@ -1,29 +1,19 @@
 "use client";
 
-import {
-  Activity,
-  CircleCheck,
-  CircleSlash,
-  HelpCircle,
-  Info,
-  Server,
-  TriangleAlert,
-} from "lucide-react";
+import { CircleCheck, CircleSlash, HelpCircle, Info, Server, TriangleAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { PageHeader } from "@/components/common/page-header";
-import { DataTable, type Column } from "@/components/data/data-table";
 import { ErrorState } from "@/components/feedback/error-state";
-import { CardSkeleton, StatGridSkeleton } from "@/components/feedback/loading-skeletons";
+import { CardSkeleton } from "@/components/feedback/loading-skeletons";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useModels } from "@/features/product/queries";
 import { useSystemHealth, useSystemStats } from "@/features/dashboard/queries";
-import type { ModelInfoResponse } from "@/lib/api/types";
-import { formatDateTime, formatNumber } from "@/lib/format";
+import { formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
+import { ModelRegistry } from "./model-registry";
 import {
   overallStatus,
   queueDepthIsMeaningful,
@@ -35,14 +25,14 @@ import {
 const STATUS_STYLE: Record<OperationalStatus, { icon: LucideIcon; className: string }> = {
   healthy: {
     icon: CircleCheck,
-    className: "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+    className: "border-transparent bg-success-soft text-success-foreground",
   },
   unhealthy: {
     icon: TriangleAlert,
-    className: "border-transparent bg-red-500/15 text-red-700 dark:text-red-400",
+    className: "border-transparent bg-danger-soft text-danger-foreground",
   },
-  unknown: { icon: HelpCircle, className: "bg-muted text-muted-foreground border-transparent" },
-  disabled: { icon: CircleSlash, className: "bg-muted text-muted-foreground border-transparent" },
+  unknown: { icon: HelpCircle, className: "border-transparent bg-muted text-muted-foreground" },
+  disabled: { icon: CircleSlash, className: "border-transparent bg-muted text-muted-foreground" },
 };
 
 /** Status pill. Meaning is carried by icon + text, never colour alone. */
@@ -132,9 +122,9 @@ function OperationsPanel() {
           className={cn(
             "gap-1",
             overall === "operational"
-              ? "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+              ? "bg-success-soft text-success-foreground border-transparent"
               : overall === "degraded"
-                ? "border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-400"
+                ? "bg-warning-soft text-warning-foreground border-transparent"
                 : "bg-muted text-muted-foreground border-transparent",
           )}
         >
@@ -206,63 +196,6 @@ function OperationsPanel() {
             <OpsRow label="Registered models" value={formatNumber(stats.data.registered_models)} />
           </>
         ) : null}
-      </CardContent>
-    </Card>
-  );
-}
-
-/** The model registry, from `GET /models`. */
-function ModelRegistry() {
-  const models = useModels();
-
-  const columns: Column<ModelInfoResponse>[] = [
-    {
-      header: "Model",
-      cell: (m) => (
-        <div className="min-w-48">
-          <div className="font-medium">{m.model_name}</div>
-          <div className="text-muted-foreground font-mono text-xs">{m.model_type}</div>
-        </div>
-      ),
-    },
-    { header: "Version", cell: (m) => <span className="tabular-nums">{m.version}</span> },
-    {
-      header: "Status",
-      cell: (m) => <StatusPill status={m.status === "active" ? "healthy" : "unknown"} />,
-    },
-    {
-      header: "Dimension",
-      cell: (m) => <span className="tabular-nums">{formatNumber(m.dimension)}</span>,
-    },
-    { header: "Provider", cell: (m) => m.provider },
-    { header: "Registered", cell: (m) => formatDateTime(m.created_at) },
-  ];
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Activity className="size-4" aria-hidden="true" />
-          Model registry
-        </CardTitle>
-        <CardDescription>Models the platform has registered and their status.</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {models.isPending ? (
-          <StatGridSkeleton count={3} />
-        ) : models.isError ? (
-          <ErrorState
-            title="Couldn't load the model registry"
-            onRetry={() => void models.refetch()}
-          />
-        ) : (
-          <DataTable
-            rows={models.data ?? []}
-            columns={columns}
-            getRowKey={(m) => `${m.model_type}-${m.model_name}`}
-            empty="No models are registered."
-          />
-        )}
       </CardContent>
     </Card>
   );

@@ -166,7 +166,7 @@ function OverlapChip({
       className={cn(
         "gap-1",
         active
-          ? "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+          ? "bg-success-soft text-success-foreground border-transparent"
           : "text-muted-foreground line-through decoration-1",
       )}
     >

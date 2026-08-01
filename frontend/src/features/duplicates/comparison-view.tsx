@@ -59,8 +59,8 @@ function VerdictMark({ verdict }: { verdict: FieldVerdict }) {
       className={cn(
         "gap-1",
         same
-          ? "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
-          : "border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-400",
+          ? "bg-success-soft text-success-foreground border-transparent"
+          : "bg-warning-soft text-warning-foreground border-transparent",
       )}
     >
       {same ? (

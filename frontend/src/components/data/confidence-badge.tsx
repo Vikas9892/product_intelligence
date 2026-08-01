@@ -1,4 +1,4 @@
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge, type StatusTone } from "@/components/data/status-badge";
 import { cn } from "@/lib/utils";
 
 export type ConfidenceLevel = "low" | "medium" | "high";
@@ -10,10 +10,10 @@ export function levelFromScore(score: number): ConfidenceLevel {
   return "low";
 }
 
-const STYLES: Record<ConfidenceLevel, string> = {
-  high: "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
-  medium: "border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-400",
-  low: "border-transparent bg-muted text-muted-foreground",
+const TONE: Record<ConfidenceLevel, StatusTone> = {
+  high: "success",
+  medium: "warning",
+  low: "neutral",
 };
 
 const LABELS: Record<ConfidenceLevel, string> = {
@@ -39,9 +39,9 @@ export function ConfidenceBadge({
 }) {
   const resolved = level ?? (score !== undefined ? levelFromScore(score) : "low");
   return (
-    <Badge className={cn(STYLES[resolved], "tabular-nums", className)}>
+    <StatusBadge tone={TONE[resolved]} className={cn("tabular-nums", className)}>
       {LABELS[resolved]}
       {score !== undefined ? ` · ${score.toFixed(2)}` : null}
-    </Badge>
+    </StatusBadge>
   );
 }

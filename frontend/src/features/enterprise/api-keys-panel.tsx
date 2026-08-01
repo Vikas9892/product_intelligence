@@ -213,7 +213,7 @@ export function ApiKeysPanel() {
         k.revoked ? (
           <Badge className="bg-muted text-muted-foreground border-transparent">Revoked</Badge>
         ) : (
-          <Badge className="border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">
+          <Badge className="bg-success-soft text-success-foreground border-transparent">
             Active
           </Badge>
         ),

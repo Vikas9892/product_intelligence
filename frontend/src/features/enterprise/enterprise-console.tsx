@@ -20,16 +20,16 @@ import { EnterpriseOnboarding } from "./onboarding";
 import { useEnterpriseCapability } from "./queries";
 
 const STATE_STYLES: Record<EnterpriseCapability, { icon: typeof CircleCheck; badge: string }> = {
-  disabled: { icon: CircleSlash, badge: "bg-muted text-muted-foreground border-transparent" },
+  disabled: { icon: CircleSlash, badge: "border-transparent bg-muted text-muted-foreground" },
   unauthenticated: {
     icon: ShieldCheck,
-    badge: "border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-400",
+    badge: "border-transparent bg-warning-soft text-warning-foreground",
   },
   authenticated: {
     icon: CircleCheck,
-    badge: "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+    badge: "border-transparent bg-success-soft text-success-foreground",
   },
-  unknown: { icon: HelpCircle, badge: "bg-muted text-muted-foreground border-transparent" },
+  unknown: { icon: HelpCircle, badge: "border-transparent bg-muted text-muted-foreground" },
 };
 
 const STATE_LABEL: Record<EnterpriseCapability, string> = {

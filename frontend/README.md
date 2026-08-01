@@ -19,6 +19,7 @@ existing FastAPI backend **without modifying it**.
 | **AI Search** (`/search`)      | `POST /products/search`, `GET /products/{id}/explanations`                   | Text / image / hybrid modes, real filters, history + saved filters, backend-measured latency, per-result explainability    |
 | **Duplicates** (`/duplicates`) | `POST /products/check-duplicate`                                             | Verdict + confidence, four similarity signals, side-by-side metadata diff, ranked candidates, cross-encoder state          |
 | **Recommendations**            | `GET /products/{id}/recommendations`                                         | Cards with score, backend explanation, brand/category/attribute/tag overlap; overlap filters and sorting                   |
+| **Pricing** (`/pricing`)       | `POST /pricing/estimate`                                                     | Estimate + confidence + strategy, price distribution chart, comparables table, outlier-handling explainer                  |
 | **Product** (`/products/{id}`) | recommendations, pricing, explanations, models                               | Metadata (carried from search), embedding summary, pricing, recommendations, duplicate status; image not served by the API |
 
 > [!NOTE]
@@ -77,6 +78,19 @@ And Recommendations:
 - Filtering and sorting act only on what was returned — they never re-score. Each filter
   shows how many of the fetched set satisfy it, so an empty filtered view is explained
   before it happens.
+
+And Pricing:
+
+- **Outliers are removed server-side before the response is built**, so `comparables`
+  contains only the survivors and the discarded prices are absent from the payload
+  entirely. The UI explains the Tukey IQR mechanism and states that the removed prices
+  cannot be listed — and deliberately runs **no** client-side outlier detection, which
+  could disagree with the backend's own decision.
+- The min/median/max line is a plain summary of the comparables in the response, computed
+  in the browser and **labelled as such**. `estimated_price`, `confidence`,
+  `confidence_score`, and `strategy` are the backend's and are never recomputed.
+- A `0.00` estimate with no comparables is called out as "not a real valuation" rather than
+  displayed as a price.
 
 ## Stack
 

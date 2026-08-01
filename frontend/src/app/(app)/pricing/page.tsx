@@ -1,13 +1,9 @@
-import { BadgeDollarSign } from "lucide-react";
+import type { Metadata } from "next";
 
-import { PageHeader } from "@/components/common/page-header";
-import { PagePlaceholder } from "@/components/common/page-placeholder";
+import { PricingView } from "@/features/pricing/pricing-view";
+
+export const metadata: Metadata = { title: "Pricing Intelligence" };
 
 export default function PricingPage() {
-  return (
-    <>
-      <PageHeader title="Pricing" description="Estimate a fair price from comparable products." />
-      <PagePlaceholder icon={BadgeDollarSign} stage="Stage 6" />
-    </>
-  );
+  return <PricingView />;
 }

@@ -340,3 +340,44 @@ they represent real contracts rather than invented shapes.
 ```bash
 npm run e2e          # first time: npx playwright install chromium
 ```
+
+## Performance
+
+Measured with `next build` output, which reports First Load JS per route — the
+JavaScript a visitor downloads before the page is interactive.
+
+### Lazy-loading the charts
+
+Recharts was the single largest contributor to two routes, and it was in their
+initial payload even though the charts sit below the fold on both.
+
+| Route        | Before | After  | Change             |
+| ------------ | ------ | ------ | ------------------ |
+| `/pricing`   | 301 kB | 188 kB | **−113 kB (−38%)** |
+| `/analytics` | 298 kB | 187 kB | **−111 kB (−37%)** |
+
+Both were the heaviest routes in the app; they are now lighter than `/search`
+and `/duplicates` (205 kB each). The shared baseline is unchanged at 102 kB —
+this moved Recharts out of the route chunks, it did not shrink the framework.
+
+The charts are loaded with `next/dynamic` and `ssr: false`. Disabling SSR is
+deliberate rather than incidental: Recharts measures its container to size the
+SVG, so server-rendered chart markup is discarded at hydration regardless.
+Each chart renders a `ChartLoading` placeholder at the same `aspect-video`
+ratio as the real card, so nothing shifts when the chunk arrives.
+
+What a reader needs first — the estimate, the comparables table and the outlier
+explainer on `/pricing`; the usage counters, throughput panel and model table on
+`/analytics` — renders without waiting for any of it.
+
+### Not changed, and why
+
+- **The 102 kB shared baseline.** It is React, Next's runtime, and the router.
+  Nothing in it is unused, so there is nothing honest to cut.
+- **`"use client"` boundaries.** 79 files carry the directive, but these are
+  genuinely interactive surfaces (TanStack Query hooks, form state, Zustand).
+  Converting them would mean removing behaviour, not overhead.
+- **Memoization.** Not added anywhere. Nothing was measured re-rendering enough
+  to matter, and speculative `memo`/`useMemo` costs readability for no evidence.
+- **Images and fonts.** The backend serves no product images, so there is no
+  image pipeline to optimise; fonts are already handled by `next/font`.

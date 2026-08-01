@@ -1,6 +1,7 @@
 "use client";
 
 import { BadgeDollarSign } from "lucide-react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useState } from "react";
 
@@ -26,7 +27,21 @@ import { LatencyBadge } from "@/features/search/latency-badge";
 import type { ComparableProductInfo } from "@/lib/api/types";
 import { formatPrice } from "@/lib/format";
 
-import { PriceDistributionChart } from "./distribution-chart";
+/**
+ * The distribution chart is the only thing on this page that pulls in Recharts,
+ * and Recharts is ~100 kB of the route's JS. Loading it lazily keeps that off
+ * the initial payload: the estimate, the comparables table, and the outlier
+ * explainer — everything a reader needs first — render without it, and the
+ * chart arrives moments later.
+ *
+ * `ssr: false` because Recharts measures its container to size the SVG, so
+ * server-rendering it produces markup that is thrown away on hydration anyway.
+ */
+const PriceDistributionChart = dynamic(
+  () => import("./distribution-chart").then((m) => m.PriceDistributionChart),
+  { ssr: false, loading: () => <ChartLoading /> },
+);
+import { ChartLoading } from "@/components/feedback/chart-loading";
 import { EstimateSummary, OutlierNote } from "./estimate-summary";
 import { useEstimatePrice } from "./queries";
 

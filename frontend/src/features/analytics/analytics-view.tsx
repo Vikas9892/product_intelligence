@@ -1,11 +1,13 @@
 "use client";
 
 import { Activity, Boxes, CopyCheck, Gauge, Search, Sparkles, Upload } from "lucide-react";
+import dynamic from "next/dynamic";
 
 import { PageHeader } from "@/components/common/page-header";
 import { DataTable, type Column } from "@/components/data/data-table";
 import { StatCard } from "@/components/data/stat-card";
 import { ErrorState } from "@/components/feedback/error-state";
+import { ChartLoading } from "@/components/feedback/chart-loading";
 import { CardSkeleton, StatGridSkeleton } from "@/components/feedback/loading-skeletons";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -33,7 +35,18 @@ import {
   usePipelineAnalytics,
   useRuntimeStats,
 } from "./queries";
-import { TrendChart } from "./trend-chart";
+/**
+ * Four trend charts, all Recharts — the single biggest contributor to this
+ * route's JS. Loaded lazily so the usage counters, throughput panel, and model
+ * table paint first; the charts fill in behind their own placeholders.
+ *
+ * `ssr: false` for the same reason as pricing: Recharts sizes itself from the
+ * rendered container, so server output is discarded at hydration.
+ */
+const TrendChart = dynamic(() => import("./trend-chart").then((m) => m.TrendChart), {
+  ssr: false,
+  loading: () => <ChartLoading />,
+});
 
 const METRIC_LABELS: Record<string, string> = {
   upload: "Uploads",

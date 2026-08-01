@@ -170,3 +170,50 @@
     @apply font-sans;
   }
 }
+
+/*
+ * Reduced-motion support (WCAG 2.3.3).
+ *
+ * The app ships ~40 motion utilities — Radix `animate-in`/`animate-out` on
+ * dialogs, tooltips and menus, `animate-pulse` skeletons, `animate-spin`
+ * indicators, plus colour and transform transitions — and previously honoured
+ * no motion preference at all.
+ *
+ * This is deliberately a blanket rule rather than per-component opt-ins: the
+ * animations come from three different sources (Tailwind, tw-animate-css, and
+ * Radix's own data-state keyframes), so catching them at the source is the only
+ * way to be sure none is missed.
+ *
+ * Animations are reduced to a near-zero duration rather than `none` so that
+ * animation lifecycle events still fire — Radix relies on them to unmount
+ * dialogs and popovers, and `animation: none` would leave those elements
+ * mounted. `scroll-behavior: auto` also disables smooth scrolling, which is a
+ * documented vestibular trigger.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /*
+   * The universal rule above is an unlayered `!important`, which loses to
+   * `!important` inside Tailwind's cascade layers — and the sidebar's width
+   * and menu-item transitions survived it in testing. An attribute selector
+   * matches the class-level specificity of the utilities involved and, being
+   * later in source order, wins outright.
+   *
+   * The sidebar is the one place this matters in practice: it is the largest
+   * moving surface in the app, so its slide is the most likely to bother
+   * someone who asked for less motion.
+   */
+  [class],
+  [data-slot] {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

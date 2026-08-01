@@ -1,16 +1,9 @@
-import { Building2 } from "lucide-react";
+import type { Metadata } from "next";
 
-import { PageHeader } from "@/components/common/page-header";
-import { PagePlaceholder } from "@/components/common/page-placeholder";
+import { EnterpriseConsole } from "@/features/enterprise/enterprise-console";
+
+export const metadata: Metadata = { title: "Enterprise" };
 
 export default function EnterprisePage() {
-  return (
-    <>
-      <PageHeader
-        title="Enterprise"
-        description="Organizations, API keys, audit log, and usage — available when the enterprise layer is enabled."
-      />
-      <PagePlaceholder icon={Building2} stage="Stage 7" />
-    </>
-  );
+  return <EnterpriseConsole />;
 }

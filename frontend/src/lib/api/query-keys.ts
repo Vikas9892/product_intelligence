@@ -33,6 +33,8 @@ export const queryKeys = {
     trends: (params: Record<string, unknown>) => ["analytics", "trends", params] as const,
   },
   enterprise: {
+    /** Result of the enterprise capability probe (see features/enterprise). */
+    capability: ["enterprise", "capability"] as const,
     organizations: ["enterprise", "organizations"] as const,
     apiKeys: ["enterprise", "api-keys"] as const,
     audit: ["enterprise", "audit"] as const,

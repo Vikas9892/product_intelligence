@@ -381,3 +381,66 @@ explainer on `/pricing`; the usage counters, throughput panel and model table on
   to matter, and speculative `memo`/`useMemo` costs readability for no evidence.
 - **Images and fonts.** The backend serves no product images, so there is no
   image pipeline to optimise; fonts are already handled by `next/font`.
+
+## Release gate
+
+Run against the **production standalone build**, not the dev server.
+
+### Lighthouse
+
+Measured on `http://localhost:3000/system` (the heaviest data route) with a
+headless Chrome run against the standalone server:
+
+| Category       | Score |
+| -------------- | ----- |
+| Performance    | 77    |
+| Accessibility  | 100   |
+| Best Practices | 100   |
+| SEO            | 100   |
+
+Core Web Vitals, same run:
+
+| Metric                   | Value     |
+| ------------------------ | --------- |
+| First Contentful Paint   | 1.0 s     |
+| Speed Index              | 1.3 s     |
+| Largest Contentful Paint | 3.1 s     |
+| Total Blocking Time      | 250 ms    |
+| Cumulative Layout Shift  | **0.244** |
+
+Lighthouse reports **no failing accessibility audits**.
+
+> [!IMPORTANT]
+> **CLS of 0.244 is a known issue, not a passing result.** The "good" threshold
+> is 0.1. The shift is on `/system`, where several panels swap a skeleton for
+> real content of a different height. It is measured, reproducible, and **not
+> fixed** — it is recorded here rather than rounded away, and it is the first
+> thing worth addressing in any follow-up. LCP of 3.1 s is likewise above the
+> 2.5 s target.
+>
+> These numbers come from one local headless run on a developer machine. They
+> are directionally useful, not a production measurement.
+
+### Automated console audit
+
+`e2e/release-gate.spec.ts` loads all ten routes with every backend call stubbed
+and asserts, per route:
+
+- no console errors and no uncaught page errors,
+- no hydration warnings — these often self-correct visually, which is exactly
+  why they need asserting rather than eyeballing,
+- no failed or 4xx/5xx requests while loading the shell,
+- both light and dark themes render cleanly.
+
+All ten routes pass.
+
+### Full gate
+
+```bash
+npm run lint
+npm run format:check
+npm run typecheck
+npm run test          # 157 unit tests
+npm run build:clean   # production build, 12 routes
+npm run e2e           # 138 Playwright specs
+```

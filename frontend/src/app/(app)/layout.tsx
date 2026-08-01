@@ -18,7 +18,13 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     <SidebarProvider>
       <SkipLink />
       <AppSidebar />
-      <SidebarInset>
+      {/*
+        `min-w-0` belongs on the inset itself: it is the flex sibling of the
+        256px sidebar, and `SidebarInset` ships with `w-full`. Without it a
+        wide descendant makes this item refuse to shrink, so the document
+        scrolls sideways by exactly the sidebar width.
+      */}
+      <SidebarInset className="min-w-0">
         <AppTopbar />
         <OfflineIndicator />
         {/*
@@ -29,8 +35,16 @@ export default function AppLayout({ children }: { children: ReactNode }) {
           and tabIndex stay so the skip link still targets and focuses the
           content region.
         */}
-        <div id="main-content" tabIndex={-1} className="flex-1 p-4 outline-none sm:p-6">
-          <div className="mx-auto w-full max-w-6xl space-y-6">{children}</div>
+        {/*
+          `min-w-0` on both levels is load-bearing, not decoration. Flex items
+          default to `min-width: auto`, so a wide child (a data table, a chart)
+          refuses to shrink and pushes the whole page sideways instead of
+          scrolling inside its own container. Measured: /models overflowed the
+          document by 256px — exactly the sidebar width — at 768px until this
+          was added.
+        */}
+        <div id="main-content" tabIndex={-1} className="min-w-0 flex-1 p-4 outline-none sm:p-6">
+          <div className="mx-auto w-full max-w-6xl min-w-0 space-y-6">{children}</div>
         </div>
       </SidebarInset>
     </SidebarProvider>

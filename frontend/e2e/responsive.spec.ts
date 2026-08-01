@@ -254,8 +254,11 @@ for (const vp of VIEWPORTS) {
         await page.setViewportSize({ width: vp.width, height: vp.height });
         await stubAll(page);
         await page.goto(route);
-        // Wait for the shell so the assertion runs against a painted page.
-        await expect(page.locator("main")).toBeVisible();
+        // Wait for something painted before measuring. `body` is used rather
+        // than a landmark because not-found renders outside the (app) layout
+        // and so has neither the sidebar shell nor #main-content.
+        await expect(page.locator("body")).toBeVisible();
+        await page.waitForLoadState("domcontentloaded");
 
         const { overflow, culprit } = await horizontalOverflow(page);
         expect(
@@ -300,7 +303,9 @@ test.describe("wide content scrolls inside its own container", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await stubAll(page);
     await page.goto("/enterprise");
-    await expect(page.getByRole("table")).toBeVisible();
+    // /enterprise renders two tables (API keys and audit); either proves the
+    // point, so scope to the first rather than tripping strict mode.
+    await expect(page.getByRole("table").first()).toBeVisible();
 
     // The table's wrapper is what scrolls — never the document.
     const wrapperScrolls = await page.evaluate(() => {

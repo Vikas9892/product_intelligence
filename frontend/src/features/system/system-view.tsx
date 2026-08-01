@@ -1,0 +1,297 @@
+"use client";
+
+import {
+  Activity,
+  CircleCheck,
+  CircleSlash,
+  HelpCircle,
+  Info,
+  Server,
+  TriangleAlert,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+
+import { PageHeader } from "@/components/common/page-header";
+import { DataTable, type Column } from "@/components/data/data-table";
+import { ErrorState } from "@/components/feedback/error-state";
+import { CardSkeleton, StatGridSkeleton } from "@/components/feedback/loading-skeletons";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useModels } from "@/features/product/queries";
+import { useSystemHealth, useSystemStats } from "@/features/dashboard/queries";
+import type { ModelInfoResponse } from "@/lib/api/types";
+import { formatDateTime, formatNumber } from "@/lib/format";
+import { cn } from "@/lib/utils";
+
+import {
+  overallStatus,
+  queueDepthIsMeaningful,
+  STATUS_LABEL,
+  toStatus,
+  type OperationalStatus,
+} from "./status";
+
+const STATUS_STYLE: Record<OperationalStatus, { icon: LucideIcon; className: string }> = {
+  healthy: {
+    icon: CircleCheck,
+    className: "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  },
+  unhealthy: {
+    icon: TriangleAlert,
+    className: "border-transparent bg-red-500/15 text-red-700 dark:text-red-400",
+  },
+  unknown: { icon: HelpCircle, className: "bg-muted text-muted-foreground border-transparent" },
+  disabled: { icon: CircleSlash, className: "bg-muted text-muted-foreground border-transparent" },
+};
+
+/** Status pill. Meaning is carried by icon + text, never colour alone. */
+function StatusPill({ status }: { status: OperationalStatus }) {
+  const style = STATUS_STYLE[status];
+  const Icon = style.icon;
+  return (
+    <Badge className={cn("gap-1", style.className)}>
+      <Icon className="size-3" aria-hidden="true" />
+      {STATUS_LABEL[status]}
+    </Badge>
+  );
+}
+
+/** One labelled row with an optional explanatory tooltip. */
+function OpsRow({ label, value, hint }: { label: string; value: React.ReactNode; hint?: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b py-2.5 last:border-b-0">
+      <span className="flex items-center gap-1.5 text-sm">
+        {label}
+        {hint ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={`About ${label}`}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <Info className="size-3.5" aria-hidden="true" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">{hint}</TooltipContent>
+          </Tooltip>
+        ) : null}
+      </span>
+      <span className="text-sm font-medium tabular-nums">{value}</span>
+    </div>
+  );
+}
+
+/**
+ * The operations panel.
+ *
+ * Two backend behaviors shape this directly:
+ *
+ * 1. `workers` is the **configured concurrency**, not a live process count.
+ *    The service's own docstring says so: the API has no handle on the worker
+ *    processes, and a real liveness count would need heartbeats it does not
+ *    implement. It is therefore labelled "Configured workers" and never
+ *    presented as how many workers are running.
+ * 2. Every dependency read degrades to `unhealthy`/`0` instead of raising. So a
+ *    queue depth of 0 while Redis is unhealthy is a fallback, not a
+ *    measurement, and is reported as unknown.
+ */
+function OperationsPanel() {
+  const health = useSystemHealth();
+  const stats = useSystemStats();
+
+  if (health.isPending || stats.isPending) return <CardSkeleton />;
+  if (health.isError) {
+    return (
+      <ErrorState
+        title="Couldn't reach the system health endpoint"
+        onRetry={() => void health.refetch()}
+      />
+    );
+  }
+
+  const redis = toStatus(health.data.redis);
+  const qdrant = toStatus(health.data.qdrant);
+  // A body arrived, so the API answered. That is the only thing this proves.
+  const api: OperationalStatus = "healthy";
+  const overall = overallStatus([api, redis, qdrant]);
+  const queueTrustworthy = queueDepthIsMeaningful(redis);
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+        <div>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Server className="size-4" aria-hidden="true" />
+            System operations
+          </CardTitle>
+          <CardDescription>Point-in-time snapshot, refreshed every 30 seconds.</CardDescription>
+        </div>
+        <Badge
+          className={cn(
+            "gap-1",
+            overall === "operational"
+              ? "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+              : overall === "degraded"
+                ? "border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-400"
+                : "bg-muted text-muted-foreground border-transparent",
+          )}
+        >
+          {overall === "operational"
+            ? "All systems operational"
+            : overall === "degraded"
+              ? "Degraded"
+              : "Unknown"}
+        </Badge>
+      </CardHeader>
+
+      <CardContent>
+        <OpsRow
+          label="API"
+          value={<StatusPill status={api} />}
+          hint="The health endpoint returned a response, so the API is serving. It reports dependency failures in the body with HTTP 200 rather than as an error status."
+        />
+        <OpsRow label="Redis" value={<StatusPill status={redis} />} />
+        <OpsRow label="Qdrant" value={<StatusPill status={qdrant} />} />
+
+        <OpsRow
+          label="Queue depth"
+          value={
+            queueTrustworthy ? (
+              formatNumber(health.data.queue_depth)
+            ) : (
+              <StatusPill status="unknown" />
+            )
+          }
+          hint={
+            queueTrustworthy
+              ? "Jobs waiting in the Redis-backed processing queue."
+              : "The queue lives in Redis, which is unavailable. The backend degrades a failed read to 0, so no depth can be reported right now."
+          }
+        />
+
+        <OpsRow
+          label="Configured workers"
+          value={formatNumber(health.data.workers)}
+          hint="The configured worker concurrency — NOT a count of running worker processes. The API has no handle on the worker pool and the backend implements no worker heartbeat, so live worker count is not knowable from here."
+        />
+
+        <OpsRow label="Active models" value={formatNumber(health.data.active_models)} />
+        <OpsRow label="Uptime" value={health.data.uptime} />
+
+        {stats.data ? (
+          <>
+            <OpsRow
+              label="Jobs in flight"
+              value={
+                queueTrustworthy ? (
+                  formatNumber(stats.data.jobs_in_flight)
+                ) : (
+                  <StatusPill status="unknown" />
+                )
+              }
+            />
+            <OpsRow
+              label="Dead-lettered jobs"
+              value={
+                queueTrustworthy ? (
+                  formatNumber(stats.data.dead_letter_size)
+                ) : (
+                  <StatusPill status="unknown" />
+                )
+              }
+              hint="Jobs that exhausted their retries."
+            />
+            <OpsRow label="Registered models" value={formatNumber(stats.data.registered_models)} />
+          </>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** The model registry, from `GET /models`. */
+function ModelRegistry() {
+  const models = useModels();
+
+  const columns: Column<ModelInfoResponse>[] = [
+    {
+      header: "Model",
+      cell: (m) => (
+        <div className="min-w-48">
+          <div className="font-medium">{m.model_name}</div>
+          <div className="text-muted-foreground font-mono text-xs">{m.model_type}</div>
+        </div>
+      ),
+    },
+    { header: "Version", cell: (m) => <span className="tabular-nums">{m.version}</span> },
+    {
+      header: "Status",
+      cell: (m) => <StatusPill status={m.status === "active" ? "healthy" : "unknown"} />,
+    },
+    {
+      header: "Dimension",
+      cell: (m) => <span className="tabular-nums">{formatNumber(m.dimension)}</span>,
+    },
+    { header: "Provider", cell: (m) => m.provider },
+    { header: "Registered", cell: (m) => formatDateTime(m.created_at) },
+  ];
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Activity className="size-4" aria-hidden="true" />
+          Model registry
+        </CardTitle>
+        <CardDescription>Models the platform has registered and their status.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {models.isPending ? (
+          <StatGridSkeleton count={3} />
+        ) : models.isError ? (
+          <ErrorState
+            title="Couldn't load the model registry"
+            onRetry={() => void models.refetch()}
+          />
+        ) : (
+          <DataTable
+            rows={models.data ?? []}
+            columns={columns}
+            getRowKey={(m) => `${m.model_type}-${m.model_name}`}
+            empty="No models are registered."
+          />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * System operations centre.
+ *
+ * Everything here comes from `/system/health`, `/system/stats`, and `/models`.
+ * The Prometheus text at `/metrics` is deliberately not parsed: the frontend
+ * architecture excludes it as a UI data source, and scraping domain metrics out
+ * of an exposition format would invent structure the JSON API does not offer.
+ */
+export function SystemView() {
+  return (
+    <>
+      <PageHeader
+        title="System"
+        description="Operational health, runtime statistics, and the model registry."
+      />
+      <div className="space-y-6">
+        <OperationsPanel />
+        <ModelRegistry />
+        <p className="text-muted-foreground text-xs">
+          Raw Prometheus metrics are exposed at <code className="text-xs">/metrics</code> for a
+          scraper. They are not read here — the operational figures above come from the JSON system
+          endpoints.
+        </p>
+      </div>
+    </>
+  );
+}

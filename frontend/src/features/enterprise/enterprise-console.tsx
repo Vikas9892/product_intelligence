@@ -12,6 +12,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useAuth } from "@/lib/auth/use-auth";
 import { cn } from "@/lib/utils";
 
+import { ApiKeysPanel } from "./api-keys-panel";
 import { CAPABILITY_COPY, type EnterpriseCapability } from "./capability";
 import { EnterpriseOnboarding } from "./onboarding";
 import { useEnterpriseCapability } from "./queries";
@@ -163,7 +164,10 @@ export function EnterpriseConsole() {
               // missing or invalid, so it is what selects this branch.
               <EnterpriseOnboarding />
             ) : (
-              <TenantContext />
+              <>
+                <TenantContext />
+                <ApiKeysPanel />
+              </>
             )}
           </>
         )}

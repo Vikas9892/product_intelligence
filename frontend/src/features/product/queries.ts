@@ -4,7 +4,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { getModels } from "@/lib/api/endpoints/models";
 import { getPricingById } from "@/lib/api/endpoints/pricing";
-import { getRecommendations } from "@/lib/api/endpoints/products";
 import { queryKeys } from "@/lib/api";
 import type { ProductSearchResult } from "@/lib/api/types";
 
@@ -18,12 +17,9 @@ export function useProductMetaCache(id: string): ProductSearchResult | undefined
   return queryClient.getQueryData<ProductSearchResult>(queryKeys.products.meta(id));
 }
 
-export function useRecommendations(id: string) {
-  return useQuery({
-    queryKey: queryKeys.products.recommendations(id),
-    queryFn: () => getRecommendations(id),
-  });
-}
+// Recommendations are read through `@/features/recommendations/queries`
+// (`useProductRecommendations`) — shared with the recommendation explorer so
+// both hit the same cache entry.
 
 export function usePricing(id: string) {
   return useQuery({ queryKey: queryKeys.pricing.byId(id), queryFn: () => getPricingById(id) });

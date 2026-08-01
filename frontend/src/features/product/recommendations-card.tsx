@@ -1,25 +1,23 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { ScoreBar } from "@/components/data/score-bar";
 import { EmptyState } from "@/components/feedback/empty-state";
 import { ErrorState } from "@/components/feedback/error-state";
 import { CardSkeleton } from "@/components/feedback/loading-skeletons";
-
-import { useRecommendations } from "./queries";
+import { useProductRecommendations } from "@/features/recommendations/queries";
+import { RecommendationCard } from "@/features/recommendations/recommendation-card";
 
 /**
- * Similar products for this item, from GET /products/{id}/recommendations.
- * Recommendation payloads carry only ids + reasons (no metadata), so each row
- * links out by id; opening it fetches what that product's endpoints allow.
+ * Similar products for this item, from `GET /products/{id}/recommendations`.
+ *
+ * Cards are rendered by the shared `RecommendationCard`, so this view and the
+ * recommendation explorer present a recommendation identically. Names are not
+ * resolved here (the payload carries ids only, and the explorer is where that
+ * lookup happens) — each card links out by id.
  */
 export function RecommendationsCard({ id }: { id: string }) {
-  const router = useRouter();
-  const { data, isPending, isError, refetch } = useRecommendations(id);
-  const recs = data?.recommendations ?? [];
+  const { data, isPending, isError, refetch } = useProductRecommendations(id);
+  const recommendations = data?.recommendations ?? [];
 
   return (
     <Card>
@@ -32,34 +30,16 @@ export function RecommendationsCard({ id }: { id: string }) {
           <CardSkeleton />
         ) : isError ? (
           <ErrorState title="Couldn't load recommendations" onRetry={() => void refetch()} />
-        ) : recs.length === 0 ? (
-          <EmptyState title="No recommendations" description="Nothing similar was found." />
+        ) : recommendations.length === 0 ? (
+          <EmptyState
+            title="No recommendations"
+            description="Recommendations are precomputed when a product is processed and cached for an hour, so a product indexed into an empty catalog has none until that expires."
+          />
         ) : (
-          <ul className="space-y-3">
-            {recs.map((rec) => (
-              <li key={rec.product_id}>
-                <button
-                  type="button"
-                  onClick={() => router.push(`/products/${rec.product_id}`)}
-                  className="hover:bg-muted/60 focus-visible:ring-ring w-full rounded-lg border p-3 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="font-mono text-xs">{rec.product_id.slice(0, 12)}…</span>
-                    <ScoreBar value={rec.score} className="w-24" />
-                  </div>
-                  <p className="text-muted-foreground mt-1 text-sm">{rec.explanation}</p>
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {rec.reason.shared_brand ? <Badge variant="secondary">Same brand</Badge> : null}
-                    {rec.reason.shared_category ? (
-                      <Badge variant="secondary">Same category</Badge>
-                    ) : null}
-                    {(rec.reason.matched_tags ?? []).slice(0, 3).map((tag) => (
-                      <Badge key={tag} variant="outline">
-                        {tag}
-                      </Badge>
-                    ))}
-                  </div>
-                </button>
+          <ul role="list" className="list-none space-y-3">
+            {recommendations.map((recommendation, index) => (
+              <li role="listitem" key={recommendation.product_id}>
+                <RecommendationCard recommendation={recommendation} rank={index + 1} />
               </li>
             ))}
           </ul>

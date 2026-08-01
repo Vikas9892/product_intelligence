@@ -18,6 +18,7 @@ existing FastAPI backend **without modifying it**.
 | **Upload** (`/upload`)         | `POST /products/upload` → poll `GET /products/{id}/status`                   | Drag-and-drop, live progress, async job tracking, cancel, navigate on completion                                           |
 | **AI Search** (`/search`)      | `POST /products/search`, `GET /products/{id}/explanations`                   | Text / image / hybrid modes, real filters, history + saved filters, backend-measured latency, per-result explainability    |
 | **Duplicates** (`/duplicates`) | `POST /products/check-duplicate`                                             | Verdict + confidence, four similarity signals, side-by-side metadata diff, ranked candidates, cross-encoder state          |
+| **Recommendations**            | `GET /products/{id}/recommendations`                                         | Cards with score, backend explanation, brand/category/attribute/tag overlap; overlap filters and sorting                   |
 | **Product** (`/products/{id}`) | recommendations, pricing, explanations, models                               | Metadata (carried from search), embedding summary, pricing, recommendations, duplicate status; image not served by the API |
 
 > [!NOTE]
@@ -63,6 +64,19 @@ The same principle governs Duplicate Intelligence:
   agreement on nothing is not evidence of a match.
 - Product images are shown for the submitted side only (a local object URL); the backend
   serves no product images, and the matched side states that rather than using a stand-in.
+
+And Recommendations:
+
+- An **empty recommendation set is not the same as "nothing similar exists"**. The worker
+  precomputes recommendations when a product is processed and caches them in Redis for an
+  hour (`RECOMMENDATION__CACHE_TTL_SECONDS`), so a product indexed into an empty catalog
+  legitimately returns `[]` until that expires. The UI explains that rather than showing a
+  bare empty state.
+- Brand and category overlap chips render whether or not they matched, so "not shared" is
+  distinguishable from "not reported".
+- Filtering and sorting act only on what was returned — they never re-score. Each filter
+  shows how many of the fetched set satisfy it, so an empty filtered view is explained
+  before it happens.
 
 ## Stack
 

@@ -71,7 +71,7 @@ export function DuplicateIntelligenceView() {
           const ids = (response.data.top_candidates ?? []).map((c) => c.product_id);
           if (ids.length > 0) {
             // Enrichment only — a failure here leaves ids visible without names.
-            candidateMeta.mutate({ text: productText(values), candidateIds: ids });
+            candidateMeta.mutate({ text: productText(values), productIds: ids });
           }
         },
       },

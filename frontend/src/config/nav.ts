@@ -7,6 +7,7 @@ import {
   type LucideIcon,
   Search,
   ServerCog,
+  Sparkles,
   Upload,
 } from "lucide-react";
 
@@ -33,6 +34,12 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { title: "Upload", href: "/upload", icon: Upload, breadcrumb: "Upload" },
   { title: "AI Search", href: "/search", icon: Search, breadcrumb: "AI Search" },
   { title: "Duplicates", href: "/duplicates", icon: CopyCheck, breadcrumb: "Duplicates" },
+  {
+    title: "Recommendations",
+    href: "/recommendations",
+    icon: Sparkles,
+    breadcrumb: "Recommendations",
+  },
   { title: "Pricing", href: "/pricing", icon: BadgeDollarSign, breadcrumb: "Pricing" },
   { title: "Analytics", href: "/analytics", icon: Boxes, breadcrumb: "Analytics" },
   { title: "Models", href: "/models", icon: Boxes, breadcrumb: "Models" },
@@ -48,6 +55,7 @@ export const SEGMENT_LABELS: Record<string, string> = {
   upload: "Upload",
   search: "AI Search",
   duplicates: "Duplicates",
+  recommendations: "Recommendations",
   pricing: "Pricing",
   analytics: "Analytics",
   models: "Models",

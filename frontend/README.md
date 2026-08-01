@@ -16,13 +16,38 @@ existing FastAPI backend **without modifying it**.
 | ------------------------------ | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | **Dashboard** (`/`)            | `analytics/dashboard`, `analytics/pipeline`, `system/health`, `system/stats` | Real metric cards, system + pipeline panels, manual refresh; each section degrades independently                           |
 | **Upload** (`/upload`)         | `POST /products/upload` → poll `GET /products/{id}/status`                   | Drag-and-drop, live progress, async job tracking, cancel, navigate on completion                                           |
-| **AI Search** (`/search`)      | `POST /products/search`                                                      | Text / image / hybrid modes, real filters, search history + saved filters, backend-measured latency, grid and table views  |
+| **AI Search** (`/search`)      | `POST /products/search`, `GET /products/{id}/explanations`                   | Text / image / hybrid modes, real filters, history + saved filters, backend-measured latency, per-result explainability    |
 | **Product** (`/products/{id}`) | recommendations, pricing, explanations, models                               | Metadata (carried from search), embedding summary, pricing, recommendations, duplicate status; image not served by the API |
 
 > [!NOTE]
 > The backend is frozen and exposes no list-all, get-one-product, or image-serving
 > endpoints. Those gaps are handled honestly (search-driven browse, metadata carried via
 > query cache, image placeholder) rather than with mock data or fabricated endpoints.
+
+### Explainability: what is real, and what is not shown
+
+Every figure in the UI comes from a backend response. Where a response does not carry
+something, the UI says so instead of synthesizing it.
+
+`ProductSearchResult` returns only `product_id`, `score`, `matched_modalities`, and
+`metadata` (`backend/app/schemas/search.py`). So a search result explains itself with:
+
+- **Why retrieved** — `matched_modalities`, mapped to the model that produced the match
+  (CLIP for image, BGE for text).
+- **Fused relevance** — `score`, labelled as the fused value it is. Image and text signals
+  are combined server-side and the individual sides are never returned, so no per-modality
+  split is displayed.
+- **Recorded decisions** — fetched on demand from `GET /products/{id}/explanations`, which
+  is where genuine weighted breakdowns live: each component's `value`, `weight`, and
+  `contribution`, the structured `reasons`, and `confidence`.
+- **Explicitly absent** — per-modality sub-scores and the cross-encoder score are named as
+  not returned by search, with a pointer to where they do exist (duplicate verification).
+
+> [!IMPORTANT]
+> In real responses the components' `contribution` values do **not** sum to `total` — the
+> scorer applies its own configured weighting internally (live example: 0.9998 + 0.6944
+> against a total of 0.9693). The UI therefore presents `total` as the backend's final
+> score and never as a sum, and the behavior is pinned by a test.
 
 ## Stack
 

@@ -3,47 +3,28 @@
 import { ShieldCheck } from "lucide-react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { ConfidenceBadge } from "@/components/data/confidence-badge";
 import { ErrorState } from "@/components/feedback/error-state";
 import { CardSkeleton } from "@/components/feedback/loading-skeletons";
-import type { ExplanationResponse } from "@/lib/api/types";
-
-import { useExplanations } from "./queries";
-
-function Reasons({ explanation }: { explanation: ExplanationResponse }) {
-  const reasons = explanation.reasons ?? [];
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-2">
-        <p className="text-sm font-medium">{explanation.summary}</p>
-        {explanation.confidence !== null && explanation.confidence !== undefined ? (
-          <ConfidenceBadge score={explanation.confidence} />
-        ) : null}
-      </div>
-      {reasons.length > 0 ? (
-        <ul className="text-muted-foreground list-disc space-y-1 pl-5 text-sm">
-          {reasons.map((reason) => (
-            <li key={reason.code}>{reason.description}</li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
+import { DecisionTrace } from "@/features/explanations/decision-trace";
+import { useProductExplanations } from "@/features/explanations/queries";
 
 /**
  * Duplicate decision and explainability for this product, from
- * GET /products/{id}/explanations. Shows the duplicate trace (verdict,
- * confidence, human-readable reasons) and how many recommendation traces exist.
+ * `GET /products/{id}/explanations`.
+ *
+ * Rendering is delegated to the shared `DecisionTrace`, so this view, the
+ * search workspace, and the duplicate/recommendation views present a trace
+ * identically — including the weighted score components, which this card
+ * previously discarded.
  */
 export function ExplainabilityCard({ id }: { id: string }) {
-  const { data, isPending, isError, refetch } = useExplanations(id);
-  const recExplanationCount = data?.recommendations?.length ?? 0;
+  const { data, isPending, isError, refetch } = useProductExplanations(id);
+  const recommendationTraces = data?.recommendations ?? [];
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Duplicate & explainability</CardTitle>
+        <CardTitle>Duplicate &amp; explainability</CardTitle>
         <CardDescription>Why the system decided what it did</CardDescription>
       </CardHeader>
       <CardContent>
@@ -58,20 +39,28 @@ export function ExplainabilityCard({ id }: { id: string }) {
                 Duplicate status
               </p>
               {data.duplicate ? (
-                <Reasons explanation={data.duplicate} />
+                <DecisionTrace explanation={data.duplicate} />
               ) : (
                 <p className="text-muted-foreground flex items-center gap-2 text-sm">
-                  <ShieldCheck className="size-4" /> No duplicate decision is recorded for this
-                  product.
+                  <ShieldCheck className="size-4" aria-hidden="true" /> No duplicate decision is
+                  recorded for this product.
                 </p>
               )}
             </div>
 
-            {recExplanationCount > 0 ? (
-              <p className="text-muted-foreground border-t pt-3 text-sm">
-                {recExplanationCount} recommendation explanation
-                {recExplanationCount === 1 ? "" : "s"} available.
-              </p>
+            {recommendationTraces.length > 0 ? (
+              <div className="space-y-3 border-t pt-3">
+                <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+                  Recommendation decisions ({recommendationTraces.length})
+                </p>
+                {recommendationTraces.map((trace, index) => (
+                  <DecisionTrace
+                    key={`${trace.subject_id ?? "trace"}-${index}`}
+                    explanation={trace}
+                    className="border-l-2 pl-3"
+                  />
+                ))}
+              </div>
             ) : null}
           </div>
         )}

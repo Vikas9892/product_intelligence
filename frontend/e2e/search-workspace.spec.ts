@@ -42,6 +42,51 @@ const SEARCH_BODY = {
   ],
 };
 
+/**
+ * A real explanations payload, copied from a live response. The contributions
+ * (0.9998 + 0.6944) deliberately do not sum to `total` (0.9693) — the UI must
+ * report the backend's total rather than adding them up.
+ */
+const EXPLANATIONS_BODY = {
+  product_id: "ac36cc32-706f-4874-95ad-0ca9bb076d7f",
+  duplicate: {
+    decision_type: "duplicate",
+    subject_id: "082c6d18-9dd3-4c28-bb98-72a3a67fe120",
+    summary:
+      "Judged a duplicate because: Overall similarity 1.00 meets or exceeds the 0.90 threshold.",
+    confidence: 0.9998867645,
+    reasons: [
+      {
+        code: "weighted_similarity",
+        description: "Overall similarity 1.00 meets or exceeds the 0.90 threshold.",
+        weight: null,
+      },
+    ],
+    breakdown: null,
+    created_at: "2026-07-31T03:13:22.469834Z",
+  },
+  recommendations: [
+    {
+      decision_type: "recommendation",
+      subject_id: "082c6d18-9dd3-4c28-bb98-72a3a67fe120",
+      summary: "Recommended because it shares: the same brand, the same category.",
+      confidence: 0.9693148348893941,
+      reasons: [
+        { code: "shared_brand", description: "the same brand", weight: null },
+        { code: "shared_category", description: "the same category", weight: null },
+      ],
+      breakdown: {
+        components: [
+          { name: "similarity", value: 0.999773529, weight: 1.0, contribution: 0.999773529 },
+          { name: "quality", value: 0.6943939, weight: 1.0, contribution: 0.6943939 },
+        ],
+        total: 0.9693148348893941,
+      },
+      created_at: "2026-07-31T03:13:22.570813Z",
+    },
+  ],
+};
+
 test.beforeEach(async ({ page }) => {
   await page.route(SEARCH_ROUTE, async (route) => {
     await route.fulfill({
@@ -49,6 +94,14 @@ test.beforeEach(async ({ page }) => {
       contentType: "application/json",
       headers: { "x-response-time-ms": "52.77" },
       body: JSON.stringify(SEARCH_BODY),
+    });
+  });
+
+  await page.route("**/api/v1/products/*/explanations", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(EXPLANATIONS_BODY),
     });
   });
 });
@@ -128,4 +181,42 @@ test("switching to the table view keeps the results", async ({ page }) => {
   await page.getByRole("button", { name: "Switch to table view" }).click();
   await expect(page.getByRole("table")).toBeVisible();
   await expect(page.getByRole("cell", { name: /Blue Running Shoes/ })).toBeVisible();
+});
+
+test("explains a result from real backend fields only", async ({ page }) => {
+  await page.goto("/search");
+  await page.getByLabel("Search query").fill("blue running shoe");
+  await page.getByRole("button", { name: "Search" }).click();
+  await expect(page.getByText("2 results · text search")).toBeVisible();
+
+  const results = page.getByRole("list", { name: "Search results" });
+  const firstCard = results.getByRole("listitem").first();
+
+  // Collapsed by default, so a page of results triggers no explanation calls.
+  await expect(firstCard.getByText("Why this was retrieved")).toBeHidden();
+
+  await firstCard.getByRole("button", { name: "Why this result?" }).click();
+
+  // What the search response itself carries.
+  await expect(firstCard.getByText("Why this was retrieved")).toBeVisible();
+  await expect(
+    firstCard.getByText("The product text embedding (BGE) matched the query text."),
+  ).toBeVisible();
+  await expect(firstCard.getByText("Fused relevance score")).toBeVisible();
+  await expect(firstCard.getByText("0.8482")).toBeVisible();
+
+  // The recorded decision traces, with the real weighted breakdown. Exact
+  // matching: the reason badge "Same brand" and its description "the same
+  // brand" would both match a substring locator.
+  await expect(firstCard.getByText("Duplicate decision", { exact: true })).toBeVisible();
+  await expect(firstCard.getByText("Same brand", { exact: true })).toBeVisible();
+  await expect(firstCard.getByText("similarity", { exact: true })).toBeVisible();
+
+  // The total is the backend's reported score, not the sum of contributions.
+  await expect(firstCard.getByText("Final 0.97")).toBeVisible();
+  await expect(firstCard.getByText("1.69")).toBeHidden();
+
+  // Fields the endpoint does not return are named, not fabricated.
+  await expect(firstCard.getByText("Not returned by this endpoint")).toBeVisible();
+  await expect(firstCard.getByText("Cross-encoder score")).toBeVisible();
 });

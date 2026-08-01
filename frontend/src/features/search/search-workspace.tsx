@@ -23,6 +23,7 @@ import type { ProductSearchResult } from "@/lib/api/types";
 import { SORT_OPTIONS, sortResults, type SortDir, type SortKey } from "@/features/products/sorting";
 import { ResultsTable } from "@/features/products/results-table";
 
+import { ExplainPanel } from "./explain-panel";
 import { HistoryPanel } from "./history-panel";
 import { LatencyBadge } from "./latency-badge";
 import { useSearchProducts } from "./queries";
@@ -254,13 +255,23 @@ export function SearchWorkspace() {
               {view === "table" ? (
                 <ResultsTable results={sorted} onOpen={openProduct} />
               ) : (
+                // `role` is set explicitly on the list and its items because
+                // `list-style: none` makes browsers drop the implicit list
+                // semantics, which would leave assistive technology without the
+                // result count or item boundaries.
                 <ul
+                  role="list"
                   aria-label="Search results"
                   className="grid list-none gap-4 sm:grid-cols-2 xl:grid-cols-3"
                 >
                   {sorted.map((result, index) => (
-                    <li key={result.product_id}>
-                      <ResultCard result={result} rank={index + 1} onOpen={openProduct} />
+                    <li role="listitem" key={result.product_id}>
+                      <ResultCard
+                        result={result}
+                        rank={index + 1}
+                        onOpen={openProduct}
+                        footer={<ExplainPanel result={result} />}
+                      />
                     </li>
                   ))}
                 </ul>

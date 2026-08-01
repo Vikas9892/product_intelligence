@@ -2,7 +2,6 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { getProductExplanations } from "@/lib/api/endpoints/explanations";
 import { getModels } from "@/lib/api/endpoints/models";
 import { getPricingById } from "@/lib/api/endpoints/pricing";
 import { getRecommendations } from "@/lib/api/endpoints/products";
@@ -30,12 +29,9 @@ export function usePricing(id: string) {
   return useQuery({ queryKey: queryKeys.pricing.byId(id), queryFn: () => getPricingById(id) });
 }
 
-export function useExplanations(id: string) {
-  return useQuery({
-    queryKey: queryKeys.products.explanations(id),
-    queryFn: () => getProductExplanations(id),
-  });
-}
+// Explanations are read through `@/features/explanations/queries`
+// (`useProductExplanations`) — shared, because search and the intelligence
+// views read the same traces and should hit the same cache entry.
 
 export function useModels() {
   return useQuery({ queryKey: queryKeys.models.list, queryFn: getModels, staleTime: 5 * 60_000 });

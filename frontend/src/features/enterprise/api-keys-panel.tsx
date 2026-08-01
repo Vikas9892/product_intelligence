@@ -29,9 +29,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { ForbiddenState } from "@/components/auth/permission";
 import { ApiError } from "@/lib/api";
 import type { ApiKeyInfo } from "@/lib/api/types";
 import { ROLES, type Role } from "@/lib/auth/roles";
+import { useAuth } from "@/lib/auth/use-auth";
 import { formatDateTime } from "@/lib/format";
 
 import { CopyOnceSecret } from "./onboarding";
@@ -183,7 +185,11 @@ function RevokeDialog({
  * A secret is only ever available in the create response. `GET /api-keys`
  * returns metadata with no `key` field, so the table can never show one.
  */
-export function ApiKeysPanel({ canManage = true }: { canManage?: boolean }) {
+export function ApiKeysPanel() {
+  const auth = useAuth();
+  // A hint only: the list request is still made, and a 403 from it is what
+  // actually decides. This just avoids showing a create form that cannot work.
+  const canManage = auth.can("manageApiKeys");
   const keys = useApiKeys();
   const revoke = useRevokeApiKey();
 
@@ -275,6 +281,10 @@ export function ApiKeysPanel({ canManage = true }: { canManage?: boolean }) {
 
         {keys.isPending ? (
           <TableSkeleton rows={3} columns={5} />
+        ) : keys.isError && keys.error instanceof ApiError && keys.error.status === 403 ? (
+          // The server refused — show the authoritative outcome, not a retry
+          // prompt for something that will never succeed with this key.
+          <ForbiddenState capability="manageApiKeys" title="This key can't manage API keys" />
         ) : keys.isError ? (
           <ErrorState title="Couldn't load API keys" onRetry={() => void keys.refetch()} />
         ) : (keys.data?.length ?? 0) === 0 ? (

@@ -303,3 +303,50 @@ test("shows an empty state when the tenant has no keys", async ({ page }) => {
   await expect(page.getByText("No API keys yet")).toBeVisible();
   await expect(page.getByText(/cannot be recovered afterwards/)).toBeVisible();
 });
+
+const FORBIDDEN_BODY = {
+  success: false,
+  error: {
+    code: "authorization_error",
+    message: "Role 'member' lacks the 'manage_api_keys' permission.",
+    details: null,
+  },
+};
+
+test("a 403 on the key list renders an authoritative forbidden state", async ({ page }) => {
+  // Enterprise is on and the key authenticated (usage 200), but this role
+  // cannot manage keys — the exact shape the backend returns for a member.
+  await stubUsage(page, 200, USAGE_BODY);
+  await page.route("**/api/v1/api-keys", (route) =>
+    route.fulfill({
+      status: 403,
+      contentType: "application/json",
+      body: JSON.stringify(FORBIDDEN_BODY),
+    }),
+  );
+  await page.goto("/enterprise");
+
+  await expect(page.getByText("This key can't manage API keys")).toBeVisible();
+  await expect(page.getByText(/available to: admin, owner/)).toBeVisible();
+  // It must be explicit that the server enforced it, not the UI.
+  await expect(page.getByText(/The backend enforced this/)).toBeVisible();
+  // And it must not offer a pointless retry.
+  await expect(page.getByRole("button", { name: "Retry" })).toBeHidden();
+});
+
+test("a 403 is still treated as enterprise-enabled, not unavailable", async ({ page }) => {
+  // /usage 403 means: router mounted, key valid, role insufficient. The
+  // console must show the signed-in surface rather than the disabled banner.
+  await stubUsage(page, 403, FORBIDDEN_BODY);
+  await page.route("**/api/v1/api-keys", (route) =>
+    route.fulfill({
+      status: 403,
+      contentType: "application/json",
+      body: JSON.stringify(FORBIDDEN_BODY),
+    }),
+  );
+  await page.goto("/enterprise");
+
+  await expect(page.getByText("Signed in")).toBeVisible();
+  await expect(page.getByText("Enterprise layer is disabled")).toBeHidden();
+});

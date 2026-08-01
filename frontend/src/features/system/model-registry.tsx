@@ -5,7 +5,7 @@ import { Activity } from "lucide-react";
 import { DataTable, type Column } from "@/components/data/data-table";
 import { StatusBadge } from "@/components/data/status-badge";
 import { ErrorState } from "@/components/feedback/error-state";
-import { StatGridSkeleton } from "@/components/feedback/loading-skeletons";
+import { TableSkeleton } from "@/components/feedback/loading-skeletons";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useModels } from "@/features/product/queries";
 import type { ModelInfoResponse } from "@/lib/api/types";
@@ -51,7 +51,11 @@ export function ModelRegistry() {
       </CardHeader>
       <CardContent>
         {models.isPending ? (
-          <StatGridSkeleton count={3} />
+          // A table placeholder for a table. This previously used
+          // StatGridSkeleton — a grid of stat cards — which is neither the
+          // shape nor the height of the registry, so the page jumped when the
+          // models arrived.
+          <TableSkeleton rows={3} columns={6} />
         ) : models.isError ? (
           <ErrorState
             title="Couldn't load the model registry"

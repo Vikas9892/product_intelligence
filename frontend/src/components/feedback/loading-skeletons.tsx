@@ -59,6 +59,29 @@ export function CardGridSkeleton({ count = 6 }: { count?: number }) {
   );
 }
 
+/**
+ * Placeholder for a list of label/value rows, sized to the real row height.
+ *
+ * Reserving the right vertical space matters more than looking pretty: a
+ * skeleton shorter than its content pushes everything below it down when the
+ * data lands, which is measured as cumulative layout shift.
+ */
+export function RowsSkeleton({ rows = 6 }: { rows?: number }) {
+  return (
+    <div className="space-y-0">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div
+          key={i}
+          className="flex items-center justify-between gap-3 border-b py-2.5 last:border-b-0"
+        >
+          <Skeleton className="h-4 w-28" />
+          <Skeleton className="h-5 w-20" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function TableSkeleton({ rows = 5, columns = 4 }: { rows?: number; columns?: number }) {
   return (
     <div className="space-y-2">

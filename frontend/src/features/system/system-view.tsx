@@ -5,8 +5,9 @@ import type { LucideIcon } from "lucide-react";
 
 import { PageHeader } from "@/components/common/page-header";
 import { ErrorState } from "@/components/feedback/error-state";
-import { CardSkeleton } from "@/components/feedback/loading-skeletons";
+import { RowsSkeleton } from "@/components/feedback/loading-skeletons";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSystemHealth, useSystemStats } from "@/features/dashboard/queries";
@@ -91,7 +92,29 @@ function OperationsPanel() {
   const health = useSystemHealth();
   const stats = useSystemStats();
 
-  if (health.isPending || stats.isPending) return <CardSkeleton />;
+  if (health.isPending || stats.isPending) {
+    // The card chrome renders immediately and the placeholder reserves the
+    // height of all ten rows, so nothing below this panel moves when the data
+    // arrives. Previously a three-line CardSkeleton stood in for a ten-row
+    // panel, which was the bulk of this route's layout shift.
+    return (
+      <Card>
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Server className="size-4" aria-hidden="true" />
+              System operations
+            </CardTitle>
+            <CardDescription>Point-in-time snapshot, refreshed every 30 seconds.</CardDescription>
+          </div>
+          <Skeleton className="h-5 w-36" />
+        </CardHeader>
+        <CardContent>
+          <RowsSkeleton rows={10} />
+        </CardContent>
+      </Card>
+    );
+  }
   if (health.isError) {
     return (
       <ErrorState

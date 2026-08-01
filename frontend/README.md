@@ -398,28 +398,40 @@ headless Chrome run against the standalone server:
 | Best Practices | 100   |
 | SEO            | 100   |
 
-Core Web Vitals, same run:
+Core Web Vitals on `/system`, before and after the layout-shift fix, each from
+a headless run against the standalone server:
 
-| Metric                   | Value     |
-| ------------------------ | --------- |
-| First Contentful Paint   | 1.0 s     |
-| Speed Index              | 1.3 s     |
-| Largest Contentful Paint | 3.1 s     |
-| Total Blocking Time      | 250 ms    |
-| Cumulative Layout Shift  | **0.244** |
+| Metric                   | Before    | After (3 runs)            |
+| ------------------------ | --------- | ------------------------- |
+| First Contentful Paint   | 1.0 s     | 1.0 s                     |
+| Speed Index              | 1.3 s     | 1.3 s                     |
+| Largest Contentful Paint | 3.1 s     | 2.9 / 3.2 / 2.9 s         |
+| Total Blocking Time      | 250 ms    | 1,270 / 990 / 1,140 ms    |
+| Cumulative Layout Shift  | **0.244** | **0.001 / 0.001 / 0.001** |
 
 Lighthouse reports **no failing accessibility audits**.
 
-> [!IMPORTANT]
-> **CLS of 0.244 is a known issue, not a passing result.** The "good" threshold
-> is 0.1. The shift is on `/system`, where several panels swap a skeleton for
-> real content of a different height. It is measured, reproducible, and **not
-> fixed** — it is recorded here rather than rounded away, and it is the first
-> thing worth addressing in any follow-up. LCP of 3.1 s is likewise above the
-> 2.5 s target.
+**Layout shift is fixed.** CLS went from 0.244 — well past the 0.1 "good"
+threshold — to 0.001, stable across three runs. Two placeholders were the
+cause, and both were the wrong shape for what replaced them:
+
+- the operations panel showed a three-line `CardSkeleton` in place of a
+  ten-row panel, and
+- the model registry showed `StatGridSkeleton` — a grid of stat cards — in
+  place of a six-column table.
+
+Both now render the card chrome immediately and reserve the real content
+height, so nothing below them moves when data lands.
+
+> [!NOTE]
+> **Total Blocking Time is not a like-for-like comparison and no claim is made
+> about it.** The "before" column is a single run; the "after" column is three.
+> TBT swings by hundreds of milliseconds between runs on a developer machine,
+> so the difference shown may be measurement noise, a real regression, or both,
+> and one sample is not enough to tell. LCP (~3 s) remains above the 2.5 s
+> target in both.
 >
-> These numbers come from one local headless run on a developer machine. They
-> are directionally useful, not a production measurement.
+> These are local headless runs, not production measurements.
 
 ### Automated console audit
 

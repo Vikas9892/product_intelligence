@@ -13,11 +13,10 @@ test("app shell renders and navigates between sections", async ({ page }) => {
   await expect(page).toHaveURL(/\/upload$/);
   await expect(page.getByRole("heading", { name: "Upload" })).toBeVisible();
 
-  // The sidebar entry is "Search"; the products list page heading is "Products".
   // Exact match avoids the topbar's "Go to search" quick link.
-  await page.getByRole("link", { name: "Search", exact: true }).click();
+  await page.getByRole("link", { name: "AI Search", exact: true }).click();
   await expect(page).toHaveURL(/\/search$/);
-  await expect(page.getByRole("heading", { name: "Products" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "AI Search" })).toBeVisible();
 });
 
 test("theme can be switched to dark", async ({ page }) => {

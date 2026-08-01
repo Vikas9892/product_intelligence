@@ -20,7 +20,11 @@ describe("foundation", () => {
   });
 
   it("env exposes sane, backend-free defaults", () => {
-    expect(env.apiBaseUrl).toMatch(/^https?:\/\//);
+    // Same-origin by default: requests go through this app's rewrite proxy
+    // (see next.config.ts), which is what makes them work against a stock
+    // backend (CORS disabled) and lets the browser read its timing header.
+    // An absolute NEXT_PUBLIC_API_BASE_URL opts out of the proxy.
+    expect(env.apiBaseUrl === "" || /^https?:\/\//.test(env.apiBaseUrl)).toBe(true);
     expect(env.apiKeyHeader).toBe("X-API-Key");
     expect(env.apiPrefix.startsWith("/")).toBe(true);
   });

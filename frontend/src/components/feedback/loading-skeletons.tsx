@@ -44,6 +44,21 @@ export function CardSkeleton() {
   );
 }
 
+/**
+ * Placeholder for a responsive grid of result cards (search hits,
+ * recommendations, comparables). Mirrors the real grid's column counts so the
+ * layout does not shift when results arrive.
+ */
+export function CardGridSkeleton({ count = 6 }: { count?: number }) {
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      {Array.from({ length: count }).map((_, i) => (
+        <CardSkeleton key={i} />
+      ))}
+    </div>
+  );
+}
+
 export function TableSkeleton({ rows = 5, columns = 4 }: { rows?: number; columns?: number }) {
   return (
     <div className="space-y-2">

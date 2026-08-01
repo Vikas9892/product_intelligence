@@ -2,6 +2,7 @@ import type { AxiosProgressEvent } from "axios";
 
 import { API_PREFIX, apiClient } from "../client";
 import { apiGet, apiPost } from "../http";
+import { apiPostTimed, type TimedResponse } from "../timing";
 import type {
   JobStatusResponse,
   ProductSearchResponse,
@@ -45,8 +46,21 @@ export function getRecommendations(productId: string): Promise<RecommendationsRe
   return apiGet<RecommendationsResponse>(`${API_PREFIX}/products/${productId}/recommendations`);
 }
 
+/**
+ * Parameters for `POST /products/search`.
+ *
+ * `query` and `file` are both optional individually but the backend requires
+ * **at least one** — that is what makes the endpoint multi-modal:
+ *
+ * - `query` alone  -> text search (BGE text embedding)
+ * - `file` alone   -> image search (CLIP image embedding)
+ * - both           -> hybrid, fused server-side by the configured weights
+ *
+ * Use {@link hasSearchInput} to check before dispatching.
+ */
 export interface SearchParams {
-  query: string;
+  query?: string;
+  file?: File;
   topK?: number;
   brand?: string;
   category?: string;
@@ -54,19 +68,52 @@ export interface SearchParams {
   maxPrice?: number;
 }
 
+/** Whether `params` satisfies the backend's "query or image required" rule. */
+export function hasSearchInput(params: SearchParams | null | undefined): boolean {
+  if (!params) return false;
+  return Boolean(params.query?.trim()) || params.file instanceof File;
+}
+
 /**
- * Text search over indexed products (multipart). This is the only catalog
- * retrieval the backend offers — there is no "list all" endpoint — so the
- * product list is search-driven. Brand/category/price filters and `top_k` are
- * real backend parameters; results are ranked by relevance.
+ * Builds the multipart body once, so the plain and timed search calls cannot
+ * drift apart. Empty/undefined values are omitted rather than sent blank —
+ * the backend treats a present-but-empty filter differently from an absent one.
  */
-export function searchProducts(params: SearchParams): Promise<ProductSearchResponse> {
+function buildSearchFormData(params: SearchParams): FormData {
   const body = new FormData();
-  body.append("query", params.query);
+  const query = params.query?.trim();
+  if (query) body.append("query", query);
+  if (params.file) body.append("file", params.file);
   if (params.topK !== undefined) body.append("top_k", String(params.topK));
   if (params.brand) body.append("brand", params.brand);
   if (params.category) body.append("category", params.category);
   if (params.minPrice !== undefined) body.append("min_price", String(params.minPrice));
   if (params.maxPrice !== undefined) body.append("max_price", String(params.maxPrice));
-  return apiPost<ProductSearchResponse>(`${API_PREFIX}/products/search`, body);
+  return body;
+}
+
+/**
+ * Multi-modal search over indexed products (multipart). This is the only
+ * catalog retrieval the backend offers — there is no "list all" endpoint — so
+ * browsing is search-driven. Brand/category/price filters and `top_k` are real
+ * backend parameters; results come back ranked by fused relevance.
+ */
+export function searchProducts(params: SearchParams): Promise<ProductSearchResponse> {
+  return apiPost<ProductSearchResponse>(
+    `${API_PREFIX}/products/search`,
+    buildSearchFormData(params),
+  );
+}
+
+/**
+ * {@link searchProducts} that additionally reports the backend's own measured
+ * handling time, for the search workspace's latency readout.
+ */
+export function searchProductsTimed(
+  params: SearchParams,
+): Promise<TimedResponse<ProductSearchResponse>> {
+  return apiPostTimed<ProductSearchResponse>(
+    `${API_PREFIX}/products/search`,
+    buildSearchFormData(params),
+  );
 }

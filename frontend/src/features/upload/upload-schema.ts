@@ -1,10 +1,16 @@
 import { z } from "zod";
 
-/** Client-side mirrors of the backend's upload constraints (fail fast; the
- * server remains the source of truth). See backend `STORAGE__*` settings. */
-export const MAX_UPLOAD_MB = 10;
-export const ACCEPTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
-export const ACCEPTED_EXTENSIONS = ".jpg,.jpeg,.png,.webp";
+/**
+ * Image constraints now live in `@/lib/image-file` because the search
+ * workspace picks query images too. Re-exported here so this module keeps its
+ * existing public surface for the upload feature and its tests.
+ */
+export {
+  ACCEPTED_EXTENSIONS,
+  ACCEPTED_IMAGE_TYPES,
+  MAX_UPLOAD_MB,
+  validateImageFile,
+} from "@/lib/image-file";
 
 /**
  * Metadata fields (the image file is handled separately in component state).
@@ -30,17 +36,6 @@ export const UPLOAD_DEFAULTS: UploadMetadata = {
   description: "",
   price: "",
 };
-
-/** Validate a chosen file against type/size; returns an error message or null. */
-export function validateImageFile(file: File): string | null {
-  if (!ACCEPTED_IMAGE_TYPES.includes(file.type as (typeof ACCEPTED_IMAGE_TYPES)[number])) {
-    return "Unsupported file type. Use JPG, PNG, or WebP.";
-  }
-  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-    return `File is too large (max ${MAX_UPLOAD_MB} MB).`;
-  }
-  return null;
-}
 
 /** Assemble the multipart body, omitting empty optional fields. */
 export function buildUploadFormData(values: UploadMetadata, file: File): FormData {

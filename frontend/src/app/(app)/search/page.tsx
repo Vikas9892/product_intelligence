@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
-import { ProductSearchView } from "@/features/products/product-search-view";
+import { SearchWorkspace } from "@/features/search/search-workspace";
 
-export const metadata: Metadata = { title: "Products" };
+export const metadata: Metadata = { title: "AI Search" };
 
 export default function SearchPage() {
-  return <ProductSearchView />;
+  return <SearchWorkspace />;
 }

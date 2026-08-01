@@ -31,7 +31,7 @@ export interface NavItem {
 export const NAV_ITEMS: readonly NavItem[] = [
   { title: "Dashboard", href: "/", icon: LayoutDashboard, breadcrumb: "Dashboard" },
   { title: "Upload", href: "/upload", icon: Upload, breadcrumb: "Upload" },
-  { title: "Search", href: "/search", icon: Search, breadcrumb: "Search" },
+  { title: "AI Search", href: "/search", icon: Search, breadcrumb: "AI Search" },
   { title: "Duplicates", href: "/duplicates", icon: CopyCheck, breadcrumb: "Duplicates" },
   { title: "Pricing", href: "/pricing", icon: BadgeDollarSign, breadcrumb: "Pricing" },
   { title: "Analytics", href: "/analytics", icon: Boxes, breadcrumb: "Analytics" },
@@ -46,7 +46,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
  */
 export const SEGMENT_LABELS: Record<string, string> = {
   upload: "Upload",
-  search: "Search",
+  search: "AI Search",
   duplicates: "Duplicates",
   pricing: "Pricing",
   analytics: "Analytics",

@@ -47,3 +47,42 @@ export function formatDateTime(value: string | Date): string {
     timeStyle: "short",
   }).format(date);
 }
+
+const RELATIVE_UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
+  ["year", 365 * 24 * 60 * 60 * 1000],
+  ["month", 30 * 24 * 60 * 60 * 1000],
+  ["day", 24 * 60 * 60 * 1000],
+  ["hour", 60 * 60 * 1000],
+  ["minute", 60 * 1000],
+];
+
+/**
+ * A past/future instant relative to now, e.g. "2 minutes ago". Anything under a
+ * minute reads as "just now" rather than churning second-by-second.
+ */
+export function formatRelativeTime(value: string | Date, now: Date = new Date()): string {
+  const date = typeof value === "string" ? new Date(value) : value;
+  const deltaMs = date.getTime() - now.getTime();
+  const absMs = Math.abs(deltaMs);
+
+  if (absMs < 60 * 1000) return "just now";
+
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  for (const [unit, unitMs] of RELATIVE_UNITS) {
+    if (absMs >= unitMs) {
+      return formatter.format(Math.round(deltaMs / unitMs), unit);
+    }
+  }
+  return "just now";
+}
+
+/**
+ * A millisecond duration for latency readouts: sub-second values stay in ms
+ * (`842 ms`), longer ones switch to seconds (`1.24 s`) so the magnitude reads
+ * at a glance.
+ */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms)) return "—";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(2)} s`;
+}

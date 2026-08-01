@@ -4,10 +4,11 @@ The web client for the [Multi-Modal Product Intelligence Engine](../backend/READ
 is built to the specification in [`ARCHITECTURE.md`](./ARCHITECTURE.md) and consumes the
 existing FastAPI backend **without modifying it**.
 
-> **Status:** Stage 4 complete. On top of the Stage 3 foundation (shell, API layer, auth,
-> component library), the first working features are live: **Dashboard**, **Upload**,
-> **Products** (search-driven list), and **Product detail**. Remaining domains (analytics,
-> enterprise, system, …) are built in later stages.
+> **Status:** Stage 5 in progress — the AI Intelligence Experience. On top of the Stage 3
+> foundation (shell, API layer, auth, component library) and Stage 4 features (dashboard,
+> upload, product detail), the **AI Search workspace** is live with text, image, and hybrid
+> retrieval. Duplicate, recommendation, pricing, and analytics intelligence follow in the
+> remaining Stage 5 milestones.
 
 ## Features (live)
 
@@ -15,7 +16,7 @@ existing FastAPI backend **without modifying it**.
 | ------------------------------ | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | **Dashboard** (`/`)            | `analytics/dashboard`, `analytics/pipeline`, `system/health`, `system/stats` | Real metric cards, system + pipeline panels, manual refresh; each section degrades independently                           |
 | **Upload** (`/upload`)         | `POST /products/upload` → poll `GET /products/{id}/status`                   | Drag-and-drop, live progress, async job tracking, cancel, navigate on completion                                           |
-| **Products** (`/search`)       | `POST /products/search`                                                      | Search-driven (the API has no list-all endpoint); real brand/category/price filters, client-side sort + pagination         |
+| **AI Search** (`/search`)      | `POST /products/search`                                                      | Text / image / hybrid modes, real filters, search history + saved filters, backend-measured latency, grid and table views  |
 | **Product** (`/products/{id}`) | recommendations, pricing, explanations, models                               | Metadata (carried from search), embedding summary, pricing, recommendations, duplicate status; image not served by the API |
 
 > [!NOTE]
@@ -52,9 +53,28 @@ cp .env.example .env.local   # optional — every value has a safe default
 npm run dev                  # http://localhost:3000
 ```
 
-By default the app runs in **single-tenant demo mode** (no auth gate, no API key). Point it
-at the backend with `NEXT_PUBLIC_API_BASE_URL`; set `NEXT_PUBLIC_ENTERPRISE_ENABLED=true`
-only when the backend runs with the enterprise layer on.
+By default the app runs in **single-tenant demo mode** (no auth gate, no API key), and
+proxies the API so the browser only ever talks to this origin. Set
+`NEXT_PUBLIC_ENTERPRISE_ENABLED=true` only when the backend runs with the enterprise layer
+on.
+
+### The API proxy
+
+Requests go to a same-origin path and are forwarded by a Next.js rewrite to
+`BACKEND_ORIGIN` (default `http://localhost:8000`). This is not incidental — the backend is
+frozen, and two of its defaults make direct browser calls unworkable:
+
+- `APPLICATION__CORS_ALLOWED_ORIGINS` defaults to `[]`, so a direct cross-origin request is
+  blocked outright. Proxying sidesteps CORS entirely, so the app works against a **stock**
+  backend with no `.env` changes.
+- `CORSMiddleware` is registered without `expose_headers`, so a cross-origin browser
+  response could never read `X-Response-Time-Ms` — the backend's own timing measurement.
+  Same-origin responses expose it, which is what lets AI Search report **genuine backend
+  latency** rather than a client-side guess.
+
+Point `BACKEND_ORIGIN` at a different backend to retarget the proxy. Setting
+`NEXT_PUBLIC_API_BASE_URL` to an absolute URL opts out of the proxy and calls the backend
+directly, which then requires backend CORS to be configured.
 
 ## Scripts
 

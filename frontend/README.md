@@ -4,7 +4,8 @@ The web client for the [Multi-Modal Product Intelligence Engine](../backend/READ
 is built to the specification in [`ARCHITECTURE.md`](./ARCHITECTURE.md) and consumes the
 existing FastAPI backend **without modifying it**.
 
-> **Status:** Stage 5 complete — the AI Intelligence Experience. On top of the Stage 3
+> **Status:** Stage 6 complete — Enterprise & Operations. Stage 5 delivered the AI
+> Intelligence Experience; On top of the Stage 3
 > foundation (shell, API layer, auth, component library) and Stage 4 features (dashboard,
 > upload, product detail), every intelligence surface is live: **AI Search** with
 > explainability, **Duplicate Intelligence**, **Recommendations**, **Pricing**, and **AI
@@ -21,6 +22,8 @@ existing FastAPI backend **without modifying it**.
 | **Recommendations**             | `GET /products/{id}/recommendations`                                         | Cards with score, backend explanation, brand/category/attribute/tag overlap; overlap filters and sorting                   |
 | **Pricing** (`/pricing`)        | `POST /pricing/estimate`                                                     | Estimate + confidence + strategy, price distribution chart, comparables table, outlier-handling explainer                  |
 | **AI Analytics** (`/analytics`) | `analytics/dashboard`, `/pipeline`, `/models`, `/trends`, `system/stats`     | Usage counters, latency + throughput, four event-trend charts with granularity controls, models in use                     |
+| **Enterprise** (`/enterprise`)  | `organizations`, `api-keys`, `audit`, `usage`                                | Capability probe, onboarding, session context, API-key lifecycle, audit log, usage vs quota                                |
+| **System** (`/system`)          | `system/health`, `system/stats`, `models`                                    | API/Redis/Qdrant status, queue depth, configured workers, uptime, model registry                                           |
 | **Product** (`/products/{id}`)  | recommendations, pricing, explanations, models                               | Metadata (carried from search), embedding summary, pricing, recommendations, duplicate status; image not served by the API |
 
 > [!NOTE]
@@ -238,3 +241,102 @@ npm run e2e            # Playwright end-to-end (auto-starts the dev server)
 Accessibility baselines: semantic landmarks, a skip link, labelled controls,
 keyboard-operable shadcn/Radix primitives, axe assertions, and status/confidence that never
 rely on color alone.
+
+## Enterprise & operations
+
+The enterprise layer is **off by default**, and the app is fully usable that way — there is
+no authentication gate in demo mode.
+
+### Capability is probed, not configured
+
+The backend mounts the enterprise router only when `ENTERPRISE__ENABLED` is on, which makes
+the HTTP status of any enterprise route a reliable signal. The console probes `GET /usage`
+and maps the answer:
+
+| Status | Meaning                                                |
+| ------ | ------------------------------------------------------ |
+| `404`  | router not mounted — the layer is **disabled**         |
+| `401`  | mounted, but the key is missing or invalid             |
+| `403`  | mounted, key **valid**, role lacks that one permission |
+| `200`  | mounted, authenticated, permitted                      |
+
+Two consequences worth stating: a **403 means enterprise is enabled** (reading it as
+"unavailable" would hide a working feature), and a network failure maps to **unknown**,
+never to disabled — the UI must not claim a feature is switched off when it merely could
+not ask. Flipping the backend flag is picked up on reload with no frontend rebuild.
+
+### RBAC mirrors the backend exactly
+
+`src/lib/auth/roles.ts` is a transcription of `backend/app/models/role.py` — the same
+`Permission` names and the same `ROLE_PERMISSIONS` mapping. Verified live, per role:
+
+|                  | owner | admin | member | viewer |
+| ---------------- | ----- | ----- | ------ | ------ |
+| `/organizations` | 200   | 403   | 403    | 403    |
+| `/api-keys`      | 200   | 200   | 403    | 403    |
+| `/audit`         | 200   | 200   | 403    | 403    |
+| `/usage`         | 200   | 200   | 403    | 403    |
+
+> [!IMPORTANT]
+> This is **not a rank ladder**. `member` adds `write` to `viewer`, but every
+> enterprise-management permission first appears at `admin`, and `manage_organization` only
+> at `owner`. A previous minimum-role model got this wrong for `viewUsage` and showed
+> members a panel that could only 403. Permission checks therefore derive from the mapping,
+> never from rank.
+
+Frontend checks are **hints only**. Gated requests are still issued and the server's
+401/403 is the security boundary; a 403 renders an authoritative forbidden state naming the
+roles that do grant it.
+
+### API-key secret handling
+
+The backend returns a raw key **only** in the create response — `GET /api-keys` has no `key`
+field at all. So a secret is shown exactly once, held in component state, never written to
+`localStorage`, and never logged. E2E assertions grep browser storage to prove it. The
+session credential itself defaults to `sessionStorage`, with an explicit "remember on this
+device" opt-in to `localStorage`.
+
+There is **no rotate action**, because the backend has no rotation endpoint. Rotating means
+creating a replacement and revoking the old key, which the UI says rather than implying a
+capability that does not exist.
+
+### What the operations page will not claim
+
+- **Configured workers, not live workers.** `workers` is the configured concurrency. The
+  backend's own service docstring states the API has no handle on the worker processes and
+  implements no heartbeat, so live worker count is not knowable. The label and tooltip say
+  so, and a test asserts "Active/Running/Live workers" never appear.
+- **A degraded read is not a measurement.** Health checks degrade to `unhealthy`/`0` rather
+  than raising, so `queue_depth: 0` while Redis is down is a fallback. Queue depth,
+  jobs-in-flight, and dead-letter size all report **Unknown** in that case.
+- **`/metrics` is not parsed.** Prometheus text is linked, not scraped; deriving domain
+  metrics from it would invent structure the JSON API does not offer.
+- **Usage is a snapshot, so it has no chart.** `requests_today` is a counter with no history
+  behind it. A quota of `0` means no ceiling — shown as such, not as 0% used.
+- **Audit has no pagination**, because the endpoint takes only a `limit` (no cursor or
+  offset). Filters visibly narrow _what was fetched_ rather than posing as a server query.
+
+### Running with enterprise enabled
+
+```bash
+# backend/.env
+ENTERPRISE__ENABLED=true
+```
+
+Restart the API and reload the app. Bootstrap an organization from `/enterprise` — that is
+the one unauthenticated enterprise endpoint — and the owner key is displayed once.
+
+## End-to-end tests
+
+Playwright runs against a **production build**, not the dev server. `next dev` compiles
+routes on first request, so parallel workers hitting cold routes produced multi-second first
+paints and assertion timeouts unrelated to the application. Building first removed that
+flake class outright (per-test times fell from ~8-12s to ~2-5s).
+
+Backend calls are intercepted per-spec with `page.route`, so the suite is self-contained and
+does not need the API running. Fixtures are payloads **captured from the live backend**, so
+they represent real contracts rather than invented shapes.
+
+```bash
+npm run e2e          # first time: npx playwright install chromium
+```

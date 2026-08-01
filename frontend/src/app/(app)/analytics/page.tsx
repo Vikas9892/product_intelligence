@@ -1,13 +1,9 @@
-import { Boxes } from "lucide-react";
+import type { Metadata } from "next";
 
-import { PageHeader } from "@/components/common/page-header";
-import { PagePlaceholder } from "@/components/common/page-placeholder";
+import { AnalyticsView } from "@/features/analytics/analytics-view";
+
+export const metadata: Metadata = { title: "AI Analytics" };
 
 export default function AnalyticsPage() {
-  return (
-    <>
-      <PageHeader title="Analytics" description="Usage, pipeline, and trend reporting." />
-      <PagePlaceholder icon={Boxes} stage="Stage 7" />
-    </>
-  );
+  return <AnalyticsView />;
 }

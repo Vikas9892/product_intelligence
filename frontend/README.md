@@ -4,23 +4,24 @@ The web client for the [Multi-Modal Product Intelligence Engine](../backend/READ
 is built to the specification in [`ARCHITECTURE.md`](./ARCHITECTURE.md) and consumes the
 existing FastAPI backend **without modifying it**.
 
-> **Status:** Stage 5 in progress — the AI Intelligence Experience. On top of the Stage 3
+> **Status:** Stage 5 complete — the AI Intelligence Experience. On top of the Stage 3
 > foundation (shell, API layer, auth, component library) and Stage 4 features (dashboard,
-> upload, product detail), the **AI Search workspace** is live with text, image, and hybrid
-> retrieval. Duplicate, recommendation, pricing, and analytics intelligence follow in the
-> remaining Stage 5 milestones.
+> upload, product detail), every intelligence surface is live: **AI Search** with
+> explainability, **Duplicate Intelligence**, **Recommendations**, **Pricing**, and **AI
+> Analytics**.
 
 ## Features (live)
 
-| Page                           | Data source                                                                  | Notes                                                                                                                      |
-| ------------------------------ | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| **Dashboard** (`/`)            | `analytics/dashboard`, `analytics/pipeline`, `system/health`, `system/stats` | Real metric cards, system + pipeline panels, manual refresh; each section degrades independently                           |
-| **Upload** (`/upload`)         | `POST /products/upload` → poll `GET /products/{id}/status`                   | Drag-and-drop, live progress, async job tracking, cancel, navigate on completion                                           |
-| **AI Search** (`/search`)      | `POST /products/search`, `GET /products/{id}/explanations`                   | Text / image / hybrid modes, real filters, history + saved filters, backend-measured latency, per-result explainability    |
-| **Duplicates** (`/duplicates`) | `POST /products/check-duplicate`                                             | Verdict + confidence, four similarity signals, side-by-side metadata diff, ranked candidates, cross-encoder state          |
-| **Recommendations**            | `GET /products/{id}/recommendations`                                         | Cards with score, backend explanation, brand/category/attribute/tag overlap; overlap filters and sorting                   |
-| **Pricing** (`/pricing`)       | `POST /pricing/estimate`                                                     | Estimate + confidence + strategy, price distribution chart, comparables table, outlier-handling explainer                  |
-| **Product** (`/products/{id}`) | recommendations, pricing, explanations, models                               | Metadata (carried from search), embedding summary, pricing, recommendations, duplicate status; image not served by the API |
+| Page                            | Data source                                                                  | Notes                                                                                                                      |
+| ------------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **Dashboard** (`/`)             | `analytics/dashboard`, `analytics/pipeline`, `system/health`, `system/stats` | Real metric cards, system + pipeline panels, manual refresh; each section degrades independently                           |
+| **Upload** (`/upload`)          | `POST /products/upload` → poll `GET /products/{id}/status`                   | Drag-and-drop, live progress, async job tracking, cancel, navigate on completion                                           |
+| **AI Search** (`/search`)       | `POST /products/search`, `GET /products/{id}/explanations`                   | Text / image / hybrid modes, real filters, history + saved filters, backend-measured latency, per-result explainability    |
+| **Duplicates** (`/duplicates`)  | `POST /products/check-duplicate`                                             | Verdict + confidence, four similarity signals, side-by-side metadata diff, ranked candidates, cross-encoder state          |
+| **Recommendations**             | `GET /products/{id}/recommendations`                                         | Cards with score, backend explanation, brand/category/attribute/tag overlap; overlap filters and sorting                   |
+| **Pricing** (`/pricing`)        | `POST /pricing/estimate`                                                     | Estimate + confidence + strategy, price distribution chart, comparables table, outlier-handling explainer                  |
+| **AI Analytics** (`/analytics`) | `analytics/dashboard`, `/pipeline`, `/models`, `/trends`, `system/stats`     | Usage counters, latency + throughput, four event-trend charts with granularity controls, models in use                     |
+| **Product** (`/products/{id}`)  | recommendations, pricing, explanations, models                               | Metadata (carried from search), embedding summary, pricing, recommendations, duplicate status; image not served by the API |
 
 > [!NOTE]
 > The backend is frozen and exposes no list-all, get-one-product, or image-serving
@@ -91,6 +92,19 @@ And Pricing:
   `confidence_score`, and `strategy` are the backend's and are never recomputed.
 - A `0.00` estimate with no comparables is called out as "not a real valuation" rather than
   displayed as a price.
+
+And AI Analytics:
+
+- `average_processing_seconds` is the **only** latency figure any JSON endpoint exposes, and
+  it covers whole-request processing. There is no per-stage embedding or retrieval timing to
+  show, so none is displayed — the page says so and points at `/metrics`, which carries the
+  Prometheus histograms and is deliberately not a UI data source.
+- Trend points are plotted exactly as returned, **zeros included**. A quiet day is real
+  information; dropping or interpolating it would misrepresent the series.
+- `/analytics/trends` declares `response_model=None` on the backend (it also serves
+  Markdown), so `openapi-typescript` generates no schema for it. Its types are hand-written
+  in `endpoints/analytics.ts` and its metric/granularity constants are pinned by a test
+  against the backend enums, since a drift there would silently 422.
 
 ## Stack
 

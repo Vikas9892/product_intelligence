@@ -199,21 +199,4 @@
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-
-  /*
-   * The universal rule above is an unlayered `!important`, which loses to
-   * `!important` inside Tailwind's cascade layers — and the sidebar's width
-   * and menu-item transitions survived it in testing. An attribute selector
-   * matches the class-level specificity of the utilities involved and, being
-   * later in source order, wins outright.
-   *
-   * The sidebar is the one place this matters in practice: it is the largest
-   * moving surface in the app, so its slide is the most likely to bother
-   * someone who asked for less motion.
-   */
-  [class],
-  [data-slot] {
-    animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
-  }
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { KeyRound, Info, TriangleAlert } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { DataTable, type Column } from "@/components/data/data-table";
 import { EmptyState } from "@/components/feedback/empty-state";
@@ -128,21 +128,36 @@ function CreateKeyForm({ onCreated }: { onCreated: (secret: string) => void }) {
   );
 }
 
-/** Confirmation before revoking — revocation is immediate and irreversible. */
+/**
+ * Confirmation before revoking — revocation is immediate and irreversible.
+ *
+ * `returnFocusTo` is passed explicitly rather than relying on Radix's implicit
+ * focus restoration. This dialog has no `DialogTrigger`: it is opened from a
+ * button inside a table row by lifting state, so Radix has no trigger element
+ * to return focus to and a keyboard user was being dropped to the top of the
+ * document on close. Restoring it by hand keeps the caller where they were.
+ */
 function RevokeDialog({
   target,
   onCancel,
   onConfirm,
   isPending,
+  returnFocusTo,
 }: {
   target: ApiKeyInfo | null;
   onCancel: () => void;
   onConfirm: (prefix: string) => void;
   isPending: boolean;
+  returnFocusTo: React.RefObject<HTMLElement | null>;
 }) {
   return (
     <Dialog open={target !== null} onOpenChange={(open) => (!open ? onCancel() : undefined)}>
-      <DialogContent>
+      <DialogContent
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          returnFocusTo.current?.focus();
+        }}
+      >
         <DialogHeader>
           <DialogTitle>Revoke this API key?</DialogTitle>
           <DialogDescription>
@@ -195,6 +210,8 @@ export function ApiKeysPanel() {
 
   const [newSecret, setNewSecret] = useState<string | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<ApiKeyInfo | null>(null);
+  // The row button that opened the dialog, so focus can go back to it.
+  const revokeTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const columns: Column<ApiKeyInfo>[] = [
     {
@@ -226,7 +243,10 @@ export function ApiKeysPanel() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setRevokeTarget(k)}
+            onClick={(event) => {
+              revokeTriggerRef.current = event.currentTarget;
+              setRevokeTarget(k);
+            }}
             aria-label={`Revoke ${k.name}`}
           >
             Revoke
@@ -305,6 +325,7 @@ export function ApiKeysPanel() {
 
       <RevokeDialog
         target={revokeTarget}
+        returnFocusTo={revokeTriggerRef}
         isPending={revoke.isPending}
         onCancel={() => setRevokeTarget(null)}
         onConfirm={(prefix) => revoke.mutate(prefix, { onSuccess: () => setRevokeTarget(null) })}

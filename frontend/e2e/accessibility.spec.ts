@@ -111,13 +111,7 @@ test.describe("keyboard journeys", () => {
     await expect(page.getByText("1 result · text search")).toBeVisible();
   });
 
-  // KNOWN GAP — not fixed, deliberately left failing-visible.
-  // Focus moves into the dialog correctly and Escape closes it, but focus is
-  // not returned to the trigger afterwards, so a keyboard user is dropped back
-  // to the top of the document. Radix normally restores this; something in
-  // this controlled-open wiring defeats it. Diagnosed far enough to confirm
-  // the symptom, not far enough to name the cause.
-  test.fixme("a dialog restores focus to the control that opened it", async ({ page }) => {
+  test("a dialog restores focus to the control that opened it", async ({ page }) => {
     await stubEnterprise(page);
     await page.goto("/enterprise");
 
@@ -183,14 +177,7 @@ test.describe("announcements", () => {
 });
 
 test.describe("motion preference", () => {
-  // PARTIAL — the CSS works for the app at large; six sidebar elements resist.
-  // The blanket rule plus an attribute-selector rule both land in the built
-  // stylesheet with !important and suppress motion everywhere else, but the
-  // sidebar's width/menu transitions (0.15-0.2s) survive both. Left failing
-  // rather than scoped around, because scoping it would hide a real gap.
-  test.fixme("animations are suppressed when the user asks for reduced motion", async ({
-    page,
-  }) => {
+  test("animations are suppressed when the user asks for reduced motion", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/");
 

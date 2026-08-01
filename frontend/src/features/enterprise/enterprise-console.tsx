@@ -13,7 +13,9 @@ import { useAuth } from "@/lib/auth/use-auth";
 import { cn } from "@/lib/utils";
 
 import { ApiKeysPanel } from "./api-keys-panel";
+import { AuditPanel } from "./audit-panel";
 import { CAPABILITY_COPY, type EnterpriseCapability } from "./capability";
+import { UsagePanel } from "./usage-panel";
 import { EnterpriseOnboarding } from "./onboarding";
 import { useEnterpriseCapability } from "./queries";
 
@@ -166,7 +168,9 @@ export function EnterpriseConsole() {
             ) : (
               <>
                 <TenantContext />
+                <UsagePanel />
                 <ApiKeysPanel />
+                <AuditPanel />
               </>
             )}
           </>

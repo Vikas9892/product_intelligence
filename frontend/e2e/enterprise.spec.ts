@@ -350,3 +350,144 @@ test("a 403 is still treated as enterprise-enabled, not unavailable", async ({ p
   await expect(page.getByText("Signed in")).toBeVisible();
   await expect(page.getByText("Enterprise layer is disabled")).toBeHidden();
 });
+
+/** Real audit events captured from the backend. */
+const AUDIT_EVENTS = [
+  {
+    id: "50d9aa37-1dd2-4d2a-9589-5478c9a1cf44",
+    tenant_id: "5d7b11b0-a420-4ce3-a38b-dde8ed10f0b8",
+    actor: "pik_uJ35edd2",
+    action: "create_api_key",
+    resource: "pik_ogLoiqWZ",
+    metadata: { role: "admin" },
+    created_at: "2026-08-01T14:24:00.984136Z",
+  },
+  {
+    id: "d4860a34-3751-445d-a2cd-7ad899809505",
+    tenant_id: "5d7b11b0-a420-4ce3-a38b-dde8ed10f0b8",
+    actor: "pik_Other111",
+    action: "revoke_api_key",
+    resource: "pik_KoSYT7H8",
+    metadata: {},
+    created_at: "2026-08-01T14:23:38.980935Z",
+  },
+];
+
+function stubAudit(page: import("@playwright/test").Page, status: number, body: unknown) {
+  return page.route("**/api/v1/audit*", (route) =>
+    route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) }),
+  );
+}
+
+test("audit log renders actor, action, resource, metadata and timestamps", async ({ page }) => {
+  await signedIn(page);
+  await stubAudit(page, 200, AUDIT_EVENTS);
+  await page.goto("/enterprise");
+
+  await expect(page.getByText("Audit log")).toBeVisible();
+  await expect(page.getByText("Showing 2 of 2 fetched events")).toBeVisible();
+  await expect(page.getByText("create_api_key")).toBeVisible();
+  await expect(page.getByText("revoke_api_key")).toBeVisible();
+  await expect(page.getByText("role=admin")).toBeVisible();
+
+  // No pagination controls: the endpoint has no cursor or offset. `exact`
+  // matters — a loose "Next" also matches the Next.js dev-tools button.
+  await expect(page.getByRole("button", { name: "Next", exact: true })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Previous", exact: true })).toBeHidden();
+  await expect(page.getByText(/no cursor or offset, so there are no page controls/)).toBeVisible();
+});
+
+test("audit filters narrow the fetched page and explain the empty result", async ({ page }) => {
+  await signedIn(page);
+  await stubAudit(page, 200, AUDIT_EVENTS);
+  await page.goto("/enterprise");
+  await expect(page.getByText("Showing 2 of 2 fetched events")).toBeVisible();
+
+  await page.getByLabel("Actor").fill("pik_uJ35");
+  await expect(page.getByText("Showing 1 of 2 fetched events")).toBeVisible();
+
+  await page.getByLabel("Actor").fill("nobody");
+  await expect(page.getByText("No events match these filters")).toBeVisible();
+});
+
+test("audit empty state distinguishes 'nothing logged' from an error", async ({ page }) => {
+  await signedIn(page);
+  await stubAudit(page, 200, []);
+  await page.goto("/enterprise");
+
+  await expect(page.getByText("No audit events yet")).toBeVisible();
+  await expect(
+    page.getByText(/Events are recorded when keys are created or revoked/),
+  ).toBeVisible();
+});
+
+test("audit 403 shows a forbidden state naming the roles that grant it", async ({ page }) => {
+  await signedIn(page);
+  await stubAudit(page, 403, {
+    success: false,
+    error: {
+      code: "authorization_error",
+      message: "Role 'member' lacks the 'view_audit' permission.",
+      details: null,
+    },
+  });
+  await page.goto("/enterprise");
+
+  await expect(page.getByText("This key can't view the audit log")).toBeVisible();
+});
+
+test("usage shows consumption against the real quota, with no invented trend", async ({ page }) => {
+  await signedIn(page);
+  await stubAudit(page, 200, []);
+  await page.goto("/enterprise");
+
+  await expect(page.getByText("Usage & quota")).toBeVisible();
+  await expect(page.getByText("0 / 10,000", { exact: false })).toBeVisible();
+  await expect(page.getByText("120", { exact: false }).first()).toBeVisible();
+
+  // A snapshot must not be rendered as a time series.
+  await expect(page.locator(".recharts-surface")).toHaveCount(0);
+  await expect(page.getByText(/is a counter, not a\s+time series/)).toBeVisible();
+});
+
+test("quota exhaustion is called out explicitly", async ({ page }) => {
+  await page.route(USAGE_ROUTE, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ...USAGE_BODY, requests_today: 10000 }),
+    }),
+  );
+  await page.route("**/api/v1/api-keys", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  await stubAudit(page, 200, []);
+  await page.goto("/enterprise");
+
+  await expect(page.getByText("Daily quota exhausted")).toBeVisible();
+  await expect(page.getByText(/rejected with 429/)).toBeVisible();
+});
+
+test("a zero quota is reported as no ceiling, not as 0% used", async ({ page }) => {
+  await page.route(USAGE_ROUTE, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...USAGE_BODY,
+        requests_today: 42,
+        daily_request_quota: 0,
+        rate_limit_per_minute: 0,
+      }),
+    }),
+  );
+  await page.route("**/api/v1/api-keys", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  await stubAudit(page, 200, []);
+  await page.goto("/enterprise");
+
+  await expect(page.getByText("no daily ceiling configured")).toBeVisible();
+  await expect(page.getByText("Not enforced")).toBeVisible();
+  await expect(page.getByText("Daily quota exhausted")).toBeHidden();
+});

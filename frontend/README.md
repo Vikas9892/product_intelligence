@@ -17,6 +17,7 @@ existing FastAPI backend **without modifying it**.
 | **Dashboard** (`/`)            | `analytics/dashboard`, `analytics/pipeline`, `system/health`, `system/stats` | Real metric cards, system + pipeline panels, manual refresh; each section degrades independently                           |
 | **Upload** (`/upload`)         | `POST /products/upload` → poll `GET /products/{id}/status`                   | Drag-and-drop, live progress, async job tracking, cancel, navigate on completion                                           |
 | **AI Search** (`/search`)      | `POST /products/search`, `GET /products/{id}/explanations`                   | Text / image / hybrid modes, real filters, history + saved filters, backend-measured latency, per-result explainability    |
+| **Duplicates** (`/duplicates`) | `POST /products/check-duplicate`                                             | Verdict + confidence, four similarity signals, side-by-side metadata diff, ranked candidates, cross-encoder state          |
 | **Product** (`/products/{id}`) | recommendations, pricing, explanations, models                               | Metadata (carried from search), embedding summary, pricing, recommendations, duplicate status; image not served by the API |
 
 > [!NOTE]
@@ -48,6 +49,20 @@ something, the UI says so instead of synthesizing it.
 > scorer applies its own configured weighting internally (live example: 0.9998 + 0.6944
 > against a total of 0.9693). The UI therefore presents `total` as the backend's final
 > score and never as a sum, and the behavior is pinned by a test.
+
+The same principle governs Duplicate Intelligence:
+
+- `cross_encoder_score` and `retrieval_similarity` are `null` unless the backend runs with
+  `DUPLICATE_VERIFICATION__ENABLED=true` (it is **off** by default). The UI reports the
+  feature as disabled rather than rendering a placeholder number — the null is a real
+  state, not missing data.
+- The matched product's descriptive fields are resolved **best-effort** through search,
+  because the backend has no get-product endpoint. When the lookup finds nothing, the
+  comparison says so instead of showing blanks that could read as real values.
+- In the metadata diff, two absent values are marked **Not comparable**, never "Same" —
+  agreement on nothing is not evidence of a match.
+- Product images are shown for the submitted side only (a local object URL); the backend
+  serves no product images, and the matched side states that rather than using a stand-in.
 
 ## Stack
 

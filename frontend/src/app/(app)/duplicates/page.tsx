@@ -1,16 +1,9 @@
-import { CopyCheck } from "lucide-react";
+import type { Metadata } from "next";
 
-import { PageHeader } from "@/components/common/page-header";
-import { PagePlaceholder } from "@/components/common/page-placeholder";
+import { DuplicateIntelligenceView } from "@/features/duplicates/duplicate-intelligence-view";
+
+export const metadata: Metadata = { title: "Duplicate Intelligence" };
 
 export default function DuplicatesPage() {
-  return (
-    <>
-      <PageHeader
-        title="Duplicate Detection"
-        description="Check whether a product duplicates something already in the catalog."
-      />
-      <PagePlaceholder icon={CopyCheck} stage="Stage 6" />
-    </>
-  );
+  return <DuplicateIntelligenceView />;
 }

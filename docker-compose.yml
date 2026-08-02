@@ -1,20 +1,90 @@
-# Local infrastructure for the Multi-Modal Product Intelligence Engine.
+# Application stack for the Multi-Modal Product Intelligence Engine.
 #
-# This file provisions only the two stateful backing services the backend
-# requires — it does NOT run the API or the workers. Those are run from the
-# host with `make run` and `scripts/run_workers.py`, so that code reloading,
-# debugging, and the Hugging Face model cache keep working normally.
+#   docker compose up -d          # start everything
+#   docker compose ps             # health of each service
+#   docker compose down           # stop (data is preserved in named volumes)
 #
-#   make services-up       # start Qdrant + Redis in the background
-#   make services-status   # health of both
-#   make services-down     # stop (data is preserved in named volumes)
-#
-# Defaults match backend/.env.example exactly, so an empty backend/.env is a
-# working configuration against this stack.
+# Defaults match backend/.env.example except where container networking
+# requires otherwise: inside Compose, "localhost" means the container itself,
+# so the Redis and Qdrant URLs are overridden to their service DNS names
+# below. Everything else still falls back to the same built-in defaults, so
+# no .env file is required to bring the stack up.
 
 name: product-intelligence
 
+# ---------------------------------------------------------------------------
+# Shared backend definition
+# ---------------------------------------------------------------------------
+# `api` and `worker` are the same image in two runtime roles, differing only
+# in their command. Anchoring the common part means the image is built once
+# and the two roles cannot drift apart in their configuration -- which
+# matters, because they communicate through a shared filesystem and must
+# agree on it exactly.
+x-backend: &backend
+  build:
+    context: ./backend
+  # Naming the image explicitly (rather than letting Compose derive
+  # `product-intelligence-api`) means both services resolve to one build and
+  # one artifact. This is the image Stage 10+ pushes to ECR to run as two
+  # separate ECS services.
+  image: product-intelligence-backend:latest
+  environment: &backend-environment
+    # Service DNS, not localhost -- the single most important difference
+    # between running on the host and running in Compose.
+    ASYNC_PIPELINE__REDIS_URL: redis://redis:6379/0
+    VECTOR_STORE__URL: http://qdrant:6333
+  env_file:
+    # Optional: absent on a fresh clone, and the stack still starts. This is
+    # where an operator puts real values (SECURITY__SECRET_KEY, enterprise
+    # settings) without any of it being committed or baked into the image.
+    - path: ./backend/.env
+      required: false
+  volumes:
+    # Shared, and necessarily so. The API writes the uploaded file to disk and
+    # enqueues a job carrying its *path* (ProductImage.original_path); the
+    # worker then opens that path via ImageProcessingService. If these two
+    # containers did not share this volume, every job would fail on a missing
+    # file. Persisting it also keeps uploaded images across restarts.
+    - app_storage:/app/storage
+    # HF_HOME. CLIP (~600 MB) and BGE (~130 MB) download on first use; a named
+    # volume means that happens once for the whole stack rather than once per
+    # container per restart.
+    - model_cache:/models
+  depends_on:
+    redis:
+      condition: service_healthy
+    qdrant:
+      condition: service_healthy
+  restart: unless-stopped
+
 services:
+  api:
+    <<: *backend
+    container_name: pi-api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    # Inherits the image's default CMD (uvicorn) and its HEALTHCHECK.
+
+  worker:
+    <<: *backend
+    container_name: pi-worker
+    # The one line that separates the two roles. This is the process the
+    # architecture diagram draws separately from the API: `uvicorn` never runs
+    # WorkerManager itself, so nothing here duplicates work the API is doing.
+    command: ["python", "scripts/run_workers.py"]
+    # Must be disabled explicitly, not merely omitted: HEALTHCHECK is baked
+    # into the shared image, so without this the worker inherits the API's
+    # probe against :8000 -- a port it deliberately never opens -- and Docker
+    # reports a perfectly functional worker as `unhealthy` forever.
+    #
+    # The worker serves no traffic and exposes no socket, so there is nothing
+    # meaningful to probe. Its real liveness signal is that it keeps consuming
+    # from the queue, and `restart: unless-stopped` covers a hard crash.
+    # Adding an HTTP port purely to satisfy a health check would mean adding a
+    # server the application does not have.
+    healthcheck:
+      disable: true
+
   qdrant:
     # Vector store for the image (512-d CLIP) and text (384-d BGE) collections.
     # Both are auto-created with cosine distance on first use by the backend.
@@ -67,3 +137,7 @@ services:
 volumes:
   qdrant_storage:
   redis_data:
+  # Uploaded + processed images, shared by api and worker (see x-backend).
+  app_storage:
+  # Hugging Face cache (HF_HOME=/models): CLIP and BGE weights.
+  model_cache:

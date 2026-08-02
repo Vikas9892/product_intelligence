@@ -13,6 +13,20 @@
 name: product-intelligence
 
 # ---------------------------------------------------------------------------
+# Shared log configuration
+# ---------------------------------------------------------------------------
+# Every service logs to stdout/stderr, which Docker captures. Without a size
+# limit those files grow without bound -- and this stack is chatty: the worker
+# logs a line per pipeline stage per job. Rotation caps total log usage at
+# 30 MB per container instead of eventually filling the VM's disk.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# ---------------------------------------------------------------------------
 # Shared backend definition
 # ---------------------------------------------------------------------------
 # `api` and `worker` are the same image in two runtime roles, differing only
@@ -21,6 +35,8 @@ name: product-intelligence
 # matters, because they communicate through a shared filesystem and must
 # agree on it exactly.
 x-backend: &backend
+  <<: *logging
+  networks: [app]
   build:
     context: ./backend
   # Naming the image explicitly (rather than letting Compose derive
@@ -58,6 +74,31 @@ x-backend: &backend
   restart: unless-stopped
 
 services:
+  frontend:
+    <<: *logging
+    networks: [app]
+    build:
+      context: ./frontend
+    image: product-intelligence-frontend:latest
+    container_name: pi-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      # Substituted into the build output at container start by
+      # frontend/docker-entrypoint.sh -- Next bakes rewrite destinations at
+      # build time, so this cannot be a plain runtime lookup. `api` is Compose
+      # service DNS; "localhost" here would mean the frontend container itself.
+      BACKEND_ORIGIN: http://api:8000
+    depends_on:
+      api:
+        # Waits for the API's real health check rather than merely for the
+        # container to exist, so the first page load cannot race a backend
+        # that is still importing torch.
+        condition: service_healthy
+    # Inherits the image's HEALTHCHECK, which probes this server's own `/`
+    # and deliberately not the proxied /health -- see frontend/Dockerfile.
+
   api:
     <<: *backend
     container_name: pi-api
@@ -92,6 +133,8 @@ services:
     image: qdrant/qdrant:v1.18.1
     container_name: pi-qdrant
     restart: unless-stopped
+    <<: *logging
+    networks: [app]
     ports:
       # 6333 = REST (VECTOR_STORE__URL points here). 6334 = gRPC, exposed so
       # the client can be switched to it without editing this file.
@@ -117,6 +160,8 @@ services:
     image: redis:8.2-alpine
     container_name: pi-redis
     restart: unless-stopped
+    <<: *logging
+    networks: [app]
     ports:
       - "${REDIS_PORT:-6379}:6379"
     command:
@@ -133,6 +178,19 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+
+# ---------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------
+# One explicit user-defined bridge rather than the implicit `default`. Being
+# named in the file makes the topology reviewable, and a user-defined bridge is
+# what provides the embedded DNS that lets `redis`, `qdrant` and `api` resolve
+# as hostnames in the first place. Service-to-service traffic (frontend -> api,
+# api/worker -> redis/qdrant) never leaves it; only the ports published below
+# are reachable from the host.
+networks:
+  app:
+    driver: bridge
 
 volumes:
   qdrant_storage:

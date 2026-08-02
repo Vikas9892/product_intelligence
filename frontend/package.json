@@ -22,6 +22,10 @@
     "postbuild:standalone": "node -e \"const fs=require('fs');fs.cpSync('.next/static','.next/standalone/.next/static',{recursive:true});if(fs.existsSync('public'))fs.cpSync('public','.next/standalone/public',{recursive:true})\"",
     "start:standalone": "npm run postbuild:standalone && node .next/standalone/server.js"
   },
+  "overrides": {
+    "postcss": "^8.5.25",
+    "sharp": "^0.35.3"
+  },
   "dependencies": {
     "@hookform/resolvers": "^5.5.7",
     "@tanstack/react-query": "^5.101.4",

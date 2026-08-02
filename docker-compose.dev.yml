@@ -1,0 +1,92 @@
+# Development overlay.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#   make up-dev          # the same thing, spelled shorter
+#
+# Optimizes for iteration: source is mounted, both servers reload on change,
+# logging is verbose, and the datastores are reachable from the host so the
+# existing host-based workflow (`make run`, `make worker`, `npm run dev`,
+# redis-cli, the Qdrant dashboard) keeps working unchanged.
+#
+# This file only ever ADDS to docker-compose.yml. Anything true of both
+# environments -- images, networks, volumes, health checks, service DNS --
+# stays in the base file so the two cannot drift.
+
+services:
+  api:
+    # --reload watches the mounted source below. Scoped with --reload-dir to
+    # /app/app so the reloader is not also walking .venv, /models or the
+    # uploads volume on every filesystem event.
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/app
+    volumes:
+      # Only the source subdirectories are mounted, NOT ./backend onto /app.
+      # Mounting the whole directory would shadow /app/.venv with the host's
+      # Windows-built virtualenv, and nothing in the container would run.
+      - ./backend/app:/app/app
+      - ./backend/scripts:/app/scripts
+      - app_storage:/app/storage
+      - model_cache:/models
+    environment:
+      APPLICATION__DEBUG: "true"
+      LOGGING__LEVEL: DEBUG
+
+  worker:
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/scripts:/app/scripts
+      - app_storage:/app/storage
+      - model_cache:/models
+    environment:
+      APPLICATION__DEBUG: "true"
+      LOGGING__LEVEL: DEBUG
+    # No reloader: WorkerManager owns long-lived asyncio loops and an
+    # in-flight job, and restarting mid-job would abandon work the retry/DLQ
+    # machinery would then have to recover. Restart it explicitly instead:
+    #   docker compose restart worker
+
+  frontend:
+    build:
+      context: ./frontend
+      # The `builder` stage, not `runtime`: it is the one that still has dev
+      # dependencies and the full source tree. The runtime stage contains only
+      # the standalone bundle, which `next dev` cannot work from.
+      target: builder
+    # `next dev` re-evaluates next.config.ts on every request, so BACKEND_ORIGIN
+    # is read live here and needs none of the sentinel substitution the
+    # production image performs.
+    command: ["npm", "run", "dev"]
+    volumes:
+      # Source only. node_modules deliberately stays the image's Linux-built
+      # copy -- mounting the host's would put Windows binaries in a Linux
+      # container.
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/next.config.ts:/app/next.config.ts
+    environment:
+      NODE_ENV: development
+    # The base health check probes `/`, which Next dev only compiles on first
+    # request; a cold dev server would be reported unhealthy before anyone
+    # visits it. Reload speed is the point here, not orchestration signals.
+    healthcheck:
+      disable: true
+
+  qdrant:
+    ports:
+      # Host access for the dashboard at http://localhost:6333/dashboard and
+      # for a host-run backend (`make run`). 6334 is gRPC.
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+
+  redis:
+    ports:
+      # Host access for redis-cli and for a host-run backend/worker.
+      - "${REDIS_PORT:-6379}:6379"

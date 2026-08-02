@@ -1,0 +1,63 @@
+# Production-like overlay for local execution.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#   make up-prod         # the same thing, spelled shorter
+#
+# This is deployment parity, not production itself: immutable images, no
+# source mounts, production commands, explicit environment, persistent
+# volumes. It is the configuration Stage 10+ maps onto ECS.
+#
+# Nothing here mounts host source, so what runs is exactly what was built --
+# the same property that makes an image promotable from here to ECR.
+
+services:
+  api:
+    environment:
+      # `staging`, deliberately not `production`.
+      #
+      # Settings._validate_production_safety refuses to boot in `production`
+      # unless database.url is non-SQLite. But this platform has no relational
+      # database at all -- settings.database is referenced nowhere outside a
+      # docstring, and Redis is the real datastore. Selecting `production`
+      # would therefore require inventing a Postgres URL that nothing connects
+      # to, purely to satisfy a validator. A fake connection string is worse
+      # than an honest environment name.
+      #
+      # Everything the production check actually protects is set explicitly
+      # below regardless, so this profile is production-shaped in substance.
+      APPLICATION__ENVIRONMENT: staging
+      APPLICATION__DEBUG: "false"
+      # No wildcard: the wildcard is exactly what the production validator
+      # rejects, because accepting any Host header allows Host-header
+      # injection. These are the only names this stack is reachable under.
+      APPLICATION__TRUSTED_HOSTS: '["localhost", "127.0.0.1", "api", "frontend"]'
+      LOGGING__LEVEL: INFO
+      # LOGGING__JSON_LOGS is deliberately NOT set. The setting exists and
+      # validates, but app/core/logging.py::_build_handlers documents it as
+      # "reserved but unused" and always installs the plain console formatter.
+      # Setting it would advertise structured logging this stack does not
+      # actually emit. Implementing it is a backend change, and the backend is
+      # feature-frozen in this stage.
+
+  worker:
+    environment:
+      APPLICATION__ENVIRONMENT: staging
+      APPLICATION__DEBUG: "false"
+      LOGGING__LEVEL: INFO
+
+  frontend:
+    environment:
+      NODE_ENV: production
+
+# SECURITY__SECRET_KEY is intentionally absent from this file.
+#
+# The backend refuses to start with the insecure default only when
+# APPLICATION__ENVIRONMENT is `production`, so this profile will boot without
+# one -- but a real deployment must still supply it. Put it in backend/.env,
+# which docker-compose.yml already wires in via `env_file` and which is
+# gitignored:
+#
+#   SECURITY__SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+#
+# Committing it here, or baking it into an image, is what this arrangement
+# exists to prevent.

@@ -135,11 +135,10 @@ services:
     restart: unless-stopped
     <<: *logging
     networks: [app]
-    ports:
-      # 6333 = REST (VECTOR_STORE__URL points here). 6334 = gRPC, exposed so
-      # the client can be switched to it without editing this file.
-      - "${QDRANT_HTTP_PORT:-6333}:6333"
-      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    # No host ports here by design. api and worker reach Qdrant over the `app`
+    # network as `qdrant:6333`, so publishing to the host is only useful for
+    # host-side tooling -- which is a development concern, and is where
+    # docker-compose.dev.yml adds it.
     volumes:
       - qdrant_storage:/qdrant/storage
     healthcheck:
@@ -162,8 +161,10 @@ services:
     restart: unless-stopped
     <<: *logging
     networks: [app]
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+    # Not published to the host either -- see the note on qdrant above. Redis
+    # holds every product, job and tenant record this platform has, so leaving
+    # an unauthenticated instance bound to the host is worth avoiding outside
+    # development.
     command:
       - redis-server
       - --appendonly

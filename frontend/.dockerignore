@@ -1,0 +1,52 @@
+# Build context exclusions for the frontend image.
+#
+# The build context is `frontend/`. node_modules is the important one: it is
+# both enormous and host-specific (Windows-resolved optional binaries would be
+# wrong inside a Linux image), and `npm ci` reconstructs it from the lockfile
+# anyway.
+
+# --- Dependencies: reinstalled from package-lock.json inside the image ---
+node_modules/
+.pnp
+.pnp.*
+
+# --- Secrets ---
+# Configuration is injected at runtime. Note that anything inlined into a
+# NEXT_PUBLIC_* variable would end up readable in the browser bundle, so real
+# secrets must never be built in regardless.
+.env
+.env.*
+!.env.example
+
+# --- Build output: rebuilt inside the image ---
+.next/
+out/
+build/
+
+# --- Test artifacts and tooling ---
+# Vitest, Playwright and their reports are CI/host concerns, not runtime ones.
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+e2e/
+tests/
+playwright.config.ts
+vitest.config.mts
+
+# --- Caches ---
+*.tsbuildinfo
+.eslintcache
+
+# --- Documentation ---
+*.md
+
+# --- Editor / OS noise ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+*.pem
+npm-debug.log*

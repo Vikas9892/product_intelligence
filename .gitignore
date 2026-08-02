@@ -47,6 +47,12 @@ logs/
 # --- Docker ---
 *.pid
 
+# --- Runtime upload/processing output at the repo root ---
+# The app itself writes under backend/storage (app/core/paths.py), but a
+# server started from the repo root leaves a stray ./storage behind. Ignore
+# it so uploaded images can never be committed by accident.
+/storage/
+
 # --- Frontend (reserved for later phases) ---
 node_modules/
 dist/

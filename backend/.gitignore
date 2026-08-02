@@ -12,4 +12,7 @@ htmlcov/
 
 # Runtime-created (app/core/paths.py::ensure_runtime_directories) — never
 # source-controlled; recreated automatically at app startup if missing.
+# `reports/` holds generated benchmark output (REPORTS_DIR); `logs/` is
+# already covered by the root .gitignore.
 storage/
+reports/

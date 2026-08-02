@@ -24,6 +24,32 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# ----------------------------------------------------------------------------
+# uv — platform-specific torch resolution
+# ----------------------------------------------------------------------------
+# On Linux, PyPI's `torch` wheel declares hard dependencies on the entire CUDA
+# runtime (cuda-toolkit with 11 extras, nvidia-cudnn, nccl, nvshmem, triton).
+# That is ~5-7 GB installed, and none of it is reachable from a CPU-only
+# container: `resolve_device("auto")` in app/services/embeddings/model_manager.py
+# falls back to CPU whenever `torch.cuda.is_available()` is false, which is
+# always the case here. The Docker images would carry gigabytes of dead weight.
+#
+# The marker scopes this to Linux only, so Windows/macOS development keeps
+# resolving torch from PyPI exactly as before -- the lock file still contains
+# both sets of wheels and `uv sync` picks per platform. Only Linux (Docker and
+# CI) gets the +cpu build.
+#
+# `explicit = true` means nothing resolves from this index unless it is named
+# in [tool.uv.sources] below, so the PyTorch mirror can never shadow an
+# unrelated package that also exists on PyPI.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 

@@ -1,0 +1,62 @@
+# Build context exclusions for the backend image.
+#
+# The build context is `backend/`. Everything not needed to resolve
+# dependencies and install the `app` package is excluded, which keeps the
+# context small and -- more importantly -- guarantees that secrets and
+# host-specific state can never end up in an image layer.
+
+# --- Secrets: never copy a real .env into an image ---
+# Configuration is injected at runtime (compose `environment:`/`env_file:`),
+# so the image stays environment-agnostic and publishable.
+.env
+.env.*
+!.env.example
+
+# --- Host virtualenv ---
+# Built for Windows here; the image builds its own Linux venv from uv.lock.
+.venv/
+
+# --- Caches and build artifacts ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+dist/
+build/
+*.egg-info/
+
+# --- Runtime state (recreated by ensure_runtime_directories at startup) ---
+# Uploaded images and generated reports are host data, not image content;
+# in containers they live on named volumes instead.
+storage/
+logs/
+reports/
+
+# --- Tests and developer tooling ---
+# The image is a runtime artifact. Quality gates run in CI and on the host
+# against the source tree, not inside the shipped image.
+#
+# `evaluation/` is deliberately NOT excluded: EVALUATION__ENABLED defaults to
+# true and DatasetLoader reads evaluation/dataset.json (512 bytes) at request
+# time, so dropping it would 500 a live endpoint. `scripts/` is likewise kept
+# -- scripts/run_workers.py is the worker role's entrypoint.
+tests/
+
+# --- Documentation ---
+# README.md is the one exception: pyproject.toml declares `readme = "README.md"`,
+# so hatchling reads it while building the wheel and the build fails without it.
+*.md
+!README.md
+docs/
+
+# --- Editor / OS noise ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

@@ -161,6 +161,41 @@ Point `BACKEND_ORIGIN` at a different backend to retarget the proxy. Setting
 `NEXT_PUBLIC_API_BASE_URL` to an absolute URL opts out of the proxy and calls the backend
 directly, which then requires backend CORS to be configured.
 
+> [!IMPORTANT]
+> **`BACKEND_ORIGIN` is a build-time value, not a runtime one.** Next evaluates
+> `rewrites()` during `next build` and serializes the resolved destination into
+> `server.js`, `.next/routes-manifest.json` and `.next/required-server-files.json`. The
+> standalone server never re-reads `next.config.ts`, so exporting `BACKEND_ORIGIN` before
+> `npm start` has no effect — you must rebuild.
+>
+> The Docker image works around this: it is built against a sentinel origin on the
+> reserved `.invalid` TLD, and `docker-entrypoint.sh` substitutes the real value into
+> those three files at container start. That is what keeps one image usable in every
+> environment. See [DOCKER.md](../DOCKER.md).
+
+## Running in Docker
+
+```bash
+# from the repository root — full stack, frontend on http://localhost:3000
+make up-prod
+```
+
+The production image is a three-stage build (`deps` → `builder` → `runtime`) serving the
+`output: "standalone"` bundle on `node:20-bookworm-slim`, running as a non-root user
+(uid 10001) with `tini` as PID 1. It is 408 MB and contains no dev dependencies — vitest,
+Playwright, ESLint and Tailwind are all absent from the runtime.
+
+Inside Compose the proxy targets `http://api:8000`, **not** `localhost:8000` — inside a
+container, `localhost` is the frontend container itself.
+
+`make up-dev` runs `next dev` with Turbopack instead, from the `builder` stage, with
+`src/`, `public/` and `next.config.ts` bind-mounted for hot reload. In dev the config _is_
+re-evaluated per request, so `BACKEND_ORIGIN` behaves as a normal runtime variable there.
+
+The container health check probes this server's own `/`, deliberately not the proxied
+`/health` — probing the latter would report the frontend unhealthy whenever the backend
+blipped.
+
 ## Scripts
 
 | Script                 | Purpose                                                   |

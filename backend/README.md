@@ -242,6 +242,12 @@ Interactive OpenAPI docs are served at `/docs` when the app is running.
 
 ## Getting started
 
+> [!TIP]
+> To run the whole platform — API, worker, Redis, Qdrant and the web frontend — with only
+> Docker installed and no Python on the host, use `make up-prod` from the repository root.
+> See **[DOCKER.md](../DOCKER.md)**. The rest of this section covers running the backend
+> natively, which is still the fastest loop for backend development.
+
 **Prerequisites**
 
 - Python 3.12

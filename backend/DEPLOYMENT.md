@@ -3,7 +3,7 @@
 This document covers how to configure and run the Product Intelligence Platform backend, and what production concerns are — and are **not** — yet implemented in the repository.
 
 > [!IMPORTANT]
-> Continuous integration **is** implemented (GitHub Actions — see [below](#continuous-integration-github-actions)). What the repository does **not** yet contain is a Dockerfile, Kubernetes/Terraform manifests, a relational database, or any cloud/AWS configuration. Sections describing those are explicitly marked **Planned — not implemented** and act as placeholders for the production-deployment phase.
+> Continuous integration **is** implemented (GitHub Actions — see [below](#continuous-integration-github-actions)), and so is [Docker](#docker) — the full stack runs in containers as of Stage 8. What the repository does **not** yet contain is Kubernetes/Terraform manifests, a relational database, or any cloud/AWS configuration. Sections describing those are explicitly marked **Planned — not implemented** and act as placeholders for the production-deployment phase.
 
 ---
 
@@ -20,7 +20,7 @@ This document covers how to configure and run the Product Intelligence Platform 
 - [Production configuration checklist](#production-configuration-checklist)
 - [Observability in production](#observability-in-production)
 - [Continuous integration (GitHub Actions)](#continuous-integration-github-actions)
-- [Planned — Docker](#planned--docker)
+- [Docker](#docker)
 - [Planned — relational database](#planned--relational-database)
 - [Planned — infrastructure and cloud](#planned--infrastructure-and-cloud)
 - [Deployment strategy (target)](#deployment-strategy-target)
@@ -168,7 +168,12 @@ The settings layer enforces several of these at startup when `APPLICATION__ENVIR
 - [ ] `ENTERPRISE__ENABLED=true` (if multi-tenant) with sensible quotas.
 - [ ] `RERANKER__ENABLED` / `DUPLICATE_VERIFICATION__ENABLED` decided against the added per-request latency.
 - [ ] `METRICS__PROMETHEUS_ENABLED=true` and `/metrics` scraped.
-- [ ] `LOGGING__JSON_LOGS=true` for machine-readable logs.
+
+> [!NOTE]
+> `LOGGING__JSON_LOGS` validates but currently has **no effect** —
+> `app/core/logging.py::_build_handlers` documents it as reserved and always installs the
+> plain console formatter. Logs go to stdout in the standard text format regardless. Do not
+> rely on it for machine-readable output until it is implemented.
 
 ---
 
@@ -180,17 +185,49 @@ The settings layer enforces several of these at startup when `APPLICATION__ENVIR
 
 ---
 
-## Planned — Docker
+## Docker
 
-> **Status: not implemented.** No `Dockerfile` or Compose file exists in the repository.
+> **Status: implemented (Stage 8).** See **[DOCKER.md](../DOCKER.md)** at the repository
+> root for the full reference — profiles, configuration, volumes, troubleshooting.
 
-Target shape once added:
+The entire platform runs in containers with only Git and Docker on the host:
 
-- A backend image running `uvicorn app.main:app`.
-- A worker image (or the same image with a different command) running `scripts/run_workers.py`.
-- A Compose file wiring backend + worker + Redis + Qdrant for local parity.
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
 
-_Placeholder — add container build and Compose instructions here when implemented._
+**One backend image, two runtime roles.** `backend/Dockerfile` builds a single 2.06 GB
+image; the command selects the role:
+
+| Role | Command |
+|---|---|
+| API | `uvicorn app.main:app --host 0.0.0.0 --port 8000` (image default) |
+| Worker | `python scripts/run_workers.py` |
+
+Both roles need the identical dependency closure, so a second image would mean shipping
+PyTorch twice and keeping two artifacts in sync. This is also what lets one ECR image back
+two ECS services later.
+
+Notes that matter operationally:
+
+- **CPU-only PyTorch on Linux.** `pyproject.toml` pins `torch` to PyTorch's CPU index
+  behind a `sys_platform == 'linux'` marker. Without it, the Linux wheel pulls the full
+  CUDA runtime — ~5–7 GB of GPU libraries a CPU container can never use. Windows and macOS
+  development is unaffected.
+- **`HF_HOME=/models`** on a named volume. CLIP and BGE (~730 MB) download on first use;
+  without a persistent location every restart would re-download them.
+- **`app_storage` is shared between API and worker and must be.** The API writes the
+  upload to disk and enqueues its *path*; the worker opens that path.
+- **Graceful shutdown** works: `tini` is PID 1 in both images, so SIGTERM reaches uvicorn
+  and the worker instead of being ignored until SIGKILL. Measured `docker stop`: 1s for
+  the API, 3s for the worker with all loops logging a clean stop.
+- **Configuration is injected at runtime.** No `.env` is copied into any image; secrets
+  come from `backend/.env` via Compose `env_file`.
+
+The production-like profile runs `APPLICATION__ENVIRONMENT=staging` rather than
+`production` — see the [production configuration
+checklist](#production-configuration-checklist) below and the reasoning in
+[DOCKER.md](../DOCKER.md#design-decisions).
 
 ---
 

@@ -67,23 +67,60 @@ flowchart LR
 ```
 .
 ├── backend/                  # FastAPI service + worker pool (see backend/README.md)
+│   └── Dockerfile            # One image, two roles: API and worker
 ├── frontend/                 # Next.js 15 web client (see frontend/README.md)
-├── docker-compose.yml        # Local backing services: Qdrant + Redis
-├── .github/workflows/ci.yml  # GitHub Actions: ruff, black --check, mypy, pytest
+│   └── Dockerfile            # Standalone production build
+├── docker-compose.yml        # Shared base: all five services
+├── docker-compose.dev.yml    # Dev overlay: mounted source, hot reload
+├── docker-compose.prod.yml   # Production-like overlay: immutable images
+├── DOCKER.md                 # Container reference
+├── .github/workflows/ci.yml  # GitHub Actions: backend + frontend gates
 ├── .pre-commit-config.yaml   # Repo-wide git hooks (ruff, black, mypy, hygiene)
 ├── .editorconfig             # Repo-wide editor formatting rules
-├── Makefile                  # make install / run / services-up / lint / test / clean
+├── Makefile                  # make up-prod / up-dev / install / run / lint / test
 ├── storage/                  # Runtime image artifacts (uploads / processed)
 └── README.md                 # You are here
 ```
 
-`docker-compose.yml` provisions **only** the two stateful backing services. The API, the
-worker pool, and the frontend all run on the host, so reloading, debugging, and the
-Hugging Face model cache keep working as normal.
+`docker-compose.yml` is the shared base and is not meant to be run alone — combine it with
+one of the two overlays (see [DOCKER.md](DOCKER.md)). Host-based development is still
+fully supported: `make services-up` starts only Qdrant and Redis, leaving the API, worker
+and frontend to run on the host with reloading and the Hugging Face cache as normal.
 
 ---
 
 ## Getting started
+
+### Run everything in Docker (recommended)
+
+Prerequisites: **Git** and **Docker**. Nothing else — no Python, Node, Redis or Qdrant on
+the host. From the repo root:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+Then open **<http://localhost:3000>**. That is the whole application: frontend, API,
+worker, Redis and Qdrant.
+
+`make up-prod` is the same command spelled shorter. The first build takes a while (it
+installs PyTorch and builds the Next.js bundle), and the first upload downloads the CLIP
+and BGE models — roughly 730 MB into the `model_cache` volume, once. Subsequent starts
+reuse it and reach healthy in well under a minute.
+
+| Command | What it does |
+|---|---|
+| `make up-prod` | Production-like: immutable images, no source mounts |
+| `make up-dev` | Development: source mounted, hot reload on both servers |
+| `make ps` | Status and health of all five services |
+| `make logs` | Tail logs from every service |
+| `make down` | Stop everything (data is preserved) |
+| `make reset` | **DESTRUCTIVE**: stop and delete all data, including uploads and models |
+
+Ports are configurable if something already occupies them —
+`FRONTEND_PORT=3100 make up-prod`. See **[DOCKER.md](DOCKER.md)** for the full reference.
+
+### Run the backend on the host
 
 Prerequisites: **Python 3.12**, [`uv`](https://docs.astral.sh/uv/), and **Docker** (which
 provides the two backing services — Redis and Qdrant — so you don't have to install them
@@ -136,6 +173,7 @@ end-to-end demo.
 
 | Document | Purpose |
 |---|---|
+| [DOCKER.md](DOCKER.md) | Running the full stack in containers |
 | [backend/README.md](backend/README.md) | Backend overview, features, quickstart |
 | [backend/ARCHITECTURE.md](backend/ARCHITECTURE.md) | Deep technical design and diagrams |
 | [backend/DEPLOYMENT.md](backend/DEPLOYMENT.md) | Configuration, runtime, and deployment notes |

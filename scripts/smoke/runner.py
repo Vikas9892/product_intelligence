@@ -55,6 +55,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import assertions as a
+import checks_ai
 import checks_catalog
 import checks_health
 import checks_pipeline
@@ -314,12 +315,58 @@ def build_groups(ctx: SmokeContext, *, include: set[str]) -> list[CheckGroup]:
             )
         )
 
+    if "ai" in include:
+        groups.append(
+            CheckGroup(
+                title="AI intelligence",
+                checks=(
+                    Check("Text search", checks_ai.check_text_search),
+                    Check("Image search", checks_ai.check_image_search),
+                    Check("Hybrid search", checks_ai.check_hybrid_search),
+                    Check("Duplicate detected", checks_ai.check_duplicate_detected),
+                    Check(
+                        "Non-duplicate rejected",
+                        checks_ai.check_non_duplicate_not_flagged,
+                    ),
+                    Check("Recommendations", checks_ai.check_recommendations),
+                    Check("Pricing", checks_ai.check_pricing),
+                    Check("Explanations", checks_ai.check_explanations),
+                ),
+            )
+        )
+
     return groups
 
 
 #: Stage names accepted by --only, in execution order. Extended as later
 #: milestones add stages.
-ALL_STAGES = ("health", "catalog", "pipeline")
+ALL_STAGES = ("health", "catalog", "pipeline", "ai")
+
+#: What each stage needs to have run first. The AI checks query products by
+#: demo key, so they cannot run without the catalog stage having resolved
+#: those keys to ids -- `--only ai` on its own would otherwise fail every
+#: check with "not seeded", which looks like a broken deployment rather than
+#: a misuse of the flag. Prerequisites are cheap: seeding against an
+#: already-populated deployment reuses everything and uploads nothing.
+STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "catalog": ("health",),
+    "pipeline": ("health", "catalog"),
+    "ai": ("health", "catalog"),
+}
+
+
+def resolve_stages(requested: set[str]) -> set[str]:
+    """Expand requested stages to include everything they depend on."""
+    resolved = set(requested)
+    # One pass suffices while the graph is one level deep; looping keeps it
+    # correct if a dependency ever gains its own.
+    while True:
+        expanded = set(resolved)
+        for stage in resolved:
+            expanded.update(STAGE_DEPENDENCIES.get(stage, ()))
+        if expanded == resolved:
+            return resolved
+        resolved = expanded
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -448,7 +495,11 @@ def main(argv: list[str] | None = None) -> int:
         f"  timeout {args.timeout:.0f}s per request, {args.pipeline_timeout:.0f}s per pipeline job"
     )
 
-    include = set(args.only) if args.only else set(ALL_STAGES)
+    requested = set(args.only) if args.only else set(ALL_STAGES)
+    include = resolve_stages(requested)
+    if include != requested:
+        added = ", ".join(sorted(include - requested))
+        print(f"  stages  {', '.join(sorted(requested))} (+ prerequisites: {added})")
     groups = build_groups(ctx, include=include)
 
     started = time.monotonic()

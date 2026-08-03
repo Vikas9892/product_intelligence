@@ -8,9 +8,12 @@ fast-running fakes.
 """
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
+
+import pytest
 
 from app.jobs.base_job import Job
 from app.queue.base_queue import BaseQueue
@@ -55,6 +58,25 @@ class _BlockingWorker:
 
 class _EmptyQueueWorker:
     async def process_one(self) -> bool:
+        return False
+
+
+class _FlakyWorker:
+    """Raises on its first `process_one` call, then behaves normally.
+
+    Models the real failure this guards against: the Redis `lpop` inside
+    `process_one` is not wrapped by that method's own try/except, so a
+    connection error propagates out of it untouched.
+    """
+
+    def __init__(self, *, error: Exception) -> None:
+        self._error = error
+        self.call_count = 0
+
+    async def process_one(self) -> bool:
+        self.call_count += 1
+        if self.call_count == 1:
+            raise self._error
         return False
 
 
@@ -212,6 +234,57 @@ class TestCrashRecoveryLoop:
 
         # The loop kept running (recovered a 2nd call) despite the 1st raising.
         assert len(fake_queue.recovery_calls) >= 2
+
+
+class TestWorkerLoopResilience:
+    """A worker loop must outlive a transient dequeue failure.
+
+    Regression test for a pool that died permanently and silently: the
+    dequeue inside `process_one` is not covered by that method's own
+    exception handling, so a Redis connection error escaped the loop and
+    killed the asyncio task. Because `start()` never awaits those tasks, the
+    exception was never retrieved and never logged -- the process stayed
+    alive, uploads kept returning 202, and the queue grew forever.
+    """
+
+    async def test_survives_a_failing_dequeue(self) -> None:
+        worker = _FlakyWorker(error=RuntimeError("redis connection reset"))
+        manager = WorkerManager(
+            worker_factory=lambda: worker,
+            queue_manager=QueueManager(queue=_FakeQueueWithRecovery()),
+            concurrency=1,
+            poll_interval_seconds=0.01,
+            job_timeout_seconds=10,
+        )
+
+        await manager.start()
+        # A second call proves the loop is still alive after the first raised.
+        await asyncio.wait_for(_wait_until(lambda: worker.call_count >= 2), timeout=2)
+        await manager.stop()
+
+        assert worker.call_count >= 2
+
+    async def test_logs_the_failure_rather_than_dying_quietly(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        worker = _FlakyWorker(error=RuntimeError("redis connection reset"))
+        manager = WorkerManager(
+            worker_factory=lambda: worker,
+            queue_manager=QueueManager(queue=_FakeQueueWithRecovery()),
+            concurrency=1,
+            poll_interval_seconds=0.01,
+            job_timeout_seconds=10,
+        )
+
+        with caplog.at_level(logging.ERROR, logger="app.workers.worker_manager"):
+            await manager.start()
+            await asyncio.wait_for(_wait_until(lambda: worker.call_count >= 2), timeout=2)
+            await manager.stop()
+
+        # Silence was the actual defect: a dead pool with no log line is
+        # undiagnosable from the outside.
+        assert any("Worker loop iteration failed" in r.message for r in caplog.records)
+        assert any(r.exc_info for r in caplog.records)
 
 
 async def _wait_until(predicate: Callable[[], bool]) -> None:

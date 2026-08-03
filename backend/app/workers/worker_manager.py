@@ -91,7 +91,28 @@ class WorkerManager:
         worker = self._worker_factory()
         logger.info("Worker loop started: worker_index=%d", worker_index)
         while not self._stop_event.is_set():
-            processed = await worker.process_one()
+            try:
+                processed = await worker.process_one()
+            except Exception:
+                # `ProductWorker.process_one` guards job *processing* and routes
+                # those failures through retry/DLQ, but the dequeue that precedes
+                # it is unguarded — so a Redis connection error (failover, idle
+                # timeout, a host that slept) raises straight through to here.
+                #
+                # Without this handler that exception escapes the loop and kills
+                # the asyncio task. `start()` fires these tasks and never awaits
+                # them, so the exception is never retrieved and never logged: the
+                # pool dies permanently and silently while the process stays alive
+                # parked on `stop_event.wait()`, uploads keep returning 202, and
+                # the queue grows without bound. Observed in exactly that state —
+                # four dead loops, 33 hours, zero log output.
+                #
+                # Matches `_run_recovery_loop` below, which already guards its own
+                # body for the same reason. Backing off before continuing avoids
+                # spinning at full speed while the dependency is still down.
+                logger.exception("Worker loop iteration failed: worker_index=%d", worker_index)
+                await self._wait_or_stop(self._poll_interval_seconds)
+                continue
             if not processed:
                 await self._wait_or_stop(self._poll_interval_seconds)
         logger.info("Worker loop stopped: worker_index=%d", worker_index)

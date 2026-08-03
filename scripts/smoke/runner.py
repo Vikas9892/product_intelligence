@@ -57,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import assertions as a
 import checks_catalog
 import checks_health
+import checks_pipeline
 from client import SmokeClient, SmokeError
 from context import SmokeContext
 
@@ -294,12 +295,31 @@ def build_groups(ctx: SmokeContext, *, include: set[str]) -> list[CheckGroup]:
             )
         )
 
+    if "pipeline" in include:
+        groups.append(
+            CheckGroup(
+                title="Async pipeline",
+                critical=True,
+                checks=(
+                    Check(
+                        "Jobs reach completion",
+                        checks_pipeline.check_pipeline_completes,
+                    ),
+                    Check("Job records consistent", checks_pipeline.check_job_records),
+                    Check("Dead-letter queue", checks_pipeline.check_no_dead_letters),
+                    Check(
+                        "Products searchable", checks_pipeline.check_products_searchable
+                    ),
+                ),
+            )
+        )
+
     return groups
 
 
 #: Stage names accepted by --only, in execution order. Extended as later
 #: milestones add stages.
-ALL_STAGES = ("health", "catalog")
+ALL_STAGES = ("health", "catalog", "pipeline")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

@@ -55,6 +55,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import assertions as a
+import checks_catalog
 import checks_health
 from client import SmokeClient, SmokeError
 from context import SmokeContext
@@ -282,11 +283,23 @@ def build_groups(ctx: SmokeContext, *, include: set[str]) -> list[CheckGroup]:
             )
         )
 
+    if "catalog" in include:
+        groups.append(
+            CheckGroup(
+                title="Demo catalog",
+                critical=True,
+                checks=(
+                    Check("Seed demo products", checks_catalog.check_seed_catalog),
+                ),
+            )
+        )
+
     return groups
 
 
-#: Stage names accepted by --only. Extended as later milestones add stages.
-ALL_STAGES = ("health",)
+#: Stage names accepted by --only, in execution order. Extended as later
+#: milestones add stages.
+ALL_STAGES = ("health", "catalog")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -343,13 +356,49 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Run only the named stage(s). Repeatable. Default: all stages.",
     )
     parser.add_argument(
+        "--force-reseed",
+        action="store_true",
+        help=(
+            "Upload every demo product again instead of reusing what is already "
+            "indexed. For throwaway environments; grows the catalog on each run."
+        ),
+    )
+    parser.add_argument(
+        "--list-catalog",
+        action="store_true",
+        help="Print the demo catalog and why each product exists, then exit.",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Print extra diagnostics."
     )
     return parser.parse_args(argv)
 
 
+def print_catalog() -> None:
+    """Describe the demo dataset without contacting any deployment."""
+    from dataset import CATALOG
+
+    print(_bold("Demo catalog") + f"  ({len(CATALOG)} products, all synthetic)")
+    print()
+    for product in CATALOG:
+        print(f"  {_bold(product.key)}")
+        print(
+            f"    {product.name}  --  {product.brand} / {product.category} / {product.price}"
+        )
+        print(f"    {_dim(product.rationale)}")
+        print(
+            f"    {_dim(f'image: {len(product.image)} bytes, generated deterministically')}"
+        )
+        print()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    _configure_stdout()
+
+    if args.list_catalog:
+        print_catalog()
+        return 0
 
     if not args.base_url.startswith(("http://", "https://")):
         print(
@@ -370,9 +419,8 @@ def main(argv: list[str] | None = None) -> int:
         pipeline_timeout=args.pipeline_timeout,
         verbose=args.verbose,
     )
+    ctx.notes["force_reseed"] = args.force_reseed
     reporter = Reporter(verbose=args.verbose)
-
-    _configure_stdout()
 
     print(_bold("Product Intelligence - deployment verification"))
     print(f"  target  {client.base_url}{client.api_prefix}")

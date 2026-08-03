@@ -159,19 +159,36 @@ def check_job_records(ctx: SmokeContext) -> str:
 
 
 def check_no_dead_letters(ctx: SmokeContext) -> str:
-    """Nothing landed in the dead-letter queue.
+    """No demo product exhausted its retries.
 
-    A job that exhausted its retries is a real pipeline failure even though
-    every individual status call may have looked fine.
+    Scoped to this run's products rather than asserting a globally empty
+    queue. The dead-letter queue is deployment-wide state: on a shared
+    staging environment it may legitimately hold somebody else's failed job,
+    and failing the suite for that would be a false alarm about a healthy
+    deployment. Unrelated entries are reported, not asserted on.
     """
     response = ctx.client.get(ctx.client.api("/jobs/dead-letter"))
     a.status_is(response, 200)
     entries = a.is_list(response.json(), context="/jobs/dead-letter")
-    a.require(
-        len(entries) == 0,
-        f"the dead-letter queue holds {len(entries)} job(s); at least one product "
-        f"exhausted its retries. First entry: {entries[0] if entries else ''}",
-    )
+
+    ours = {p.product_id for p in ctx.seeded.values()}
+    mine = [
+        e for e in entries if isinstance(e, dict) and str(e.get("product_id")) in ours
+    ]
+    if mine:
+        # Built inside the branch, not passed to `require` as an f-string:
+        # the message indexes mine[0], and an eagerly-evaluated argument
+        # raises IndexError on the healthy path where the list is empty.
+        first = mine[0]
+        a.fail(
+            f"{len(mine)} demo product(s) exhausted their retries and are in the "
+            f"dead-letter queue. First: product_id={first.get('product_id')} "
+            f"error={first.get('error')!r} retries={first.get('retry_count')}"
+        )
+
+    others = len(entries) - len(mine)
+    if others:
+        return f"no demo products ({others} unrelated entr{'y' if others == 1 else 'ies'} present)"
     return "empty"
 
 

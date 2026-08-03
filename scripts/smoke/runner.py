@@ -58,6 +58,7 @@ import assertions as a
 import checks_ai
 import checks_catalog
 import checks_health
+import checks_ops
 import checks_pipeline
 from client import SmokeClient, SmokeError
 from context import SmokeContext
@@ -335,12 +336,45 @@ def build_groups(ctx: SmokeContext, *, include: set[str]) -> list[CheckGroup]:
             )
         )
 
+    if "ops" in include:
+        groups.append(
+            CheckGroup(
+                title="Operational & failure behavior",
+                checks=(
+                    Check("Metrics endpoint", checks_ops.check_metrics_exposed),
+                    Check("System stats", checks_ops.check_system_stats),
+                    Check("Analytics available", checks_ops.check_analytics_available),
+                    Check("Enterprise gated", checks_ops.check_enterprise_gated),
+                    Check("Response headers", checks_ops.check_response_headers),
+                    Check(
+                        "Invalid upload rejected",
+                        checks_ops.check_invalid_upload_rejected,
+                    ),
+                    Check(
+                        "Malformed request", checks_ops.check_malformed_request_rejected
+                    ),
+                    Check(
+                        "Empty search rejected",
+                        checks_ops.check_search_rejects_empty_query,
+                    ),
+                    Check(
+                        "Duplicate check needs image",
+                        checks_ops.check_duplicate_check_requires_image,
+                    ),
+                    Check("Unknown resource", checks_ops.check_unknown_resource),
+                    Check(
+                        "Malformed identifier", checks_ops.check_malformed_identifier
+                    ),
+                ),
+            )
+        )
+
     return groups
 
 
 #: Stage names accepted by --only, in execution order. Extended as later
 #: milestones add stages.
-ALL_STAGES = ("health", "catalog", "pipeline", "ai")
+ALL_STAGES = ("health", "catalog", "pipeline", "ai", "ops")
 
 #: What each stage needs to have run first. The AI checks query products by
 #: demo key, so they cannot run without the catalog stage having resolved
@@ -352,6 +386,8 @@ STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "catalog": ("health",),
     "pipeline": ("health", "catalog"),
     "ai": ("health", "catalog"),
+    # `ops` needs only a reachable API; its checks are self-contained probes.
+    "ops": ("health",),
 }
 
 

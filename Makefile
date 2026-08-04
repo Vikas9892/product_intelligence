@@ -7,7 +7,7 @@ PROD    := docker compose -f docker-compose.yml -f docker-compose.prod.yml
 
 .PHONY: help install run worker lint format typecheck test clean \
 	services-up services-down services-status services-logs services-reset \
-	up-dev up-prod down logs ps reset
+	up-dev up-prod down logs ps reset demo smoke catalog
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -25,6 +25,20 @@ run: ## Run the backend dev server
 
 worker: ## Run the async pipeline worker pool (needs services-up)
 	uv run --directory $(BACKEND) python scripts/run_workers.py
+
+# --- Demo & verification (Stage 9) ------------------------------------------
+# These targets are thin wrappers. The scripts are the implementation and run
+# directly on any platform with Python -- `python scripts/demo.py` -- so a
+# Windows developer never needs GNU make to use them.
+
+demo: ## Start the stack, seed the demo catalog, and verify it end to end
+	python scripts/demo.py
+
+smoke: ## Verify a running deployment (SMOKE_BASE_URL to target another one)
+	python scripts/smoke/runner.py --base-url $(or $(SMOKE_BASE_URL),http://localhost:8000)
+
+catalog: ## Show the demo catalog and why each product exists
+	python scripts/smoke/runner.py --list-catalog
 
 # --- Full containerized stack (Stage 8) -------------------------------------
 

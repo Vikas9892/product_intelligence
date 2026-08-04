@@ -11,7 +11,7 @@
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white">
   <img alt="Qdrant" src="https://img.shields.io/badge/Qdrant-Vector%20Search-DC244C">
   <img alt="Redis" src="https://img.shields.io/badge/Redis-Queue%20%26%20State-DC382D?logo=redis&logoColor=white">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-1327%20passing-brightgreen">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-1329%20passing-brightgreen">
   <img alt="Coverage" src="https://img.shields.io/badge/coverage-99%25-brightgreen">
   <img alt="License" src="https://img.shields.io/badge/license-TBD-lightgrey">
 </p>
@@ -74,10 +74,12 @@ flowchart LR
 ├── docker-compose.dev.yml    # Dev overlay: mounted source, hot reload
 ├── docker-compose.prod.yml   # Production-like overlay: immutable images
 ├── DOCKER.md                 # Container reference
+├── scripts/demo.py           # One command: start + seed + verify
+├── scripts/smoke/            # Deployment-agnostic smoke tests (HTTP only)
 ├── .github/workflows/ci.yml  # GitHub Actions: backend + frontend gates
 ├── .pre-commit-config.yaml   # Repo-wide git hooks (ruff, black, mypy, hygiene)
 ├── .editorconfig             # Repo-wide editor formatting rules
-├── Makefile                  # make up-prod / up-dev / install / run / lint / test
+├── Makefile                  # make demo / smoke / up-prod / install / run / test
 ├── storage/                  # Runtime image artifacts (uploads / processed)
 └── README.md                 # You are here
 ```
@@ -93,29 +95,50 @@ and frontend to run on the host with reloading and the Hugging Face cache as nor
 
 ### Run everything in Docker (recommended)
 
-Prerequisites: **Git** and **Docker**. Nothing else — no Python, Node, Redis or Qdrant on
-the host. From the repo root:
+Prerequisites: **Git**, **Docker**, and **Python 3** (to run the demo script). Nothing
+else — no Node, Redis or Qdrant on the host. From the repo root:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+python scripts/demo.py
 ```
 
-Then open **<http://localhost:3000>**. That is the whole application: frontend, API,
-worker, Redis and Qdrant.
+That starts the whole stack, seeds a deterministic demo catalog through the real upload
+API, verifies 30 behaviors end to end, and tells you where to look:
 
-`make up-prod` is the same command spelled shorter. The first build takes a while (it
-installs PyTorch and builds the Next.js bundle), and the first upload downloads the CLIP
-and BGE models — roughly 730 MB into the `model_cache` volume, once. Subsequent starts
-reuse it and reach healthy in well under a minute.
+```
+Demo environment ready.
+
+  Frontend    http://localhost:3000
+  API docs    http://localhost:8000/docs
+```
+
+`make demo` is the same thing. To start the stack without seeding or verifying:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build   # or: make up-prod
+```
+
+> [!IMPORTANT]
+> **Budget 10–15 minutes for the first run.** The initial build installs PyTorch and
+> builds the Next.js bundle, and the first *upload* downloads CLIP (~600 MB) and BGE
+> (~130 MB) into the `model_cache` volume. That happens once and survives
+> `docker compose down`. Afterwards a full seed-and-verify takes ~66 s, and re-verifying
+> an already-seeded catalog ~6 s.
 
 | Command | What it does |
 |---|---|
+| `make demo` | Start, seed and verify everything (wraps `python scripts/demo.py`) |
+| `make smoke` | Verify a running deployment; `SMOKE_BASE_URL` targets another one |
+| `make catalog` | Show the demo catalog and why each product exists |
 | `make up-prod` | Production-like: immutable images, no source mounts |
 | `make up-dev` | Development: source mounted, hot reload on both servers |
 | `make ps` | Status and health of all five services |
 | `make logs` | Tail logs from every service |
 | `make down` | Stop everything (data is preserved) |
 | `make reset` | **DESTRUCTIVE**: stop and delete all data, including uploads and models |
+
+Every `make` target here is a thin wrapper — the scripts are the implementation and run
+directly (`python scripts/demo.py`), so GNU make is never required.
 
 Ports are configurable if something already occupies them —
 `FRONTEND_PORT=3100 make up-prod`. See **[DOCKER.md](DOCKER.md)** for the full reference.
@@ -174,10 +197,10 @@ end-to-end demo.
 | Document | Purpose |
 |---|---|
 | [DOCKER.md](DOCKER.md) | Running the full stack in containers |
+| [backend/DEMO.md](backend/DEMO.md) | One-command demo, demo catalog, and API walkthrough |
 | [backend/README.md](backend/README.md) | Backend overview, features, quickstart |
 | [backend/ARCHITECTURE.md](backend/ARCHITECTURE.md) | Deep technical design and diagrams |
 | [backend/DEPLOYMENT.md](backend/DEPLOYMENT.md) | Configuration, runtime, and deployment notes |
-| [backend/DEMO.md](backend/DEMO.md) | End-to-end walkthrough |
 | [backend/CHANGELOG.md](backend/CHANGELOG.md) | Version history by phase |
 | [backend/CONTRIBUTING.md](backend/CONTRIBUTING.md) | Contribution workflow and standards |
 

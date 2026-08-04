@@ -7,9 +7,89 @@ A hands-on tour of the platform's capabilities using `curl`. It follows the natu
 
 ---
 
-## Prerequisites
+## The one-command demo
 
-Have the stack running (see [README](./README.md#running-locally)):
+If you want a working, populated, *verified* environment rather than a guided tour, run this from the repository root:
+
+```bash
+python scripts/demo.py
+```
+
+`make demo` is the same thing. The script is the implementation and runs directly on any platform with Python — Windows developers do not need GNU make.
+
+It starts the stack, waits for every service to report healthy, seeds a deterministic catalog of 8 synthetic products through the **real upload API**, waits for the async pipeline to finish them, then verifies 30 behaviors end to end and prints where to look:
+
+```
+Product Intelligence - Demo Setup
+
+Connectivity & health
+  [PASS] API liveness                       HTTP 200 in 53ms
+  [PASS] System health                      redis=healthy qdrant=healthy workers=4 models=3
+  ...
+Demo catalog
+  [PASS] Seed demo products                 8 products uploaded
+Async pipeline
+  [PASS] Jobs reach completion              8 product(s) processed, slowest 56s
+  [PASS] Products searchable                all 8 products findable by name
+AI intelligence
+  [PASS] Image search                       self-match 1.000, twin ranked above unrelated products
+  [PASS] Duplicate detected                 detected, confidence 0.977, 4 signals
+  ...
+
+ALL CHECKS PASSED  30 checks in 5.9s
+
+Demo environment ready.
+
+  Frontend    http://localhost:3000
+  API docs    http://localhost:8000/docs
+```
+
+> [!IMPORTANT]
+> **First run is slow, and that is expected.** The initial build compiles the images, and the first *upload* downloads CLIP (~600 MB) and BGE (~130 MB) from Hugging Face into the `model_cache` volume. Budget **10–15 minutes** end to end on a cold machine. Measured afterwards: a full seed-and-verify takes **~66 s**, and re-verifying an already-seeded catalog takes **~6 s**. The models are downloaded once and survive `docker compose down`.
+
+Useful variants:
+
+```bash
+python scripts/demo.py --profile dev        # hot-reload profile instead
+python scripts/demo.py --no-start           # verify something already running
+python scripts/demo.py --frontend-port 3100 # when 3000 is taken
+```
+
+### The demo catalog
+
+Eight synthetic products, each present for a reason. `python scripts/smoke/runner.py --list-catalog` prints them with their rationale. The relationships are what make the capabilities demonstrable rather than merely exercised:
+
+| Product | Why it exists |
+|---|---|
+| `shoe_blue_a` | Anchor. Source for recommendations, pricing and duplicate checks. |
+| `shoe_blue_b` | Near-identical twin of the anchor — **should** be flagged a duplicate. |
+| `shoe_black` | Same category, different brand and colour — recommended, but not a duplicate. |
+| `mug_red_a` / `mug_red_b` | A second similarity cluster in an unrelated category. |
+| `backpack_blue` | Shares a colour with the blue shoes and nothing else — catches recommendations driven by colour alone. |
+| `backpack_black` | Same model, different colour: a third cluster. |
+| `lamp_yellow` | Negative control. Must rank **below** real matches, or a system returning everything would look correct. |
+
+All names begin with `Demo ` and every description states the product is synthetic. The images are generated deterministically by `scripts/smoke/images.py` — no downloaded product photography, and byte-identical on every machine.
+
+Seeding is idempotent as far as the API permits: it searches for an exact name-and-brand match and reuses what it finds, so repeated runs upload nothing. See [`seeding.py`](../scripts/smoke/seeding.py) for the two honest limits.
+
+### Verifying a deployment on its own
+
+The same runner works against any deployment, including one you did not start:
+
+```bash
+python scripts/smoke/runner.py --base-url http://localhost:8000
+python scripts/smoke/runner.py --base-url https://api.example.com --timeout 60
+python scripts/smoke/runner.py --only ai        # one stage; prerequisites resolve automatically
+```
+
+Exit codes are CI-ready: `0` verified, `1` a check failed (including an unreachable deployment), `2` the runner was misinvoked and never formed a verdict.
+
+---
+
+## Prerequisites for the manual tour
+
+The rest of this document drives the API by hand. Either use the containerized stack above, or run the backend natively:
 
 ```bash
 # Terminal 1 — API

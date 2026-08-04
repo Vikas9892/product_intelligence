@@ -22,6 +22,13 @@ Qdrant — with only Git and Docker installed on the host.
 ```bash
 git clone https://github.com/Vikas9892/product_intelligence.git
 cd product_intelligence
+python scripts/demo.py
+```
+
+That starts the stack, seeds a demo catalog, verifies it end to end, and prints the URLs.
+To start the stack without seeding or verifying:
+
+```bash
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
@@ -235,6 +242,17 @@ docker compose logs frontend | grep "backend origin"
 
 **Changes not picked up.** `make up-dev` mounts source; `make up-prod` bakes it in and
 needs `--build`.
+
+**Is it actually working?** Run the smoke suite — it answers that question far better
+than `docker compose ps`, which only reports that processes are alive:
+
+```bash
+python scripts/smoke/runner.py --base-url http://localhost:8000
+```
+
+It verifies connectivity, the async pipeline, every AI capability and the operational
+surface, over HTTP only. Exit codes: `0` verified, `1` a check failed, `2` misinvoked.
+See [DEMO.md](backend/DEMO.md#the-one-command-demo).
 
 ---
 

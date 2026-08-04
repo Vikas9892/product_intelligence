@@ -19,6 +19,7 @@ This document covers how to configure and run the Product Intelligence Platform 
 - [Running the workers](#running-the-workers)
 - [Production configuration checklist](#production-configuration-checklist)
 - [Observability in production](#observability-in-production)
+- [Deployment verification (smoke tests)](#deployment-verification-smoke-tests)
 - [Continuous integration (GitHub Actions)](#continuous-integration-github-actions)
 - [Docker](#docker)
 - [Planned — relational database](#planned--relational-database)
@@ -182,6 +183,51 @@ The settings layer enforces several of these at startup when `APPLICATION__ENVIR
 - Scrape `GET /metrics` with Prometheus (namespace `METRICS__NAMESPACE`).
 - Use `GET /health` and `GET /ready` as liveness/readiness probes.
 - Use `GET /system/health` and `GET /system/stats` for an operational snapshot (flag-gated).
+
+---
+
+## Deployment verification (smoke tests)
+
+> **Status: implemented (Stage 9).** See [DEMO.md](./DEMO.md#the-one-command-demo).
+
+A deployment-agnostic suite answers the question health checks cannot: *is this
+deployment actually working?*
+
+```bash
+python scripts/smoke/runner.py --base-url http://localhost:8000
+python scripts/smoke/runner.py --base-url https://api.example.com --timeout 60
+```
+
+Thirty checks across four stages — connectivity and capabilities, the async pipeline
+(upload → job → worker → completed → searchable), every AI capability, and the
+operational surface (metrics, headers, error shapes, enterprise gating, malformed input).
+
+Three properties make it deployment-agnostic, which is what lets the *same* command
+verify local Docker today and AWS later:
+
+- **HTTP only.** Nothing touches Redis, Qdrant, Docker or the filesystem, because none of
+  those are reachable from outside a cloud deployment.
+- **Standard library only.** No `pip install` stands between an operator and finding out
+  whether production is up.
+- **No hardcoded host.** `--base-url` (or `SMOKE_BASE_URL`) is the only thing that
+  changes; `--api-key` and `--insecure` cover an enterprise-enabled or
+  private-certificate deployment.
+
+Exit codes are CI-ready:
+
+| Code | Meaning |
+|---|---|
+| `0` | Every check passed |
+| `1` | A check failed — including an unreachable deployment, which is a deployment failure, not an inconclusive result |
+| `2` | The runner was misinvoked and never formed a verdict |
+
+Collapsing `1` and `2` would let a typo in `--base-url` read as a broken deploy, or the
+reverse.
+
+> [!TIP]
+> Run this after every deploy. It is the difference between "the containers started" and
+> "a product can be uploaded, embedded, indexed, searched, deduplicated, recommended and
+> priced".
 
 ---
 

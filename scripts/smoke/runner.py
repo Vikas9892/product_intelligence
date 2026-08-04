@@ -430,8 +430,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.environ.get("SMOKE_TIMEOUT", "30")),
-        help="Per-request HTTP timeout in seconds (default: %(default)s).",
+        default=float(os.environ.get("SMOKE_TIMEOUT", "120")),
+        help=(
+            "Per-request HTTP timeout in seconds (default: %(default)s). "
+            "Generous because the first request that touches a model makes the "
+            "API load it before answering; still tight enough to catch a hang."
+        ),
     )
     parser.add_argument(
         "--pipeline-timeout",

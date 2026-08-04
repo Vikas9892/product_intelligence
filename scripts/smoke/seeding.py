@@ -49,10 +49,24 @@ def find_existing(client: SmokeClient, product: DemoProduct) -> str | None:
     index is a perfectly normal state on a fresh deployment, and the caller's
     correct response either way is to upload.
     """
-    response = client.post_multipart(
-        client.api("/products/search"),
-        fields={"query": product.name, "top_k": LOOKUP_TOP_K},
-    )
+    try:
+        response = client.post_multipart(
+            client.api("/products/search"),
+            fields={"query": product.name, "top_k": LOOKUP_TOP_K},
+        )
+    except SmokeError:
+        # Most often a timeout, and on a cold deployment that is expected
+        # rather than broken: the very first search makes the API download and
+        # load the BGE text model (~130 MB) before it can embed the query, and
+        # that can outlast any sane per-request timeout. Observed exactly that
+        # against a freshly wiped model cache.
+        #
+        # An unanswerable "does this already exist?" must default to "no". The
+        # worst case is uploading a product that was already there, which the
+        # pipeline handles; the alternative -- failing the run -- would make a
+        # cold but perfectly healthy deployment look broken.
+        return None
+
     if response.status != 200:
         return None
 

@@ -197,6 +197,7 @@ end-to-end demo.
 | Document | Purpose |
 |---|---|
 | [DOCKER.md](DOCKER.md) | Running the full stack in containers |
+| [docs/aws/](docs/aws/) | AWS production architecture design + ADRs (design only) |
 | [backend/DEMO.md](backend/DEMO.md) | One-command demo, demo catalog, and API walkthrough |
 | [backend/README.md](backend/README.md) | Backend overview, features, quickstart |
 | [backend/ARCHITECTURE.md](backend/ARCHITECTURE.md) | Deep technical design and diagrams |

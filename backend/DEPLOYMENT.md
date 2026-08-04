@@ -23,6 +23,7 @@ This document covers how to configure and run the Product Intelligence Platform 
 - [Continuous integration (GitHub Actions)](#continuous-integration-github-actions)
 - [Docker](#docker)
 - [Planned — relational database](#planned--relational-database)
+- [AWS architecture (design)](#aws-architecture-design)
 - [Planned — infrastructure and cloud](#planned--infrastructure-and-cloud)
 - [Deployment strategy (target)](#deployment-strategy-target)
 
@@ -307,6 +308,35 @@ The workflow declares least-privilege `contents: read` permissions — it only r
 repository and never writes back. The same gate runs locally as pre-commit hooks, so a
 clean local commit should produce a green CI run. Build status is shown by the CI badge
 at the top of the [README](./README.md).
+
+---
+
+## AWS architecture (design)
+
+> **Status: designed, not deployed (Stage 10).** No AWS resources exist and no Terraform is
+> written. See **[docs/aws/](../docs/aws/)** for the full design.
+
+The target architecture, grounded in measurements from the running Compose stack:
+
+| Concern | Decision | ADR |
+|---|---|---|
+| Compute | ECS Fargate for frontend, API and worker; **Spot** for the worker | [ADR-001](../docs/aws/ADR-001-compute.md) |
+| Object storage | **S3** replaces the shared `app_storage` volume | [ADR-002](../docs/aws/ADR-002-storage.md) |
+| Redis | ElastiCache `cache.t4g.micro`, snapshots on | [ADR-003](../docs/aws/ADR-003-redis.md) |
+| Qdrant | Self-hosted on ECS Fargate + EBS, private subnets | [ADR-004](../docs/aws/ADR-004-qdrant.md) |
+| Models | **Baked into the image** — no runtime download | [ADR-005](../docs/aws/ADR-005-model-delivery.md) |
+
+Only CloudFront and the ALB are internet-facing. Redis, Qdrant, the worker and every ECS
+task sit in private subnets. See [SECURITY.md](../docs/aws/SECURITY.md).
+
+**One application change is required before any of this can be deployed**: the API and
+worker currently exchange images through a shared filesystem volume, which separate ECS
+tasks do not have. The fix is small — they already exchange an opaque generated key rather
+than a path, so it is four call sites behind an object-store port. Detail in
+[ADR-002](../docs/aws/ADR-002-storage.md#the-refactor).
+
+Cost is analysed in [COST.md](../docs/aws/COST.md), separating verified AWS list prices from
+derived monthly totals.
 
 ---
 

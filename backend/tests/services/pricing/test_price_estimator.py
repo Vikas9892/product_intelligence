@@ -5,6 +5,7 @@ from uuid import uuid4
 from app.core.constants import PricingStrategy
 from app.models.comparable_product import ComparableProduct
 from app.models.price_confidence import PriceConfidence
+from app.services.pricing.comparable_filter import FilterOutcome
 from app.services.pricing.price_estimator import PriceEstimator
 
 
@@ -171,3 +172,62 @@ class TestSpreadConfidence:
         # confidence a same-count tight cluster would earn.
         assert estimate.confidence is PriceConfidence.MEDIUM
         assert estimate.confidence_score < 1.0
+
+
+class TestLowEvidenceGuard:
+    """A refused estimate is more honest than a confident one built on nothing.
+
+    Regression tests for the reported 83.18 (medium confidence) derived partly
+    from a desk lamp: once irrelevant comparables are filtered out, whatever
+    remains must be reported for what it is.
+    """
+
+    def test_declines_to_estimate_when_filtering_removed_everything(self) -> None:
+        outcome = FilterOutcome(
+            kept=[],
+            excluded_by_category=7,
+            excluded_by_similarity=0,
+            applied_similarity_floor=0.5,
+            applied_category="footwear",
+        )
+
+        estimate = PriceEstimator().estimate([], filtering=outcome)
+
+        assert estimate.estimated_price == 0.0
+        assert estimate.confidence is PriceConfidence.LOW
+        assert estimate.confidence_score == 0.0
+        # And it says *why* there is no number, rather than reporting a bare zero.
+        assert "No relevant comparable products remained" in estimate.reason
+        assert "7 from other categories" in estimate.reason
+        assert "footwear" in estimate.reason
+
+    def test_distinguishes_nothing_retrieved_from_everything_filtered(self) -> None:
+        nothing_retrieved = PriceEstimator().estimate([])
+
+        assert nothing_retrieved.reason == "No comparable priced products were found."
+
+    def test_few_survivors_cannot_exceed_low_confidence(self) -> None:
+        """`min_comparables` defaults to 3; two survivors is thin evidence."""
+        survivors = [
+            _comparable(119.99, similarity=0.86),
+            _comparable(134.99, similarity=0.98),
+        ]
+
+        estimate = PriceEstimator(min_comparables=3).estimate(survivors)
+
+        assert estimate.confidence is PriceConfidence.LOW
+
+    def test_the_reason_names_the_applied_floor_and_exclusions(self) -> None:
+        outcome = FilterOutcome(
+            kept=[],
+            excluded_by_category=2,
+            excluded_by_similarity=3,
+            applied_similarity_floor=0.5,
+            applied_category="footwear",
+        )
+        survivors = [_comparable(120.0), _comparable(130.0), _comparable(125.0)]
+
+        estimate = PriceEstimator().estimate(survivors, filtering=outcome)
+
+        assert "2 from other categories" in estimate.reason
+        assert "3 below the 0.50 similarity floor" in estimate.reason

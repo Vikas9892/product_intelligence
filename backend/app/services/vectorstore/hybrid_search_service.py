@@ -34,6 +34,7 @@ implementation choice.
 """
 
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID
 
 from app.core.config import settings
@@ -200,6 +201,19 @@ class HybridSearchService:
             by_id[candidate.product_id].model_copy(update={"score": candidate.rerank_score})
             for candidate in rerank_result.candidates
         ]
+
+    async def retrieve_metadata(self, product_id: UUID) -> dict[str, Any] | None:
+        """Return `product_id`'s stored metadata payload, or `None` if absent.
+
+        A read-only lookup for callers that need the *subject's* own
+        attributes rather than its neighbours -- pricing uses it to learn the
+        category it should restrict comparables to. Prefers the image
+        collection and falls back to text, since both carry the same payload.
+        """
+        point = await self._search_service.retrieve_by_id(product_id)
+        if point is None:
+            point = await self._text_search_service.retrieve_by_id(product_id)
+        return point.metadata if point is not None else None
 
     async def search_by_product_id(
         self,

@@ -473,6 +473,25 @@ class PricingSettings(BaseModel):
     trim_ratio: float = Field(default=0.1, ge=0, lt=0.5)
     min_comparables: int = Field(default=3, gt=0)
     outlier_iqr_multiplier: float = Field(default=1.5, ge=0)
+    #: Only price a product against comparables from its own category.
+    #:
+    #: This is the primary relevance rule, and it is on by default because
+    #: without it the engine priced a running shoe partly from a desk lamp,
+    #: and a 24.50 mug at 91.57 by averaging it against footwear. A price
+    #: comparable must come from the same market to be a comparable at all.
+    #: Skipped when the subject's own category is unknown -- missing metadata
+    #: should not turn into a refusal to price.
+    restrict_to_same_category: bool = True
+    #: Minimum retrieval similarity for a comparable to count.
+    #:
+    #: A guard against thin evidence *within* a category -- deliberately not
+    #: the cross-category separator, because measurement showed it cannot be
+    #: one: unrelated categories scored 0.68-0.80 while a legitimate
+    #: same-category comparable scored 0.86, so no floor separates them. 0.50
+    #: sits well below every legitimate comparable observed (lowest 0.86) and
+    #: above the 0.46 lamp reported in the field, so it removes weak matches
+    #: without discarding real ones.
+    min_comparable_similarity: float = Field(default=0.50, ge=0, le=1)
     reranking_enabled: bool | None = None
 
 

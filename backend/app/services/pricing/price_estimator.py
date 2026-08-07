@@ -33,6 +33,7 @@ from app.core.logging import get_logger
 from app.models.comparable_product import ComparableProduct
 from app.models.price_confidence import PriceConfidence
 from app.models.price_estimate import PriceEstimate
+from app.services.pricing.comparable_filter import FilterOutcome
 
 logger = get_logger(__name__)
 
@@ -69,9 +70,19 @@ class PriceEstimator:
         )
 
     def estimate(
-        self, comparables: list[ComparableProduct], *, strategy: PricingStrategy | None = None
+        self,
+        comparables: list[ComparableProduct],
+        *,
+        strategy: PricingStrategy | None = None,
+        filtering: FilterOutcome | None = None,
     ) -> PriceEstimate:
-        """Aggregate `comparables` into a `PriceEstimate` using `strategy` (or the configured default)."""
+        """Aggregate `comparables` into a `PriceEstimate` using `strategy` (or the configured default).
+
+        `filtering`, when given, describes what `ComparableFilter` excluded
+        before this point. It is reported in the reason so an exclusion is as
+        auditable as an inclusion -- a price built from 2 of 8 retrieved
+        products should say so.
+        """
         resolved_strategy = strategy if strategy is not None else self._strategy
 
         if not comparables:
@@ -82,7 +93,7 @@ class PriceEstimator:
                 strategy=resolved_strategy,
                 comparable_count=0,
                 comparables=[],
-                reason="No comparable priced products were found.",
+                reason=_no_comparables_reason(filtering),
             )
 
         kept, removed = self._remove_outliers(comparables)
@@ -97,6 +108,7 @@ class PriceEstimator:
             comparable_count=len(kept),
             comparables=kept,
             reason=_build_reason(
+                filtering=filtering,
                 count=len(kept),
                 removed=removed,
                 strategy=resolved_strategy,
@@ -190,11 +202,51 @@ def _trimmed_mean(prices: list[float], *, trim_ratio: float) -> float:
     return sum(kept) / len(kept)
 
 
+def _describe_filtering(filtering: FilterOutcome | None) -> str:
+    """Describe what relevance filtering excluded, or "" when nothing was."""
+    if filtering is None or filtering.excluded_total == 0:
+        return ""
+    dropped: list[str] = []
+    if filtering.excluded_by_category:
+        scope = f" (not {filtering.applied_category})" if filtering.applied_category else ""
+        dropped.append(f"{filtering.excluded_by_category} from other categories{scope}")
+    if filtering.excluded_by_similarity:
+        dropped.append(
+            f"{filtering.excluded_by_similarity} below the "
+            f"{filtering.applied_similarity_floor:.2f} similarity floor"
+        )
+    return "after excluding " + " and ".join(dropped)
+
+
+def _no_comparables_reason(filtering: FilterOutcome | None) -> str:
+    """Explain an estimate that was declined for want of relevant evidence.
+
+    Distinguishes "nothing was retrieved" from "everything retrieved was
+    irrelevant" -- they look identical in a bare zero, and they mean very
+    different things to whoever is reading the number.
+    """
+    described = _describe_filtering(filtering)
+    if described:
+        return (
+            f"No relevant comparable products remained {described}. "
+            "No price is estimated; a value drawn from unrelated products would be misleading."
+        )
+    return "No comparable priced products were found."
+
+
 def _build_reason(
-    *, count: int, removed: int, strategy: PricingStrategy, confidence: PriceConfidence
+    *,
+    count: int,
+    removed: int,
+    strategy: PricingStrategy,
+    confidence: PriceConfidence,
+    filtering: FilterOutcome | None = None,
 ) -> str:
     """Build the human-readable pricing reason — the phase's 'explainable pricing' requirement."""
     parts = [f"Estimated from {count} comparable product(s) using the {strategy.value} strategy"]
+    described = _describe_filtering(filtering)
+    if described:
+        parts.append(described)
     if removed:
         parts.append(f"after removing {removed} price outlier(s)")
     parts.append(f"({confidence.value} confidence)")

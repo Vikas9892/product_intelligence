@@ -109,6 +109,8 @@ class RecommendationScorer:
         return RecommendationCandidate(
             product_id=candidate.product_id,
             similarity_score=similarity,
+            attribute_score=attribute_score,
+            tag_score=tag_score,
             quality_score=quality,
             final_score=final_score,
             reason=reason,

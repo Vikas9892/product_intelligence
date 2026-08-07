@@ -33,6 +33,7 @@ from app.metrics.metrics_registry import MetricsRegistry
 from app.models.price_estimate import PriceEstimate
 from app.models.search import HybridSearchResult
 from app.services.pricing.base_pricing_service import BasePricingService
+from app.services.pricing.comparable_filter import ComparableFilter
 from app.services.pricing.price_estimator import PriceEstimator
 from app.services.pricing.price_normalizer import PriceNormalizer
 from app.services.vectorstore.hybrid_search_service import HybridSearchService
@@ -49,6 +50,7 @@ class PricingEngine(BasePricingService):
         *,
         hybrid_search_service: HybridSearchService | None = None,
         normalizer: PriceNormalizer | None = None,
+        comparable_filter: ComparableFilter | None = None,
         estimator: PriceEstimator | None = None,
         top_k: int | None = None,
         reranking_enabled: bool | None = None,
@@ -58,6 +60,9 @@ class PricingEngine(BasePricingService):
             hybrid_search_service if hybrid_search_service is not None else HybridSearchService()
         )
         self._normalizer = normalizer if normalizer is not None else PriceNormalizer()
+        self._comparable_filter = (
+            comparable_filter if comparable_filter is not None else ComparableFilter()
+        )
         self._estimator = estimator if estimator is not None else PriceEstimator()
         self._top_k = top_k if top_k is not None else settings.pricing.top_k
         self._reranking_enabled = (
@@ -96,7 +101,7 @@ class PricingEngine(BasePricingService):
             raise
         except Exception as exc:
             raise PricingException("Failed to retrieve comparable products.") from exc
-        return self._estimate(results, start=start)
+        return self._estimate(results, start=start, category=category)
 
     async def estimate_for_product(self, product_id: UUID) -> PriceEstimate:
         """Estimate a fair price for an already-indexed product, by ID.
@@ -112,15 +117,30 @@ class PricingEngine(BasePricingService):
             results = await self._hybrid_search_service.search_by_product_id(
                 product_id, top_k=self._top_k
             )
+            # The subject's own category, read from its stored payload. Without
+            # it the category rule cannot apply, and this path is exactly where
+            # the reported defect showed up -- pricing an indexed product.
+            category = await self._category_of(product_id)
         except AppException:
             raise
         except Exception as exc:
             raise PricingException("Failed to retrieve comparable products.") from exc
-        return self._estimate(results, start=start)
+        return self._estimate(results, start=start, category=category)
 
-    def _estimate(self, results: list[HybridSearchResult], *, start: float) -> PriceEstimate:
+    async def _category_of(self, product_id: UUID) -> str | None:
+        """Return `product_id`'s stored category, or `None` if it has none."""
+        point = await self._hybrid_search_service.retrieve_metadata(product_id)
+        if point is None:
+            return None
+        category = point.get("category")
+        return category if isinstance(category, str) else None
+
+    def _estimate(
+        self, results: list[HybridSearchResult], *, start: float, category: str | None
+    ) -> PriceEstimate:
         comparables = self._normalizer.to_comparables(results)
-        estimate = self._estimator.estimate(comparables)
+        outcome = self._comparable_filter.apply(comparables, category=category)
+        estimate = self._estimator.estimate(outcome.kept, filtering=outcome)
         seconds = time.monotonic() - start
         self._metrics.record_pricing(
             seconds=seconds,

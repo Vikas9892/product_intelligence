@@ -4,6 +4,7 @@ Composes a fake `HybridSearchService` so the retrieve -> normalize ->
 estimate flow is tested without a real vector store or model.
 """
 
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -25,12 +26,19 @@ class _FakeHybridSearchService(HybridSearchService):
         by_id_results: list[HybridSearchResult] | None = None,
         search_error: Exception | None = None,
         by_id_error: Exception | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self._results = results if results is not None else []
         self._by_id_results = by_id_results if by_id_results is not None else []
         self._search_error = search_error
         self._by_id_error = by_id_error
+        #: The subject's own stored metadata, which pricing reads to learn
+        #: the category it should restrict comparables to.
+        self.metadata: dict[str, Any] | None = metadata
         self.calls: list[dict[str, object]] = []
+
+    async def retrieve_metadata(self, product_id: UUID) -> dict[str, Any] | None:
+        return self.metadata
 
     async def search(
         self,
@@ -64,6 +72,16 @@ def _priced(price: float, *, score: float = 0.9) -> HybridSearchResult:
         product_id=uuid4(),
         score=score,
         metadata={"price": price, "brand": "Nike"},
+        matched_modalities=[SearchModality.TEXT],
+    )
+
+
+def _result(*, price: float, score: float, category: str) -> HybridSearchResult:
+    """A priced comparable in a named category."""
+    return HybridSearchResult(
+        product_id=uuid4(),
+        score=score,
+        metadata={"price": price, "brand": "Nike", "category": category},
         matched_modalities=[SearchModality.TEXT],
     )
 
@@ -198,3 +216,48 @@ class TestEstimateForProduct:
 
         with pytest.raises(PricingException):
             await engine.estimate_for_product(uuid4())
+
+
+class TestComparableRelevance:
+    """The engine must price a product against its own market.
+
+    End-to-end regression for the reported estimate: a running shoe priced at
+    83.18 from 8 comparables including a desk lamp and two daypacks.
+    """
+
+    async def test_cross_category_comparables_are_excluded_for_an_indexed_product(self) -> None:
+        service = _FakeHybridSearchService(
+            by_id_results=[
+                _result(price=134.99, score=0.98, category="footwear"),
+                _result(price=119.99, score=0.86, category="footwear"),
+                _result(price=89.0, score=0.78, category="bags"),
+                _result(price=45.0, score=0.74, category="lighting"),
+                _result(price=24.5, score=0.70, category="kitchenware"),
+            ],
+            metadata={"category": "footwear"},
+        )
+        engine = _engine(service)
+
+        estimate = await engine.estimate_for_product(uuid4())
+
+        # Only the two footwear items inform the price.
+        assert estimate.comparable_count == 2
+        assert {round(c.price, 2) for c in estimate.comparables} == {134.99, 119.99}
+        # The estimate now sits in the footwear range, not dragged toward a lamp.
+        assert 119.99 <= estimate.estimated_price <= 134.99
+        # And the exclusion is auditable.
+        assert "3 from other categories" in estimate.reason
+
+    async def test_an_unlabelled_subject_still_gets_an_estimate(self) -> None:
+        service = _FakeHybridSearchService(
+            by_id_results=[
+                _result(price=100.0, score=0.9, category="footwear"),
+                _result(price=110.0, score=0.9, category="bags"),
+            ],
+            metadata={},
+        )
+        engine = _engine(service)
+
+        estimate = await engine.estimate_for_product(uuid4())
+
+        assert estimate.comparable_count == 2

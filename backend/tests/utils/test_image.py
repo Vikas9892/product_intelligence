@@ -11,6 +11,7 @@ from app.utils.image import (
     compute_aspect_ratio,
     compute_brightness,
     compute_dominant_color,
+    estimate_background_color,
     generate_processed_filename,
     normalize_color_mode,
     resize_preserving_aspect_ratio,
@@ -220,3 +221,87 @@ class TestClassifyResolution:
 
     def test_classifies_high_resolution(self) -> None:
         assert classify_resolution(2000, 2000) == "high_resolution"
+
+
+def _product_photo(subject: tuple[int, int, int], background: tuple[int, int, int]) -> Image.Image:
+    """A product photo: a subject centred on a plain backdrop.
+
+    The subject deliberately occupies a *minority* of the frame, as in real
+    product photography -- which is exactly the condition under which
+    whole-frame statistics report the backdrop instead of the product.
+    """
+    image = Image.new("RGB", (200, 200), background)
+    for y in range(70, 130):
+        for x in range(60, 140):
+            image.putpixel((x, y), subject)
+    return image
+
+
+class TestSubjectIsolation:
+    """Regression tests for attributes describing the backdrop, not the product.
+
+    Measured before the fix, every item in the demo catalog -- a black shoe, a
+    red mug, a blue shoe, a black backpack -- reported dominant colour
+    (238, 240, 244) and was tagged "white" and "bright". Colour and brightness
+    were properties of the studio background, never of the product.
+    """
+
+    def test_a_black_product_on_a_white_background_is_black(self) -> None:
+        photo = _product_photo(subject=(44, 46, 52), background=(238, 240, 244))
+
+        assert classify_color_name(compute_dominant_color(photo)) == "black"
+
+    def test_a_black_product_on_a_white_background_is_not_bright(self) -> None:
+        photo = _product_photo(subject=(44, 46, 52), background=(238, 240, 244))
+
+        assert classify_brightness(compute_brightness(photo)) == "dark"
+
+    def test_a_red_product_on_a_cream_background_is_red(self) -> None:
+        photo = _product_photo(subject=(176, 58, 46), background=(246, 243, 236))
+
+        assert classify_color_name(compute_dominant_color(photo)) == "red"
+
+    def test_the_backdrop_is_estimated_from_the_border(self) -> None:
+        photo = _product_photo(subject=(44, 46, 52), background=(238, 240, 244))
+
+        assert estimate_background_color(photo) == (238, 240, 244)
+
+    def test_a_solid_image_falls_back_to_whole_frame_statistics(self) -> None:
+        """No separable subject is an honest answer, not an error."""
+        solid = Image.new("RGB", (100, 100), (200, 30, 30))
+
+        assert compute_dominant_color(solid) == (200, 30, 30)
+
+    def test_a_subject_touching_one_edge_still_resolves(self) -> None:
+        """The median border estimate tolerates a subject bleeding off-frame."""
+        image = Image.new("RGB", (200, 200), (240, 240, 240))
+        for y in range(0, 120):
+            for x in range(0, 90):
+                image.putpixel((x, y), (20, 90, 200))
+
+        assert classify_color_name(compute_dominant_color(image)) == "blue"
+
+
+class TestChromaticColorNaming:
+    """Naming must judge hue separately from lightness.
+
+    Nearest-neighbour in raw RGB put a genuine blue (36, 82, 168) closer to
+    gray (12,180) than to blue (15,589), so real product colours were named
+    "gray" and "purple".
+    """
+
+    def test_a_mid_blue_is_blue_not_gray(self) -> None:
+        assert classify_color_name((36, 82, 168)) == "blue"
+
+    def test_a_dark_blue_is_blue_not_purple(self) -> None:
+        assert classify_color_name((24, 58, 122)) == "blue"
+
+    def test_a_brick_red_is_red_not_brown(self) -> None:
+        assert classify_color_name((176, 58, 46)) == "red"
+
+    def test_desaturated_mid_tones_are_still_gray(self) -> None:
+        assert classify_color_name((128, 128, 128)) == "gray"
+
+    def test_a_very_dark_saturated_color_reads_as_black(self) -> None:
+        """Hue is not perceptible at that lightness."""
+        assert classify_color_name((10, 4, 20)) == "black"

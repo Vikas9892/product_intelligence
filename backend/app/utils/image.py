@@ -8,6 +8,9 @@ transformations themselves as free functions makes each one directly
 unit-testable against an in-memory image, no disk or service required.
 """
 
+import colorsys
+import math
+from collections import Counter
 from pathlib import Path
 from typing import cast
 
@@ -82,6 +85,58 @@ def resize_preserving_aspect_ratio(image: Image.Image, *, max_dimension: int) ->
     return image.resize(new_size, Image.Resampling.LANCZOS)
 
 
+#: Color-naming thresholds, in HLS. Saturation below this carries no usable
+#: hue, so the color is achromatic (black/gray/white) regardless of channels.
+_ACHROMATIC_MAX_SATURATION = 0.15
+#: Lightness at or below this reads as black, whatever the hue.
+#:
+#: 0.20 is the conventional "blackish" boundary in color-naming systems, and
+#: it is the right one for photographed products specifically: a black object
+#: under studio lighting almost never measures near RGB 0. Charcoal readings
+#: in the 40-55 range are normal, and the demo catalog's black items land at
+#: (44, 46, 52) -- lightness 0.188. A boundary below that would name every
+#: real black product "gray", which is the same class of error as naming a
+#: blue one "gray".
+_BLACK_MAX_LIGHTNESS = 0.20
+#: Lightness at or above this reads as white when achromatic.
+_WHITE_MIN_LIGHTNESS = 0.85
+#: Hue (degrees) of each chromatic name. Derived from `_NAMED_COLORS` rather
+#: than invented: these are the hues of those same RGB references.
+_CHROMATIC_HUES: dict[str, float] = {
+    "red": 0.0,
+    "orange": 39.0,
+    "yellow": 60.0,
+    "green": 120.0,
+    "blue": 240.0,
+    "purple": 300.0,
+    "pink": 350.0,
+    "brown": 25.0,
+}
+
+#: Pixel-statistics tuning. Grouped here so the values that decide
+#: "background vs subject" are visible in one place rather than buried inline.
+#:
+#: Analysis runs on a 50x50 thumbnail -- 2,500 pixels is ample for a dominant
+#: color and keeps the per-pixel loops cheap.
+_ANALYSIS_SIZE = 50
+#: Fraction of the thumbnail treated as border when estimating the backdrop.
+#: 0.10 of 50px is a 5px ring, enough to be robust to a subject touching one
+#: edge without reaching into the middle of the frame.
+_BORDER_FRACTION = 0.10
+#: RGB Euclidean distance beyond which a pixel counts as subject, not backdrop.
+#: Chosen from measured separation rather than tuned to one run: across the
+#: demo catalog the *closest* genuine subject color sits ~180 from its own
+#: backdrop (black shoe (44,46,52) against (238,240,244)), while resampling
+#: and anti-aliasing around a subject edge stay within ~25. 60 sits clear of
+#: the noise by more than 2x and clear of any real subject by 3x.
+_BACKGROUND_DISTANCE = 60.0
+#: If less of the frame than this survives background removal, treat the image
+#: as having no separable subject and fall back to whole-frame statistics.
+#: 2% of a 50x50 thumbnail is 50 pixels -- below that a "dominant color" is
+#: being read off noise.
+_MIN_SUBJECT_FRACTION = 0.02
+
+
 #: A small, fixed set of reference colors — Phase 7's dominant-color
 #: classification picks whichever of these is nearest (by squared
 #: Euclidean RGB distance) to an image's actual dominant color, the same
@@ -102,36 +157,167 @@ _NAMED_COLORS: dict[str, tuple[int, int, int]] = {
 }
 
 
-def compute_dominant_color(image: Image.Image) -> tuple[int, int, int]:
-    """Return the single most representative RGB color in `image`.
+def _thumbnail(image: Image.Image) -> Image.Image:
+    """Downsample to a small RGB thumbnail for pixel statistics.
 
-    Downsamples to a small (50x50) thumbnail first — the dominant color
-    of a product photo doesn't change based on resolution, and scanning
-    every pixel of a full-size image for this would be needless work.
+    The dominant color of a product photo does not change with resolution,
+    and scanning every pixel of a full-size image for this would be needless
+    work.
     """
-    thumbnail = image.convert("RGB").resize((50, 50), Image.Resampling.LANCZOS)
-    color_counts = thumbnail.getcolors(maxcolors=thumbnail.width * thumbnail.height)
-    # `maxcolors` above covers every pixel in the thumbnail, so `getcolors`
-    # can never actually return `None` here — this narrows its `Optional`
-    # return type rather than handling a case that can't happen.
-    assert color_counts is not None
-    _, dominant_rgb = max(color_counts, key=lambda item: item[0])
-    # `thumbnail` was converted to "RGB" above, so Pillow's own (mode-
-    # dependent) `getcolors` stub is imprecise here — at runtime this is
-    # always a 3-tuple, never the single-int form "L"/"1"-mode images use.
-    return cast(tuple[int, int, int], dominant_rgb)
+    return image.convert("RGB").resize((_ANALYSIS_SIZE, _ANALYSIS_SIZE), Image.Resampling.LANCZOS)
+
+
+def estimate_background_color(image: Image.Image) -> tuple[int, int, int]:
+    """Estimate the backdrop color from the image's outer border.
+
+    Product photography puts the subject in the middle against a plain
+    backdrop, so the border ring is background with high reliability. The
+    *median* of those pixels is used rather than the mean, so a subject that
+    happens to touch one edge shifts the estimate far less than it would an
+    average.
+    """
+    thumbnail = _thumbnail(image)
+    pixels = thumbnail.load()
+    assert pixels is not None
+    size = thumbnail.width
+    margin = max(1, round(size * _BORDER_FRACTION))
+
+    border: list[tuple[int, int, int]] = []
+    for y in range(size):
+        in_horizontal_band = y < margin or y >= size - margin
+        for x in range(size):
+            if in_horizontal_band or x < margin or x >= size - margin:
+                border.append(cast(tuple[int, int, int], pixels[x, y]))
+
+    channels = tuple(sorted(channel[index] for channel in border) for index in range(3))
+    middle = len(border) // 2
+    return cast(tuple[int, int, int], tuple(channel[middle] for channel in channels))
+
+
+def _subject_pixels(image: Image.Image) -> list[tuple[int, int, int]]:
+    """Return the pixels that are not part of the backdrop.
+
+    Everything within `_BACKGROUND_DISTANCE` of the estimated background color
+    is dropped. What remains is the subject -- which is what every caller
+    actually wants to describe.
+
+    Returns an empty list when almost nothing survives; callers fall back to
+    whole-frame statistics, because an image that is background nearly
+    everywhere genuinely has no separable subject to describe.
+    """
+    background = estimate_background_color(image)
+    thumbnail = _thumbnail(image)
+    pixels = thumbnail.load()
+    assert pixels is not None
+
+    subject = [
+        rgb
+        for y in range(thumbnail.height)
+        for x in range(thumbnail.width)
+        if _distance(rgb := cast(tuple[int, int, int], pixels[x, y]), background)
+        > _BACKGROUND_DISTANCE
+    ]
+    total = thumbnail.width * thumbnail.height
+    return subject if len(subject) >= total * _MIN_SUBJECT_FRACTION else []
+
+
+def _distance(left: tuple[int, int, int], right: tuple[int, int, int]) -> float:
+    """Euclidean distance between two RGB triples."""
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(left, right, strict=True)))
+
+
+def compute_dominant_color(image: Image.Image) -> tuple[int, int, int]:
+    """Return the dominant RGB color of the image's *subject*.
+
+    Background pixels are excluded first. Without that, this returned the
+    backdrop for essentially every product photo: measured against the demo
+    catalog, a black shoe, a red mug, a blue shoe and a black backpack all
+    reported (238, 240, 244) -- the studio-white background -- and were
+    classified "white". Color was therefore never a property of the product.
+
+    A white element *on* a white background is genuinely indistinguishable
+    without real segmentation, so it is treated as background here. That is a
+    known and accepted limit of a threshold-based approach.
+    """
+    subject = _subject_pixels(image)
+    if not subject:
+        # No separable subject: fall back to whole-frame, which is the honest
+        # answer for a solid or near-solid image.
+        thumbnail = _thumbnail(image)
+        pixels = thumbnail.load()
+        assert pixels is not None
+        subject = [
+            cast(tuple[int, int, int], pixels[x, y])
+            for y in range(thumbnail.height)
+            for x in range(thumbnail.width)
+        ]
+
+    counts = Counter(subject)
+    return counts.most_common(1)[0][0]
 
 
 def classify_color_name(rgb: tuple[int, int, int]) -> str:
-    """Return the closest named color (from a small, fixed palette) to `rgb`."""
-    return min(
-        _NAMED_COLORS,
-        key=lambda name: sum((a - b) ** 2 for a, b in zip(rgb, _NAMED_COLORS[name], strict=True)),
-    )
+    """Return the nearest named color, judging hue separately from lightness.
+
+    Nearest-neighbour in raw RGB looks reasonable and is not: the achromatic
+    entries (black, gray, white) sit in the middle of the RGB cube and so
+    attract saturated colors that are nowhere near them. Measured on the demo
+    catalog, a genuine blue (36, 82, 168) came out "gray" -- it is 12,180 from
+    gray but 15,589 from blue -- and a dark blue (24, 58, 122) came out
+    "purple". Naming a blue product "gray" is as wrong to a user as the
+    background bias this function sits downstream of.
+
+    So the decision is split the way human color naming works:
+
+    * Low saturation means achromatic. Only black/gray/white are candidates,
+      chosen by lightness -- hue is meaningless noise at that saturation.
+    * Otherwise the color is chromatic, and hue decides. Distance is measured
+      as circular hue difference, so red at 0 and red at 359 are adjacent.
+      Very dark chromatic pixels still resolve to black, because a hue is not
+      perceptible below that lightness.
+
+    Deterministic and dependency-free, in the same spirit as the rest of the
+    catalog-intelligence heuristics.
+    """
+    red, green, blue = (channel / 255 for channel in rgb)
+    hue_turns, lightness, saturation = colorsys.rgb_to_hls(red, green, blue)
+
+    if saturation < _ACHROMATIC_MAX_SATURATION:
+        if lightness <= _BLACK_MAX_LIGHTNESS:
+            return "black"
+        return "white" if lightness >= _WHITE_MIN_LIGHTNESS else "gray"
+
+    # Chromatic, but too dark for any hue to read as that color.
+    if lightness <= _BLACK_MAX_LIGHTNESS:
+        return "black"
+
+    hue = hue_turns * 360
+    return min(_CHROMATIC_HUES, key=lambda name: _hue_distance(hue, _CHROMATIC_HUES[name]))
+
+
+def _hue_distance(left: float, right: float) -> float:
+    """Shortest distance between two hues on the 0-360 degree circle."""
+    delta = abs(left - right) % 360
+    return min(delta, 360 - delta)
 
 
 def compute_brightness(image: Image.Image) -> float:
-    """Return `image`'s mean pixel brightness, normalized to `[0, 1]`."""
+    """Return the mean brightness of the image's *subject*, normalized to `[0, 1]`.
+
+    Subject-scoped for the same reason as `compute_dominant_color`: averaged
+    over the whole frame, a dark product on a studio-white background reads as
+    "bright", which describes the backdrop rather than the product. Every item
+    in the demo catalog measured 0.75-0.85 and was tagged "bright", including
+    two black ones.
+
+    Falls back to the whole frame when no subject separates out.
+    """
+    subject = _subject_pixels(image)
+    if subject:
+        # Rec. 601 luma, matching Pillow's own "L" conversion.
+        total = sum(0.299 * r + 0.587 * g + 0.114 * b for r, g, b in subject)
+        return total / len(subject) / 255
+
     grayscale = image.convert("L")
     histogram = grayscale.histogram()
     total_pixels = grayscale.width * grayscale.height

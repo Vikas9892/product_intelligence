@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { DecisionTrace } from "@/features/explanations/decision-trace";
@@ -16,7 +16,7 @@ const REAL_TRACE: ExplanationResponse = {
   subject_id: "082c6d18-9dd3-4c28-bb98-72a3a67fe120",
   summary:
     "Recommended because it shares: the same brand, the same category, matching color, material, gender, style.",
-  confidence: 0.9693148348893941,
+  confidence: 0.51,
   reasons: [
     { code: "shared_brand", description: "the same brand", weight: null },
     { code: "shared_category", description: "the same category", weight: null },
@@ -27,11 +27,15 @@ const REAL_TRACE: ExplanationResponse = {
     },
   ],
   breakdown: {
+    // A real post-fix trace: all four terms of the weighted sum, at their
+    // configured weights. Contributions add up to the total.
     components: [
-      { name: "similarity", value: 0.999773529, weight: 1.0, contribution: 0.999773529 },
-      { name: "quality", value: 0.6943939393939393, weight: 1.0, contribution: 0.6943939393939393 },
+      { name: "similarity", value: 0.57, weight: 0.55, contribution: 0.3135 },
+      { name: "attribute_match", value: 0.4, weight: 0.2, contribution: 0.08 },
+      { name: "tag_match", value: 0.35, weight: 0.15, contribution: 0.0525 },
+      { name: "quality", value: 0.64, weight: 0.1, contribution: 0.064 },
     ],
-    total: 0.9693148348893941,
+    total: 0.51,
   },
   created_at: "2026-07-31T03:13:22.570813Z",
 };
@@ -49,7 +53,8 @@ describe("DecisionTrace", () => {
     renderTrace(REAL_TRACE);
     expect(screen.getByText(/Recommended because it shares/)).toBeInTheDocument();
     // ConfidenceBadge shows level + score.
-    expect(screen.getByText(/High · 0\.97/)).toBeInTheDocument();
+    // ConfidenceBadge shows level + score.
+    expect(screen.getByText(/Medium · 0\.51/)).toBeInTheDocument();
   });
 
   it("lists every reason code the backend returned", () => {
@@ -65,18 +70,19 @@ describe("DecisionTrace", () => {
     expect(screen.getByText("similarity")).toBeInTheDocument();
     expect(screen.getByText("quality")).toBeInTheDocument();
     expect(
-      screen.getByText(/value 1\.00 · weight 1\.00 ·\s*contribution 1\.00/),
+      screen.getByText(/value 0\.57 · weight 0\.55 ·\s*contribution 0\.31/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/value 0\.69 · weight 1\.00 ·\s*contribution 0\.69/),
+      screen.getByText(/value 0\.64 · weight 0\.10 ·\s*contribution 0\.06/),
     ).toBeInTheDocument();
   });
 
-  it("presents the total as the backend's final score, not a sum of contributions", () => {
+  it("presents the backend's reported total as the final score", () => {
     renderTrace(REAL_TRACE);
-    // 0.97, the reported total — not 1.69, which is what summing would give.
-    expect(screen.getByText("Final 0.97")).toBeInTheDocument();
-    expect(screen.queryByText(/1\.69/)).not.toBeInTheDocument();
+    // The header still shows the backend's own total verbatim; it is never
+    // recomputed client-side. What changed is that the components now visibly
+    // add up to it (see the "ConfidenceBreakdown aggregation" suite below).
+    expect(screen.getByText("Final 0.51")).toBeInTheDocument();
   });
 
   it("falls back to the raw code when a reason code has no friendly label", () => {
@@ -94,5 +100,58 @@ describe("DecisionTrace", () => {
     renderTrace({ ...REAL_TRACE, breakdown: null, confidence: null });
     expect(screen.queryByText("Score components")).not.toBeInTheDocument();
     expect(screen.queryByText(/Final /)).not.toBeInTheDocument();
+  });
+});
+
+describe("ConfidenceBreakdown aggregation", () => {
+  it("shows every component with its real weight, not a hardcoded 1.00", () => {
+    renderTrace(REAL_TRACE);
+
+    // All four terms of the weighted sum are published.
+    expect(screen.getByText("similarity")).toBeInTheDocument();
+    expect(screen.getByText("attribute_match")).toBeInTheDocument();
+    expect(screen.getByText("tag_match")).toBeInTheDocument();
+    expect(screen.getByText("quality")).toBeInTheDocument();
+
+    // The defect was every component rendering "weight 1.00".
+    expect(screen.getByText(/weight 0\.55/)).toBeInTheDocument();
+    expect(screen.getByText(/weight 0\.10/)).toBeInTheDocument();
+  });
+
+  it("shows the aggregation step so the arithmetic closes", () => {
+    renderTrace(REAL_TRACE);
+
+    const aggregation = screen.getByLabelText("How the components aggregate to the final score");
+    expect(within(aggregation).getByText("Sum of contributions")).toBeInTheDocument();
+    // 0.3135 + 0.08 + 0.0525 + 0.064 = 0.51 -- and it is displayed.
+    expect(within(aggregation).getAllByText("0.51").length).toBeGreaterThan(0);
+    expect(within(aggregation).getByText("Final score")).toBeInTheDocument();
+  });
+
+  it("names a post-weighting adjustment as its own line item", () => {
+    renderTrace({
+      ...REAL_TRACE,
+      breakdown: {
+        components: [
+          { name: "similarity", value: 1.0, weight: 0.55, contribution: 0.55 },
+          { name: "quality", value: 1.0, weight: 0.1, contribution: 0.1 },
+        ],
+        // Deliberately below the sum: a clamp or penalty was applied.
+        total: 0.5,
+      },
+    });
+
+    const aggregation = screen.getByLabelText("How the components aggregate to the final score");
+    expect(within(aggregation).getByText("Adjustment applied after weighting")).toBeInTheDocument();
+    expect(within(aggregation).getByText(/−0\.15/)).toBeInTheDocument();
+  });
+
+  it("omits the adjustment line when the contributions already close", () => {
+    renderTrace(REAL_TRACE);
+
+    const aggregation = screen.getByLabelText("How the components aggregate to the final score");
+    expect(
+      within(aggregation).queryByText("Adjustment applied after weighting"),
+    ).not.toBeInTheDocument();
   });
 });

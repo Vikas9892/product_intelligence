@@ -49,11 +49,19 @@ export function ReasonList({ explanation }: { explanation: ExplanationResponse }
  * The weighted components behind a decision's score.
  *
  * Each component is rendered exactly as the backend reports it — `value`,
- * `weight`, and `contribution` — and `total` is shown as the backend's final
- * score, **not** as a sum of the contributions. That distinction is deliberate:
- * in real responses the contributions do not add up to the total (the scorer
- * applies its own configured weighting internally), so presenting them as a sum
- * would be arithmetic the backend never claimed.
+ * `weight`, and `contribution` — followed by the **aggregation step**: the sum
+ * of the contributions, and the final score they produce.
+ *
+ * Showing the sum is the point. A reader must be able to follow the arithmetic
+ * from components through to the final number; a panel whose figures visibly
+ * do not close undermines the explainability it exists to provide. (Recommendation
+ * traces previously published two of four components at a hardcoded weight of
+ * 1.0, so a real response read "similarity 0.57, quality 0.64" against a final
+ * of 0.51 — see `RecommendationExplainer`.)
+ *
+ * Where the sum does not equal the total, the difference is surfaced as its own
+ * `Adjustment` line rather than quietly ignored: a clamp, cap or penalty applied
+ * after the weighted sum is part of the reasoning and should be visible as such.
  */
 export function ConfidenceBreakdown({ explanation }: { explanation: ExplanationResponse }) {
   const breakdown = explanation.breakdown;
@@ -61,6 +69,12 @@ export function ConfidenceBreakdown({ explanation }: { explanation: ExplanationR
   // default), so treat a missing list the same as an empty one.
   const components = breakdown?.components ?? [];
   if (!breakdown || components.length === 0) return null;
+
+  const summed = components.reduce((running, component) => running + component.contribution, 0);
+  // Tolerance covers float noise only. Anything larger is a real post-sum
+  // adjustment (a clamp or penalty) and is shown as its own line.
+  const residual = breakdown.total - summed;
+  const hasAdjustment = Math.abs(residual) > 0.0005;
 
   return (
     <div className="space-y-3">
@@ -80,9 +94,9 @@ export function ConfidenceBreakdown({ explanation }: { explanation: ExplanationR
               </button>
             </TooltipTrigger>
             <TooltipContent className="max-w-xs">
-              Each component&apos;s value, weight, and contribution as reported by the backend. The
-              final score is the scorer&apos;s own output — it is not the sum of these
-              contributions.
+              Each component&apos;s value, weight, and contribution as reported by the backend.
+              Contribution is value × weight; the contributions add up to the final score. Any
+              difference is shown separately as an adjustment.
             </TooltipContent>
           </Tooltip>
         </div>
@@ -108,6 +122,30 @@ export function ConfidenceBreakdown({ explanation }: { explanation: ExplanationR
           </li>
         ))}
       </ul>
+
+      {/* The aggregation step, so the arithmetic visibly closes. */}
+      <dl
+        className="border-border/60 space-y-1 border-t pt-2.5 text-xs"
+        aria-label="How the components aggregate to the final score"
+      >
+        <div className="flex items-baseline justify-between gap-2">
+          <dt className="text-muted-foreground">Sum of contributions</dt>
+          <dd className="tabular-nums">{formatScore(summed)}</dd>
+        </div>
+        {hasAdjustment && (
+          <div className="flex items-baseline justify-between gap-2">
+            <dt className="text-muted-foreground">Adjustment applied after weighting</dt>
+            <dd className="tabular-nums">
+              {residual > 0 ? "+" : "−"}
+              {formatScore(Math.abs(residual))}
+            </dd>
+          </div>
+        )}
+        <div className="flex items-baseline justify-between gap-2 font-medium">
+          <dt>Final score</dt>
+          <dd className="tabular-nums">{formatScore(breakdown.total)}</dd>
+        </div>
+      </dl>
     </div>
   );
 }

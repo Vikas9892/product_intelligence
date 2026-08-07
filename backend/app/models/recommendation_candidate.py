@@ -30,6 +30,13 @@ class RecommendationCandidate(BaseModel):
 
     product_id: UUID
     similarity_score: float = Field(ge=0, le=1)
+    #: Attribute-overlap component. Carried explicitly (rather than left
+    #: implicit inside `final_score`) so `RecommendationExplainer` can report
+    #: every term of the weighted sum -- see that class for why omitting these
+    #: made the published breakdown fail to add up.
+    attribute_score: float = Field(default=0.0, ge=0, le=1)
+    #: Tag-overlap component. Same reasoning as `attribute_score`.
+    tag_score: float = Field(default=0.0, ge=0, le=1)
     quality_score: float = Field(ge=0, le=1)
     final_score: float = Field(ge=0, le=1)
     reason: RecommendationReason

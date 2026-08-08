@@ -116,6 +116,19 @@ class SearchService:
         neighbors = await self._vector_store.search_image(
             query.vector, top_k=query.top_k, filters=query.filters
         )
+        if not neighbors and filters is not None and _has_facets(filters):
+            # A filtered search returning nothing is the signature of a facet
+            # mismatch, and it is invisible in a results=0 line. Naming the
+            # applied facets makes this class of failure diagnosable from logs
+            # rather than only from the UI.
+            logger.warning(
+                "Image search returned no results with facets applied: "
+                "brand=%r, category=%r, min_price=%r, max_price=%r",
+                filters.brand,
+                filters.category,
+                filters.min_price,
+                filters.max_price,
+            )
         logger.info("Image search completed: results=%d", len(neighbors))
 
         return SearchResult(query_model_name=query.model_name, neighbors=neighbors)
@@ -123,3 +136,11 @@ class SearchService:
     async def retrieve_by_id(self, product_id: UUID) -> StoredPoint | None:
         """Fetch `product_id`'s own stored image vector + metadata, or `None` if not indexed."""
         return await self._vector_store.retrieve_image(product_id)
+
+
+def _has_facets(filters: ProductFilters) -> bool:
+    """Whether any metadata facet was actually applied."""
+    return any(
+        value is not None
+        for value in (filters.brand, filters.category, filters.min_price, filters.max_price)
+    )

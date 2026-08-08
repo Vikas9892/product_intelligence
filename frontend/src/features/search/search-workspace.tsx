@@ -150,6 +150,20 @@ export function SearchWorkspace() {
   }
 
   const results = search.data?.data.results;
+  // Which facets the *executed* search actually applied — not the current draft,
+  // which the user may have edited since. A zero-result screen must say whether
+  // the filter or the catalog produced it; free-text facets make that ambiguity
+  // easy to hit and give no other signal about what is searchable.
+  const appliedFacets = useMemo(() => {
+    const applied: string[] = [];
+    if (executed?.draft.brand.trim()) applied.push(`brand "${executed.draft.brand.trim()}"`);
+    if (executed?.draft.category.trim())
+      applied.push(`category "${executed.draft.category.trim()}"`);
+    if (executed?.draft.minPrice) applied.push(`min price ${executed.draft.minPrice}`);
+    if (executed?.draft.maxPrice) applied.push(`max price ${executed.draft.maxPrice}`);
+    return applied;
+  }, [executed]);
+
   const sorted = useMemo(
     () => sortResults(results ?? [], sortKey, sortDir),
     [results, sortKey, sortDir],
@@ -196,7 +210,11 @@ export function SearchWorkspace() {
             <EmptyState
               icon={SearchX}
               title="No matching products"
-              description="Nothing scored against this query. Try broader wording or clear some filters."
+              description={
+                appliedFacets.length > 0
+                  ? `Nothing matched with ${appliedFacets.join(", ")} applied. Clear a filter to widen the search, or try broader wording.`
+                  : "Nothing scored against this query. Try broader wording."
+              }
             />
           ) : (
             <div className="space-y-4">

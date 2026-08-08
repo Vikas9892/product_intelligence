@@ -115,7 +115,7 @@ function ImagePlaceholder({ label }: { label: string }) {
  *
  * The left column is fully known — it is what the user just submitted. The
  * right column is the backend's matched product, whose descriptive fields are
- * resolved best-effort through search (the backend has no get-product
+ * resolved through the product lookup endpoint (the decision carries ids
  * endpoint); when that lookup finds nothing, the column says so instead of
  * rendering blanks that could read as real values.
  *
@@ -190,7 +190,7 @@ export function ComparisonView({
           {!matchedMeta ? (
             <p className="text-muted-foreground text-sm">
               {metadataLookupAttempted
-                ? "The matched product's stored fields could not be resolved — the backend has no get-product endpoint, and it did not appear in a search for the submitted text. Only its id and similarity signals are available."
+                ? "The matched product could not be resolved. It may no longer be indexed. Only its id and similarity signals are available."
                 : "Resolving the matched product's stored fields…"}
             </p>
           ) : (

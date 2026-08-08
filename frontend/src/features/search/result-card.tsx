@@ -18,7 +18,7 @@ import { ModalityBadges } from "./modality-badges";
  * Every value shown comes from the backend response: `score` is the fused
  * relevance the search endpoint returned, `matched_modalities` is its retrieval
  * provenance, and the descriptive fields come from the result's Qdrant metadata
- * payload (the backend exposes no get-product endpoint). Nothing is derived or
+ * payload, so no extra lookup is needed here. Nothing is derived or
  * estimated here.
  */
 export function ResultCard({

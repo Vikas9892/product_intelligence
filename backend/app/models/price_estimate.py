@@ -16,7 +16,7 @@ caller can tell "no basis to price this" apart from "priced at zero"
 
 from pydantic import BaseModel, Field
 
-from app.core.constants import PricingStrategy
+from app.core.constants import PriceStatus, PricingStrategy
 from app.models.comparable_product import ComparableProduct
 from app.models.price_confidence import PriceConfidence
 
@@ -24,7 +24,17 @@ from app.models.price_confidence import PriceConfidence
 class PriceEstimate(BaseModel):
     """A fair-market price estimate, its confidence, and the comparables behind it."""
 
-    estimated_price: float = Field(ge=0)
+    #: The estimate, or `None` when no estimate was made.
+    #:
+    #: Absence is modelled as `None`, never as `0.0`. Zero is a *price* -- a
+    #: reader seeing "0.00" concludes the product is free or the estimator
+    #: crashed, long before reaching the paragraph that explains otherwise.
+    #: "We declined to estimate" and "we estimate zero" are different claims
+    #: and must not share a representation.
+    estimated_price: float | None = Field(default=None, ge=0)
+    #: Whether an estimate was produced at all. `status` is the discriminator:
+    #: `confidence` is only meaningful when `status is ESTIMATED`.
+    status: PriceStatus = PriceStatus.ESTIMATED
     confidence: PriceConfidence
     confidence_score: float = Field(ge=0, le=1)
     strategy: PricingStrategy

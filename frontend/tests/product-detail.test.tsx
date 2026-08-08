@@ -39,15 +39,27 @@ describe("MetadataCard", () => {
     expect(screen.getByText("Lightweight")).toBeInTheDocument();
   });
 
-  it("explains the missing get-product endpoint when metadata is absent", () => {
+  it("no longer apologises for a get-product endpoint that now exists", () => {
+    // The endpoint was built; the apology outlived it. A stale limitation
+    // notice tells a reader the system is less capable than it is.
     render(<MetadataCard meta={null} />);
-    expect(screen.getByText(/no get-product endpoint/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no get-product endpoint/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/No details are recorded/i)).toBeInTheDocument();
+  });
+
+  it("distinguishes loading from a failed load", () => {
+    const { rerender } = render(<MetadataCard meta={null} isPending />);
+    expect(screen.getByText(/Loading this product/i)).toBeInTheDocument();
+
+    rerender(<MetadataCard meta={null} isError />);
+    expect(screen.getByText(/could not be loaded/i)).toBeInTheDocument();
   });
 });
 
 describe("PricingCard", () => {
   it("renders the estimate and strategy", async () => {
     mockGetPricing.mockResolvedValue({
+      status: "estimated",
       estimated_price: 1899.5,
       confidence: "medium",
       confidence_score: 0.62,

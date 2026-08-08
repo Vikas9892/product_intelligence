@@ -15,11 +15,22 @@ function Field({ label, value }: { label: string; value?: string }) {
 }
 
 /**
- * Product metadata and AI-enriched attributes, sourced from the search-result
- * payload. On direct navigation (no seeded metadata) it explains the backend's
- * lack of a get-product endpoint rather than showing blanks.
+ * Product metadata and AI-enriched attributes, from `GET /products/{id}`.
+ *
+ * This card used to explain that the backend had no get-product endpoint. It
+ * has one, so the explanation is gone and the card shows the product. The
+ * remaining empty states are real and distinct: still loading, and could not
+ * be loaded.
  */
-export function MetadataCard({ meta }: { meta: ProductMeta | null }) {
+export function MetadataCard({
+  meta,
+  isPending = false,
+  isError = false,
+}: {
+  meta: ProductMeta | null;
+  isPending?: boolean;
+  isError?: boolean;
+}) {
   if (!meta) {
     return (
       <Card>
@@ -28,8 +39,11 @@ export function MetadataCard({ meta }: { meta: ProductMeta | null }) {
           <CardDescription>Product metadata</CardDescription>
         </CardHeader>
         <CardContent className="text-muted-foreground text-sm">
-          The backend exposes no get-product endpoint, so a product&apos;s own metadata is only
-          available when you open it from the search results.
+          {isPending
+            ? "Loading this product's details…"
+            : isError
+              ? "This product could not be loaded. It may not be indexed."
+              : "No details are recorded for this product."}
         </CardContent>
       </Card>
     );

@@ -26,7 +26,9 @@ function asLevel(confidence: string): ConfidenceLevel {
  */
 export function EstimateSummary({ result }: { result: PricingResponse }) {
   const spread = computeSpread(result.comparables ?? [], result.estimated_price);
-  const noComparables = (result.comparables?.length ?? 0) === 0;
+  // Branch on the status the API reports, not on a sentinel value: zero and an
+  // empty comparables list are both legitimate in other states.
+  const noEstimate = result.status === "no_estimate" || result.estimated_price === null;
 
   return (
     <Card>
@@ -37,15 +39,25 @@ export function EstimateSummary({ result }: { result: PricingResponse }) {
       <CardContent className="space-y-5">
         <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
           <div>
-            <p className="text-4xl font-semibold tabular-nums">
-              {formatPrice(result.estimated_price)}
-            </p>
-            {noComparables ? (
-              <p className="text-muted-foreground mt-1 text-sm">
-                The backend found nothing priced to compare against, so it returned 0.00 at low
-                confidence — this is not a real valuation.
+            {/*
+              An em dash, never "0.00". A numeral in this slot reads as a price,
+              so a refusal looked like a free product or a crashed estimator.
+            */}
+            {noEstimate ? (
+              <>
+                <p
+                  className="text-muted-foreground text-4xl font-semibold"
+                  aria-label="No price estimate"
+                >
+                  —
+                </p>
+                <p className="mt-1 text-sm font-medium">Not enough data to estimate a price</p>
+              </>
+            ) : (
+              <p className="text-4xl font-semibold tabular-nums">
+                {formatPrice(result.estimated_price ?? 0)}
               </p>
-            ) : null}
+            )}
           </div>
 
           <div className="space-y-1">

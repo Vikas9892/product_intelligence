@@ -148,11 +148,14 @@ class PricingEngine(BasePricingService):
             confidence_score=estimate.confidence_score,
         )
         logger.info(
-            "Price estimate complete: retrieved=%d, priced=%d, price=%.2f, "
+            # `%s` on a preformatted value, not `%.2f`: the price is `None`
+            # when no estimate was made, and a numeric format would raise.
+            "Price estimate complete: retrieved=%d, priced=%d, status=%s, price=%s, "
             "confidence=%s, processing_time=%.4fs",
             len(results),
             estimate.comparable_count,
-            estimate.estimated_price,
+            estimate.status.value,
+            "-" if estimate.estimated_price is None else f"{estimate.estimated_price:.2f}",
             estimate.confidence.value,
             seconds,
         )

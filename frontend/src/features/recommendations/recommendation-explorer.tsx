@@ -105,7 +105,7 @@ function ProductPicker({
  *
  * Recommendations come from `GET /products/{id}/recommendations`, which returns
  * ids plus a `reason` object and the backend's own `explanation`. Product names
- * are resolved best-effort through search, since no get-product endpoint
+ * are resolved through the product lookup endpoint, since the payload
  * exists; unresolved entries say so rather than showing a blank.
  */
 export function RecommendationExplorer() {

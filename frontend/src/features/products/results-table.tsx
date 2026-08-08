@@ -9,7 +9,7 @@ import { formatPrice } from "@/lib/format";
 
 /**
  * Search results as a table. Descriptive fields come from the result's Qdrant
- * metadata payload (there is no get-product endpoint). Rows open the product
+ * metadata payload, so no extra lookup is needed here. Rows open the product
  * detail page.
  */
 export function ResultsTable({

@@ -17,6 +17,7 @@ application actually has. Services that would only decorate the diagram are name
 - [Network boundaries](#network-boundaries)
 - [Deployment topology](#deployment-topology)
 - [Decision summary](#decision-summary)
+- [Why pricing and recommendations enforce category differently](#why-pricing-and-recommendations-enforce-category-differently)
 - [Scaling](#scaling)
 - [Observability](#observability)
 - [Backups and failure modes](#backups-and-failure-modes)
@@ -325,6 +326,39 @@ what makes "the thing we tested is the thing we shipped" true rather than aspira
 | 4 | Qdrant | **Self-hosted on ECS Fargate + EBS**, private subnet | [ADR-004](./ADR-004-qdrant.md) |
 | 5 | Model delivery | **Bake models into the image** | [ADR-005](./ADR-005-model-delivery.md) |
 | 6 | Networking | 2 AZs, single NAT, ALB + CloudFront, SSM/Secrets | [SECURITY.md](./SECURITY.md) |
+
+---
+
+## Why pricing and recommendations enforce category differently
+
+Pricing restricts comparables to the subject's own category, strictly. Recommendations
+match across categories, and the results are good — a card can legitimately show "same
+category" struck through and still be a useful suggestion.
+
+That asymmetry is deliberate, and worth being able to defend.
+
+**A recommendation is a suggestion; a price is a factual claim.** "You might also like
+this" is allowed to be loose — a user who disagrees ignores the card, and a cross-category
+suggestion is sometimes exactly right (a running shoe beside a gym bag). "This is worth
+₹7,386" asserts something about the market. A number averaged from a desk lamp is not a
+weaker suggestion; it is a wrong fact, and it looks equally authoritative on the page.
+
+**The cost of a false positive differs by an order of magnitude.** An irrelevant
+recommendation costs a user one glance. An irrelevant comparable silently moves a
+valuation and gives no signal that it did — which is precisely what the reported
+83.18 estimate was.
+
+**Similarity cannot substitute for category in the pricing case.** Measured on the demo
+catalog, cross-category items score 0.68–0.80 while a legitimate same-category comparable
+scores 0.86. No similarity floor separates them: any threshold high enough to exclude a
+lamp at 0.80 also discards real footwear. Embedding similarity answers "looks and reads
+alike", which is not the question "is priced by the same market". Recommendations *want*
+that looser notion; pricing cannot use it.
+
+The consequence is accepted rather than worked around: when a category has too few
+members, pricing declines to estimate instead of relaxing the rule. That refusal is the
+correct behaviour, and the API models it as `status: "no_estimate"` with a null price —
+never `0.0`, which would read as a valuation of zero.
 
 ---
 

@@ -22,7 +22,7 @@ export type ProductResolution = {
  * duplicate candidates both do. This resolves those ids through
  * `POST /products/batch`.
  *
- * It previously could not. With no get-product endpoint, the only route to a
+ * It previously could not. Before the lookup endpoint existed, the only route to a
  * product's stored fields was the *search* endpoint, so this ran a text search
  * and kept whichever requested ids happened to appear in the results. Ids the
  * search did not surface had no entry, and the UI rendered them as "Unresolved

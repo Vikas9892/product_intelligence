@@ -54,7 +54,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.dependencies.analytics import get_analytics_repository
 from app.dependencies.duplicate import get_duplicate_check_service
-from app.dependencies.product import get_product_service
+from app.dependencies.product import get_product_lookup_service, get_product_service
 from app.dependencies.queue import get_queue_manager
 from app.dependencies.recommendation import (
     get_recommendation_cache_repository,
@@ -83,12 +83,19 @@ from app.schemas.product import (
     UploadAcceptedResponse,
     UploadResponse,
 )
+from app.schemas.product_summary import (
+    MAX_BATCH_SIZE,
+    ProductBatchRequest,
+    ProductBatchResponse,
+    ProductSummary,
+)
 from app.schemas.recommendation import (
     RecommendationInfo,
     RecommendationReasonInfo,
     RecommendationsResponse,
 )
 from app.services.duplicate.duplicate_check_service import DuplicateCheckService
+from app.services.product_lookup_service import ProductLookupService
 from app.services.product_service import ProductService
 from app.services.recommendation.recommendation_engine_service import RecommendationEngineService
 from app.services.upload_service import UploadService
@@ -405,3 +412,57 @@ async def get_recommendations(
             for recommendation in result.recommendations
         ],
     )
+
+
+@router.get(
+    "/{product_id}",
+    response_model=ProductSummary,
+    status_code=status.HTTP_200_OK,
+    summary="Get an indexed product's catalog metadata",
+    description="Resolves a product ID to the metadata stored alongside its vectors — "
+    "name, brand, category, price, extracted attributes, tags and quality score. "
+    "Recommendations, duplicate decisions and explanations all return bare product "
+    "IDs; this is how a client turns one back into a product.",
+)
+async def get_product(
+    product_id: UUID,
+    lookup_service: Annotated[ProductLookupService, Depends(get_product_lookup_service)],
+) -> ProductSummary:
+    """Return `product_id`'s stored catalog metadata.
+
+    Raises `ResourceNotFoundException` (404) when the product is not
+    indexed — a real, distinguishable state, so a client can render
+    "product not found" rather than an ambiguous placeholder.
+    """
+    summary = await lookup_service.get(product_id)
+    if summary is None:
+        raise ResourceNotFoundException(
+            f"Product '{product_id}' is not indexed.", resource="product"
+        )
+    logger.info("Product resolved: product_id=%s", product_id)
+    return summary
+
+
+@router.post(
+    "/batch",
+    response_model=ProductBatchResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Resolve several product IDs at once",
+    description="Resolves up to "
+    f"{MAX_BATCH_SIZE} product IDs in one round trip, for views that render many "
+    "products at once (a recommendation list, a set of duplicate candidates). "
+    "Unknown IDs are returned in `missing` rather than failing the request, so a "
+    "partially-stale list still renders what exists.",
+)
+async def get_products_batch(
+    request: ProductBatchRequest,
+    lookup_service: Annotated[ProductLookupService, Depends(get_product_lookup_service)],
+) -> ProductBatchResponse:
+    """Resolve `request.product_ids` to summaries.
+
+    Over-sized batches are rejected by the schema's `max_length` as a 422
+    validation error, carrying the offending field — consistent with every
+    other malformed request in this API rather than a bespoke 400.
+    """
+    found, missing = await lookup_service.get_many(request.product_ids)
+    return ProductBatchResponse(products=found, missing=missing, resolved_at=datetime.now(UTC))

@@ -7,7 +7,7 @@ import { checkDuplicate } from "@/lib/api/endpoints/duplicates";
 // Candidate metadata is resolved through the shared
 // `useResolveProductMetadata` hook in `@/features/products` — recommendations
 // need the same id-to-fields lookup, so it lives in one place.
-export { useResolveProductMetadata as useCandidateMetadata } from "@/features/products/use-resolve-metadata";
+export { useResolveProducts as useCandidateMetadata } from "@/features/products/use-resolve-metadata";
 export type { ProductMetaMap as CandidateMetaMap } from "@/features/products/use-resolve-metadata";
 
 /**

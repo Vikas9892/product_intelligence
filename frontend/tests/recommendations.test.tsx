@@ -150,10 +150,36 @@ describe("RecommendationCard", () => {
     expect(screen.getByText("Same category")).toBeInTheDocument();
   });
 
-  it("falls back to the id when no metadata could be resolved", () => {
-    render(<RecommendationCard recommendation={WEAK} rank={2} />);
-    expect(screen.getByText("Unresolved product")).toBeInTheDocument();
+  it("distinguishes loading, not-found and unnamed instead of one placeholder", () => {
+    // Regression: all three previously rendered as "Unresolved product", which
+    // told a reader nothing about which state they were actually looking at.
+    const { rerender } = render(
+      <RecommendationCard recommendation={WEAK} rank={2} resolutionState="loading" />,
+    );
+    expect(screen.getByText("Loading product…")).toBeInTheDocument();
+
+    rerender(<RecommendationCard recommendation={WEAK} rank={2} resolutionState="missing" />);
+    expect(screen.getByText("Product not found")).toBeInTheDocument();
+
+    rerender(<RecommendationCard recommendation={WEAK} rank={2} resolutionState="resolved" />);
+    expect(screen.getByText("Unnamed product")).toBeInTheDocument();
+
+    // The id stays visible throughout, so a card is always identifiable.
     expect(screen.getByText(WEAK.product_id)).toBeInTheDocument();
+  });
+
+  it("renders the resolved product name, not a placeholder", () => {
+    render(
+      <RecommendationCard
+        recommendation={WEAK}
+        rank={2}
+        meta={{ name: "Demo Trailblazer Trail Shoe Black", tags: [] }}
+      />,
+    );
+
+    expect(screen.getByText("Demo Trailblazer Trail Shoe Black")).toBeInTheDocument();
+    expect(screen.queryByText("Unresolved product")).not.toBeInTheDocument();
+    expect(screen.queryByText("Product not found")).not.toBeInTheDocument();
   });
 
   it("uses resolved metadata when available", () => {

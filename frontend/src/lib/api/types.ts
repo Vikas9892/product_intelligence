@@ -16,6 +16,8 @@ export type ProductCreate = Schemas["ProductCreate"];
 export type UploadResponse = Schemas["UploadResponse"];
 export type UploadAcceptedResponse = Schemas["UploadAcceptedResponse"];
 export type JobStatusResponse = Schemas["JobStatusResponse"];
+export type ProductSummary = Schemas["ProductSummary"];
+export type ProductBatchResponse = Schemas["ProductBatchResponse"];
 
 // Search
 export type ProductSearchResponse = Schemas["ProductSearchResponse"];

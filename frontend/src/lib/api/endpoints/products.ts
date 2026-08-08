@@ -5,6 +5,8 @@ import { apiGet, apiPost } from "../http";
 import { apiPostTimed, type TimedResponse } from "../timing";
 import type {
   JobStatusResponse,
+  ProductBatchResponse,
+  ProductSummary,
   ProductSearchResponse,
   RecommendationsResponse,
   UploadAcceptedResponse,
@@ -37,6 +39,25 @@ export function uploadProduct(
 }
 
 /** Poll a product's background processing job. */
+/** Resolve one product id to its stored catalog metadata. Throws 404 if unknown. */
+export function getProduct(productId: string): Promise<ProductSummary> {
+  return apiGet<ProductSummary>(`${API_PREFIX}/products/${productId}`);
+}
+
+/**
+ * Resolve many product ids in one round trip.
+ *
+ * Recommendations, duplicate candidates and explanations all return bare ids.
+ * Resolving them one request per card would be N round trips for a single
+ * view; this is one. Unknown ids come back in `missing` rather than failing the
+ * request, so a partially-stale list still renders what exists.
+ */
+export function getProductsBatch(productIds: string[]): Promise<ProductBatchResponse> {
+  return apiPost<ProductBatchResponse>(`${API_PREFIX}/products/batch`, {
+    product_ids: productIds,
+  });
+}
+
 export function getJobStatus(productId: string): Promise<JobStatusResponse> {
   return apiGet<JobStatusResponse>(`${API_PREFIX}/products/${productId}/status`);
 }

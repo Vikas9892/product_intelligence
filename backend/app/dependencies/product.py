@@ -13,6 +13,7 @@ free — see `app/services/embeddings/model_manager.py`'s docstring — since
 
 from functools import lru_cache
 
+from app.services.product_lookup_service import ProductLookupService
 from app.services.product_service import ProductService
 
 
@@ -20,3 +21,13 @@ from app.services.product_service import ProductService
 def get_product_service() -> ProductService:
     """Return the process-wide ProductService singleton, building it on first call."""
     return ProductService()
+
+
+@lru_cache(maxsize=1)
+def get_product_lookup_service() -> ProductLookupService:
+    """Return the process-wide `ProductLookupService` singleton.
+
+    The read counterpart to `get_product_service`, and cached for the same
+    reason: it holds a vector-store client and no per-request state.
+    """
+    return ProductLookupService()

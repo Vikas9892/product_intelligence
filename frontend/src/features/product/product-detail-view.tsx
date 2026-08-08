@@ -28,7 +28,7 @@ export function ProductDetailView({ id }: { id: string }) {
 
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="space-y-4">
-          <ImageCard />
+          <ImageCard productId={id} alt={meta?.name ?? undefined} />
           <EmbeddingCard />
         </div>
         <div className="space-y-4 lg:col-span-2">

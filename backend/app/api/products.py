@@ -49,12 +49,17 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile, status
+from fastapi.responses import FileResponse
 
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.dependencies.analytics import get_analytics_repository
 from app.dependencies.duplicate import get_duplicate_check_service
-from app.dependencies.product import get_product_lookup_service, get_product_service
+from app.dependencies.product import (
+    get_product_image_service,
+    get_product_lookup_service,
+    get_product_service,
+)
 from app.dependencies.queue import get_queue_manager
 from app.dependencies.recommendation import (
     get_recommendation_cache_repository,
@@ -95,6 +100,10 @@ from app.schemas.recommendation import (
     RecommendationsResponse,
 )
 from app.services.duplicate.duplicate_check_service import DuplicateCheckService
+from app.services.product_image_service import (
+    ProductImageNotFoundError,
+    ProductImageService,
+)
 from app.services.product_lookup_service import ProductLookupService
 from app.services.product_service import ProductService
 from app.services.recommendation.recommendation_engine_service import RecommendationEngineService
@@ -466,3 +475,48 @@ async def get_products_batch(
     """
     found, missing = await lookup_service.get_many(request.product_ids)
     return ProductBatchResponse(products=found, missing=missing, resolved_at=datetime.now(UTC))
+
+
+@router.get(
+    "/{product_id}/image",
+    status_code=status.HTTP_200_OK,
+    response_class=FileResponse,
+    responses={
+        200: {"content": {"image/jpeg": {}}, "description": "The product's stored image."},
+        404: {"description": "The product has no stored image."},
+    },
+    summary="Get a product's stored image",
+    description="Returns the standardized (processed) image for a product. Pass "
+    "`thumbnail=true` for a small variant suitable for cards and result lists. "
+    "Returns 404 when the product carries no stored image — distinct from the "
+    "product not existing.",
+)
+async def get_product_image(
+    product_id: UUID,
+    image_service: Annotated[ProductImageService, Depends(get_product_image_service)],
+    thumbnail: Annotated[
+        bool, Query(description="Return a small variant instead of the full image.")
+    ] = False,
+) -> FileResponse:
+    """Serve `product_id`'s stored image.
+
+    The filesystem path is resolved server-side from the product's own
+    record — never from anything the client supplies — and validated to
+    stay inside the configured storage root. See `ProductImageService`.
+    """
+    try:
+        resolved = await image_service.resolve(product_id, thumbnail=thumbnail)
+    except ProductImageNotFoundError as exc:
+        raise ResourceNotFoundException(str(exc), resource="product_image") from exc
+
+    logger.info(
+        "Product image served: product_id=%s, thumbnail=%s, file=%s",
+        product_id,
+        thumbnail,
+        resolved.path.name,
+    )
+    return FileResponse(
+        resolved.path,
+        media_type=resolved.media_type,
+        headers={"Cache-Control": resolved.cache_control},
+    )

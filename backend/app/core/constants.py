@@ -130,6 +130,8 @@ SUPPORTED_IMAGE_PIL_FORMATS: frozenset[str] = frozenset({"JPEG", "PNG", "WEBP"})
 # worry about, one decoder for every later phase to support).
 PROCESSED_IMAGE_FORMAT = "JPEG"
 PROCESSED_IMAGE_EXTENSION = ".jpg"
+#: Media type served for processed images, which are always this format.
+PROCESSED_IMAGE_MEDIA_TYPE = "image/jpeg"
 # A generous safety ceiling (rejects decompression-bomb-scale images
 # before any resizing work) — distinct from DEFAULT_PROCESSED_IMAGE_SIZE_PX,
 # which is the much smaller target size images are actually resized to.

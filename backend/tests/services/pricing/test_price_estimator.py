@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from app.core.constants import PricingStrategy
+from app.core.constants import PriceStatus, PricingStrategy
 from app.models.comparable_product import ComparableProduct
 from app.models.price_confidence import PriceConfidence
 from app.services.pricing.comparable_filter import FilterOutcome
@@ -78,7 +78,8 @@ class TestEmpty:
 
         estimate = estimator.estimate([])
 
-        assert estimate.estimated_price == 0.0
+        assert estimate.estimated_price is None
+        assert estimate.status is PriceStatus.NO_ESTIMATE
         assert estimate.confidence is PriceConfidence.LOW
         assert estimate.comparable_count == 0
 
@@ -193,7 +194,8 @@ class TestLowEvidenceGuard:
 
         estimate = PriceEstimator().estimate([], filtering=outcome)
 
-        assert estimate.estimated_price == 0.0
+        assert estimate.estimated_price is None
+        assert estimate.status is PriceStatus.NO_ESTIMATE
         assert estimate.confidence is PriceConfidence.LOW
         assert estimate.confidence_score == 0.0
         # And it says *why* there is no number, rather than reporting a bare zero.
@@ -231,3 +233,52 @@ class TestLowEvidenceGuard:
 
         assert "2 from other categories" in estimate.reason
         assert "3 below the 0.50 similarity floor" in estimate.reason
+
+
+class TestNoEstimateIsNotZero:
+    """Absence must not be encoded as a price.
+
+    Regression for a UI that rendered "0.00" and a "Low 0.00" confidence chip
+    for a refusal: a reader sees a numeral and concludes the product is free or
+    the estimator crashed, long before reaching the paragraph explaining
+    otherwise.
+    """
+
+    def test_a_refusal_carries_a_null_price_not_zero(self) -> None:
+        estimate = PriceEstimator().estimate([])
+
+        assert estimate.estimated_price is None
+        assert estimate.status is PriceStatus.NO_ESTIMATE
+
+    def test_a_refusal_after_filtering_also_carries_a_null_price(self) -> None:
+        outcome = FilterOutcome(
+            kept=[],
+            excluded_by_category=20,
+            excluded_by_similarity=0,
+            applied_similarity_floor=0.5,
+            applied_category="men-shoes",
+        )
+
+        estimate = PriceEstimator().estimate([], filtering=outcome)
+
+        assert estimate.estimated_price is None
+        assert estimate.status is PriceStatus.NO_ESTIMATE
+        # The explanation is preserved -- the refusal behaviour is correct and
+        # only its presentation was wrong.
+        assert "No relevant comparable products remained" in estimate.reason
+
+    def test_a_real_estimate_carries_a_price_and_the_estimated_status(self) -> None:
+        estimate = PriceEstimator().estimate(
+            [_comparable(120.0), _comparable(130.0), _comparable(125.0)]
+        )
+
+        assert estimate.status is PriceStatus.ESTIMATED
+        assert estimate.estimated_price is not None
+        assert estimate.estimated_price > 0
+
+    def test_zero_is_never_used_as_the_absence_sentinel(self) -> None:
+        """A caller must branch on status, never on the price being falsy."""
+        refused = PriceEstimator().estimate([])
+
+        assert refused.estimated_price is not None or refused.estimated_price is None
+        assert refused.estimated_price != 0.0

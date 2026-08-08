@@ -8,6 +8,7 @@ import type { PricingResponse } from "@/lib/api/types";
 
 /** A real `POST /pricing/estimate` response captured from the backend. */
 const REAL_RESULT: PricingResponse = {
+  status: "estimated",
   estimated_price: 1515.67,
   confidence: "low",
   confidence_score: 0.263,
@@ -114,19 +115,21 @@ describe("EstimateSummary", () => {
     expect(screen.getByText(/The estimate above is the backend's\./)).toBeInTheDocument();
   });
 
-  it("says a zero estimate with no comparables is not a real valuation", () => {
+  it("renders a genuine zero estimate as a number, not as a refusal", () => {
+    // Zero is only ever a real price now; absence is `status: "no_estimate"`
+    // with a null value. The two must not be conflated in either direction.
     withTooltip(
       <EstimateSummary
         result={{
           ...REAL_RESULT,
+          status: "estimated",
           estimated_price: 0,
-          comparable_count: 0,
-          comparables: [],
-          pricing_reason: "No priced comparables were found.",
+          comparable_count: 1,
+          pricing_reason: "Estimated from 1 comparable product(s).",
         }}
       />,
     );
-    expect(screen.getByText(/not a real valuation/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("No price estimate")).not.toBeInTheDocument();
   });
 });
 
@@ -142,5 +145,44 @@ describe("OutlierNote", () => {
   it("surfaces a mismatch between the reported count and what was returned", () => {
     render(<OutlierNote result={{ ...REAL_RESULT, comparable_count: 5 }} />);
     expect(screen.getByText(/reports 5 used against 3 returned/)).toBeInTheDocument();
+  });
+});
+
+describe("no-estimate presentation", () => {
+  const NO_ESTIMATE: PricingResponse = {
+    status: "no_estimate",
+    estimated_price: null,
+    confidence: "low",
+    confidence_score: 0,
+    strategy: "trimmed_mean",
+    comparable_count: 0,
+    pricing_reason:
+      "No relevant comparable products remained after excluding 20 from other categories (not men-shoes). No price is estimated; a value drawn from unrelated products would be misleading.",
+    comparables: [],
+  };
+
+  it("renders no numeral for a refusal", () => {
+    // Regression: this rendered "0.00" and a "Low 0.00" confidence chip. A
+    // numeral in that slot reads as a price — free product, or crashed
+    // estimator — long before the explanation below is reached.
+    withTooltip(<EstimateSummary result={NO_ESTIMATE} />);
+
+    expect(screen.getByLabelText("No price estimate")).toBeInTheDocument();
+    expect(screen.getByText(/Not enough data/)).toBeInTheDocument();
+    expect(screen.queryByText("0.00")).not.toBeInTheDocument();
+    expect(screen.queryByText(/₹\s*0\.00|\$0\.00/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the explanation prominent", () => {
+    withTooltip(<EstimateSummary result={NO_ESTIMATE} />);
+
+    expect(screen.getByText(/No relevant comparable products remained/)).toBeInTheDocument();
+    expect(screen.getByText(/not men-shoes/)).toBeInTheDocument();
+  });
+
+  it("still renders a real estimate as a number", () => {
+    withTooltip(<EstimateSummary result={REAL_RESULT} />);
+
+    expect(screen.queryByLabelText("No price estimate")).not.toBeInTheDocument();
   });
 });

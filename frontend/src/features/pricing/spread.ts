@@ -25,9 +25,10 @@ function median(sorted: number[]): number {
 
 export function computeSpread(
   comparables: ComparableProductInfo[],
-  estimatedPrice: number,
+  // `null` when no estimate was made — absence is not zero.
+  estimatedPrice: number | null,
 ): PriceSpread | null {
-  if (comparables.length === 0) return null;
+  if (comparables.length === 0 || estimatedPrice === null) return null;
 
   const prices = comparables.map((c) => c.price).sort((a, b) => a - b);
   const min = prices[0];

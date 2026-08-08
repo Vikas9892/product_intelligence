@@ -52,10 +52,35 @@ export function PricingCard({ id }: { id: string }) {
         ) : (
           <div className="space-y-4">
             <div className="flex flex-wrap items-baseline gap-3">
-              <span className="text-3xl font-semibold tabular-nums">
-                {formatPrice(data.estimated_price)}
-              </span>
-              <ConfidenceBadge level={asLevel(data.confidence)} score={data.confidence_score} />
+              {/*
+                No-estimate renders as an em dash, never a numeral. "0.00" is a
+                price: a reader sees a number and concludes the product is free
+                or the estimator crashed, long before reaching the explanation
+                below. Declining to estimate is not an estimate of zero.
+              */}
+              {data.status === "no_estimate" ? (
+                <>
+                  <span
+                    className="text-muted-foreground text-3xl font-semibold"
+                    aria-label="No price estimate"
+                  >
+                    —
+                  </span>
+                  <span className="text-sm font-medium">Not enough data</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-3xl font-semibold tabular-nums">
+                    {formatPrice(data.estimated_price ?? 0)}
+                  </span>
+                  {/*
+                    The confidence chip is suppressed in the no-estimate state:
+                    there is no estimate to be low-confidence about, and "Low
+                    0.00" beside a dash reads as a broken number.
+                  */}
+                  <ConfidenceBadge level={asLevel(data.confidence)} score={data.confidence_score} />
+                </>
+              )}
               <span className="text-muted-foreground text-sm">
                 {data.strategy} · {data.comparable_count} comparables
               </span>

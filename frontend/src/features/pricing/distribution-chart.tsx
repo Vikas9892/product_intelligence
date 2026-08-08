@@ -35,7 +35,8 @@ export function PriceDistributionChart({
   estimatedPrice,
 }: {
   comparables: ComparableProductInfo[];
-  estimatedPrice: number;
+  // `null` when no estimate was made: the reference line is then omitted.
+  estimatedPrice: number | null;
 }) {
   const data = toDistributionData(comparables);
 
@@ -79,13 +80,13 @@ export function PriceDistributionChart({
           }
         />
         <ReferenceLine
-          y={estimatedPrice}
+          y={estimatedPrice ?? undefined}
           stroke="currentColor"
           strokeDasharray="6 4"
           strokeWidth={2}
           className="text-foreground"
           label={{
-            value: `Estimate ${formatPrice(estimatedPrice)}`,
+            value: estimatedPrice === null ? "" : `Estimate ${formatPrice(estimatedPrice)}`,
             position: "insideTopRight",
             className: "fill-foreground text-xs",
           }}

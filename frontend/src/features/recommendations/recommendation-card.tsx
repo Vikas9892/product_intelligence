@@ -28,7 +28,7 @@ const VISIBLE_TAGS = 6;
  * so a resolved name is shown when available and the id alone when not.
  */
 /** Whether this card's product has been looked up yet, and whether it exists. */
-export type ResolutionState = "loading" | "resolved" | "missing";
+export type ResolutionState = "loading" | "resolved" | "missing" | "failed";
 
 export function RecommendationCard({
   recommendation,
@@ -52,13 +52,18 @@ export function RecommendationCard({
   // Three genuinely different states, which previously all rendered as
   // "Unresolved product": still looking it up, looked it up and it is not
   // indexed, and looked it up but it carries no name.
+  // Four genuinely different states. A viewer must be able to tell from the
+  // card alone whether data is missing or the fetch failed — collapsing those
+  // into one label is what made "Unnamed product" uninformative.
   const title =
     meta?.name ??
     (resolutionState === "loading"
       ? "Loading product…"
-      : resolutionState === "missing"
-        ? "Product not found"
-        : "Unnamed product");
+      : resolutionState === "failed"
+        ? "Couldn't load this product"
+        : resolutionState === "missing"
+          ? "Product not found"
+          : "Product has no name");
 
   return (
     <Card className={className}>

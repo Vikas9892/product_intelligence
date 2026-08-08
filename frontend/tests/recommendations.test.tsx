@@ -150,7 +150,7 @@ describe("RecommendationCard", () => {
     expect(screen.getByText("Same category")).toBeInTheDocument();
   });
 
-  it("distinguishes loading, not-found and unnamed instead of one placeholder", () => {
+  it("distinguishes loading, failed, not-found and unnamed instead of one placeholder", () => {
     // Regression: all three previously rendered as "Unresolved product", which
     // told a reader nothing about which state they were actually looking at.
     const { rerender } = render(
@@ -161,8 +161,11 @@ describe("RecommendationCard", () => {
     rerender(<RecommendationCard recommendation={WEAK} rank={2} resolutionState="missing" />);
     expect(screen.getByText("Product not found")).toBeInTheDocument();
 
+    rerender(<RecommendationCard recommendation={WEAK} rank={2} resolutionState="failed" />);
+    expect(screen.getByText("Couldn't load this product")).toBeInTheDocument();
+
     rerender(<RecommendationCard recommendation={WEAK} rank={2} resolutionState="resolved" />);
-    expect(screen.getByText("Unnamed product")).toBeInTheDocument();
+    expect(screen.getByText("Product has no name")).toBeInTheDocument();
 
     // The id stays visible throughout, so a card is always identifiable.
     expect(screen.getByText(WEAK.product_id)).toBeInTheDocument();

@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.core.constants import PricingStrategy
+from app.core.constants import PriceStatus, PricingStrategy
 from app.exceptions.errors import PricingException, ResourceNotFoundException
 from app.models.search import HybridSearchResult, ProductFilters, SearchModality
 from app.schemas.product import ProductImage
@@ -136,7 +136,8 @@ class TestEstimateForRequest:
             name="Widget", brand=None, category=None, description=None
         )
 
-        assert estimate.estimated_price == 0.0
+        assert estimate.estimated_price is None
+        assert estimate.status is PriceStatus.NO_ESTIMATE
         assert estimate.comparable_count == 0
 
     async def test_wraps_an_unexpected_search_failure(self) -> None:
@@ -244,6 +245,7 @@ class TestComparableRelevance:
         assert estimate.comparable_count == 2
         assert {round(c.price, 2) for c in estimate.comparables} == {134.99, 119.99}
         # The estimate now sits in the footwear range, not dragged toward a lamp.
+        assert estimate.estimated_price is not None
         assert 119.99 <= estimate.estimated_price <= 134.99
         # And the exclusion is auditable.
         assert "3 from other categories" in estimate.reason

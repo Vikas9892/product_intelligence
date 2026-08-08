@@ -184,6 +184,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/products/{product_id}/image": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a product's stored image
+         * @description Returns the standardized (processed) image for a product. Pass `thumbnail=true` for a small variant suitable for cards and result lists. Returns 404 when the product carries no stored image — distinct from the product not existing.
+         */
+        get: operations["get_product_image_api_v1_products__product_id__image_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/products/search": {
         parameters: {
             query?: never;
@@ -1414,13 +1434,16 @@ export interface components {
          * PricingResponse
          * @description Response body for the pricing endpoints.
          *
-         *     `estimated_price` is `0.0` with `confidence="low"` and no `comparables`
-         *     when nothing priced could be found to compare against — see
-         *     `PriceEstimate`'s own docstring.
+         *     `status` discriminates the two states. When it is `"no_estimate"`,
+         *     `estimated_price` is `null` -- never `0.0` -- and `confidence` carries no
+         *     meaning, because there is no estimate to be confident about. Clients must
+         *     branch on `status` rather than testing the price for a sentinel.
          */
         PricingResponse: {
+            /** Status */
+            status: string;
             /** Estimated Price */
-            estimated_price: number;
+            estimated_price: number | null;
             /** Confidence */
             confidence: string;
             /** Confidence Score */
@@ -2203,6 +2226,47 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ProductBatchResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_product_image_api_v1_products__product_id__image_get: {
+        parameters: {
+            query?: {
+                /** @description Return a small variant instead of the full image. */
+                thumbnail?: boolean;
+            };
+            header?: never;
+            path: {
+                product_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The product's stored image. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/jpeg": unknown;
+                };
+            };
+            /** @description The product has no stored image. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

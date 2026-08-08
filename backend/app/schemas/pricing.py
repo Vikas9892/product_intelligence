@@ -44,12 +44,16 @@ class ComparableProductInfo(BaseModel):
 class PricingResponse(BaseModel):
     """Response body for the pricing endpoints.
 
-    `estimated_price` is `0.0` with `confidence="low"` and no `comparables`
-    when nothing priced could be found to compare against — see
-    `PriceEstimate`'s own docstring.
+    `status` discriminates the two states. When it is `"no_estimate"`,
+    `estimated_price` is `null` -- never `0.0` -- and `confidence` carries no
+    meaning, because there is no estimate to be confident about. Clients must
+    branch on `status` rather than testing the price for a sentinel.
     """
 
-    estimated_price: float
+    #: `"estimated"` or `"no_estimate"`.
+    status: str
+    #: `null` when `status` is `"no_estimate"`.
+    estimated_price: float | None
     confidence: str
     confidence_score: float
     strategy: str
@@ -61,6 +65,7 @@ class PricingResponse(BaseModel):
     def from_estimate(cls, estimate: PriceEstimate) -> "PricingResponse":
         """Build the API-safe view of `estimate`."""
         return cls(
+            status=estimate.status.value,
             estimated_price=estimate.estimated_price,
             confidence=estimate.confidence.value,
             confidence_score=estimate.confidence_score,

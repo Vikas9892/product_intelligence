@@ -50,6 +50,20 @@ class DuplicateDetectionMode(StrEnum):
     BLOCK = "block"
 
 
+class PriceStatus(StrEnum):
+    """Whether a price estimate was produced.
+
+    The discriminator between "here is a price" and "we declined to give one".
+    Kept explicit rather than inferred from a sentinel value, because every
+    sentinel a caller could infer from -- 0.0, an empty comparables list -- is
+    also a legitimate value in some other state.
+    """
+
+    ESTIMATED = "estimated"
+    #: No relevant comparables, so no estimate. `estimated_price` is `None`.
+    NO_ESTIMATE = "no_estimate"
+
+
 class PricingStrategy(StrEnum):
     """Which deterministic algorithm `PriceEstimator` uses to aggregate comparable prices (Phase 17).
 

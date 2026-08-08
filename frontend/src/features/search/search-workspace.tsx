@@ -143,7 +143,8 @@ export function SearchWorkspace() {
   }
 
   function openProduct(result: ProductSearchResult) {
-    // Seed the detail page from this real search result (no get-product endpoint).
+    // Seed the detail page from this real search result so it paints instantly;
+    // it re-fetches authoritatively via GET /products/{id}.
     queryClient.setQueryData(queryKeys.products.meta(result.product_id), result);
     router.push(`/products/${result.product_id}`);
   }

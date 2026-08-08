@@ -28,7 +28,7 @@ solid).
 from statistics import mean, median, pstdev, quantiles
 
 from app.core.config import settings
-from app.core.constants import PricingStrategy
+from app.core.constants import PriceStatus, PricingStrategy
 from app.core.logging import get_logger
 from app.models.comparable_product import ComparableProduct
 from app.models.price_confidence import PriceConfidence
@@ -87,7 +87,10 @@ class PriceEstimator:
 
         if not comparables:
             return PriceEstimate(
-                estimated_price=0.0,
+                # `None`, not 0.0 -- declining to estimate is not an estimate
+                # of zero, and a numeral reads as a price.
+                estimated_price=None,
+                status=PriceStatus.NO_ESTIMATE,
                 confidence=PriceConfidence.LOW,
                 confidence_score=0.0,
                 strategy=resolved_strategy,
@@ -102,6 +105,7 @@ class PriceEstimator:
 
         estimate = PriceEstimate(
             estimated_price=round(price, 2),
+            status=PriceStatus.ESTIMATED,
             confidence=confidence,
             confidence_score=confidence_score,
             strategy=resolved_strategy,

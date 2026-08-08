@@ -34,6 +34,7 @@ from app.core.logging import get_logger
 from app.exceptions.errors import VectorStoreException
 from app.models.search import NearestNeighbor, ProductFilters, StoredPoint
 from app.services.vectorstore.base import BaseVectorStore, VectorCollection, VectorRecord
+from app.utils.facets import normalize_facet
 
 logger = get_logger(__name__)
 
@@ -111,11 +112,31 @@ class QdrantVectorStore(BaseVectorStore):
                             size=size, distance=qmodels.Distance.COSINE
                         ),
                     )
+                self._ensure_facet_indexes(name)
                 self._collection_ready[collection] = True
             except Exception as exc:
                 raise VectorStoreException(
                     f"Failed to ensure Qdrant collection '{name}' exists."
                 ) from exc
+
+    def _ensure_facet_indexes(self, name: str) -> None:
+        """Create keyword payload indexes for the facet keys, idempotently.
+
+        Filtering works without an index -- Qdrant falls back to a full scan --
+        but only an index makes it scale, and creating them as part of
+        collection setup means a fresh environment cannot silently end up
+        without them. Idempotent because Qdrant errors on a duplicate index and
+        that is not a failure worth propagating.
+        """
+        for field in _FACET_INDEX_FIELDS:
+            try:
+                self._client.create_payload_index(
+                    collection_name=name,
+                    field_name=field,
+                    field_schema=qmodels.PayloadSchemaType.KEYWORD,
+                )
+            except Exception:
+                logger.debug("Payload index '%s' already present on '%s'", field, name)
 
     async def upsert(self, collection: VectorCollection, records: list[VectorRecord]) -> None:
         if not records:
@@ -241,6 +262,11 @@ class QdrantVectorStore(BaseVectorStore):
             return False
 
 
+#: Payload fields filtered on, and therefore worth indexing. The canonical
+#: `*_key` forms, not the display values -- see `_build_filter`.
+_FACET_INDEX_FIELDS = ("brand_key", "category_key")
+
+
 def _build_filter(filters: ProductFilters) -> qmodels.Filter:
     """Translate `ProductFilters` into Qdrant's `Filter` structure.
 
@@ -250,15 +276,28 @@ def _build_filter(filters: ProductFilters) -> qmodels.Filter:
     translates to an empty `must=[]`, which Qdrant treats as "match
     everything," so passing one through is always safe even when nothing
     is actually being filtered.
+
+    Facet values are matched against the canonical `*_key` payload fields via
+    `normalize_facet`, never against the raw user string. `MatchValue` is exact
+    and case-sensitive, so passing what the user typed straight through meant
+    "Men shoes" could not match stored "men-shoes" and "nike" could not match
+    stored "Nike" — every filtered search returned nothing. The normalizer here
+    is the same one the ingest path uses.
+
+    A facet that normalizes to `None` (empty, blank, punctuation-only) adds no
+    condition at all, rather than a condition matching the empty string. An
+    empty brand box must not exclude every product.
     """
     conditions: list[qmodels.FieldCondition] = []
-    if filters.brand is not None:
+    brand_key = normalize_facet(filters.brand)
+    if brand_key is not None:
         conditions.append(
-            qmodels.FieldCondition(key="brand", match=qmodels.MatchValue(value=filters.brand))
+            qmodels.FieldCondition(key="brand_key", match=qmodels.MatchValue(value=brand_key))
         )
-    if filters.category is not None:
+    category_key = normalize_facet(filters.category)
+    if category_key is not None:
         conditions.append(
-            qmodels.FieldCondition(key="category", match=qmodels.MatchValue(value=filters.category))
+            qmodels.FieldCondition(key="category_key", match=qmodels.MatchValue(value=category_key))
         )
     if filters.min_price is not None or filters.max_price is not None:
         conditions.append(
@@ -267,4 +306,9 @@ def _build_filter(filters: ProductFilters) -> qmodels.Filter:
                 range=qmodels.Range(gte=filters.min_price, lte=filters.max_price),
             )
         )
-    return qmodels.Filter(must=conditions)
+    built = qmodels.Filter(must=conditions)
+    # The literal filter, not the intent. Debug-level so it costs nothing in
+    # normal operation, but when a filtered search misbehaves the actual keys
+    # and values sent to Qdrant are in the log rather than inferred.
+    logger.debug("Qdrant filter built: %s", built.model_dump(exclude_none=True))
+    return built

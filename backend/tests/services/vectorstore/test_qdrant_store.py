@@ -406,12 +406,14 @@ class TestSearch:
             VectorCollection.IMAGE,
             [
                 VectorRecord(
-                    product_id=shoe_id, vector=[1.0, 0.0, 0.0, 0.0], metadata={"category": "shoes"}
+                    product_id=shoe_id,
+                    vector=[1.0, 0.0, 0.0, 0.0],
+                    metadata={"category": "shoes", "category_key": "shoes"},
                 ),
                 VectorRecord(
                     product_id=shirt_id,
                     vector=[1.0, 0.0, 0.0, 0.0],
-                    metadata={"category": "shirts"},
+                    metadata={"category": "shirts", "category_key": "shirts"},
                 ),
             ],
         )
@@ -433,10 +435,14 @@ class TestSearch:
             VectorCollection.IMAGE,
             [
                 VectorRecord(
-                    product_id=nike_id, vector=[1.0, 0.0, 0.0, 0.0], metadata={"brand": "Nike"}
+                    product_id=nike_id,
+                    vector=[1.0, 0.0, 0.0, 0.0],
+                    metadata={"brand": "Nike", "brand_key": "nike"},
                 ),
                 VectorRecord(
-                    product_id=adidas_id, vector=[1.0, 0.0, 0.0, 0.0], metadata={"brand": "Adidas"}
+                    product_id=adidas_id,
+                    vector=[1.0, 0.0, 0.0, 0.0],
+                    metadata={"brand": "Adidas", "brand_key": "adidas"},
                 ),
             ],
         )
@@ -489,12 +495,22 @@ class TestSearch:
                 VectorRecord(
                     product_id=match_id,
                     vector=[1.0, 0.0, 0.0, 0.0],
-                    metadata={"brand": "Nike", "category": "shoes"},
+                    metadata={
+                        "brand": "Nike",
+                        "brand_key": "nike",
+                        "category": "shoes",
+                        "category_key": "shoes",
+                    },
                 ),
                 VectorRecord(
                     product_id=wrong_brand_id,
                     vector=[1.0, 0.0, 0.0, 0.0],
-                    metadata={"brand": "Adidas", "category": "shoes"},
+                    metadata={
+                        "brand": "Adidas",
+                        "brand_key": "adidas",
+                        "category": "shoes",
+                        "category_key": "shoes",
+                    },
                 ),
             ],
         )

@@ -196,6 +196,34 @@ The container health check probes this server's own `/`, deliberately not the pr
 `/health` — probing the latter would report the frontend unhealthy whenever the backend
 blipped.
 
+### Facet filters: free text, deliberately
+
+Brand and category are free-text inputs, not dropdowns. That was reconsidered
+after free text caused a real bug — a user typed "Men shoes", ingest stored
+"men-shoes", and every filtered search returned zero results.
+
+**Dropdowns were evaluated and not adopted, for now.** Populating them means a
+distinct-values endpoint the backend does not have (`GET /facets` or similar),
+and the backend is where that list would have to come from — the frontend
+cannot enumerate the index. That is a new API surface, and the bug it would
+prevent is now prevented properly: `normalize_facet` canonicalises on both the
+ingest and query paths, so "Men shoes", "MEN_SHOES" and " men-shoes " all reach
+the same key. The mismatch is fixed at the source rather than by constraining
+what a user may type.
+
+Free text also keeps working when the catalog is empty or a category is new,
+where a dropdown would offer nothing.
+
+**What was added instead**: a zero-result state that names the facets actually
+applied — `Nothing matched with brand "Nike", category "men shoes" applied.` A
+user can now see that their filter, rather than an absent product, produced the
+empty result. Previously the screen said only "No matching products", which is
+indistinguishable from a genuinely empty catalog.
+
+Revisit if the catalog grows enough that discovering valid values becomes the
+real problem; a typeahead over a `GET /facets` endpoint is the natural next
+step, and this decision is why it does not exist yet.
+
 ## Scripts
 
 | Script                 | Purpose                                                   |

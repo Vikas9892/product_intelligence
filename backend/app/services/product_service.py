@@ -96,7 +96,6 @@ service and `UploadService` and nothing else — the router itself has no
 business logic.
 """
 
-import re
 import uuid
 from pathlib import Path
 
@@ -123,6 +122,7 @@ from app.services.embeddings.text_base import BaseTextEmbeddingService
 from app.services.image_processing_service import ImageProcessingService
 from app.services.vectorstore.base import BaseVectorStore, VectorRecord
 from app.services.vectorstore.qdrant_store import QdrantVectorStore
+from app.utils.facets import normalize_facet
 from app.utils.metadata import parse_file_metadata
 from app.utils.text import build_text_representation
 from app.validators.product_validator import validate_normalized_name, validate_price
@@ -358,6 +358,16 @@ class ProductService:
             # filesystem location is derived server-side, so this cannot be
             # used to traverse out of the storage root.
             "image_filename": image.stored_filename,
+            # Canonical facet keys, written alongside the display values.
+            #
+            # `brand` keeps its original casing because it is shown to users
+            # ("Nike", not "nike"), so it cannot itself be the thing a filter
+            # matches on. Filtering against a display string is what broke:
+            # a user typing "nike" never matched stored "Nike". The key is
+            # what queries compare against; the display value is what people
+            # read. Both come from the same normalizer the query path uses.
+            "brand_key": normalize_facet(normalized_brand),
+            "category_key": normalize_facet(normalized_category),
         }
         await self._vector_store.upsert_image(
             [
@@ -407,15 +417,12 @@ def _normalize_description(description: str | None) -> str | None:
 def _normalize_category(category: str | None) -> str | None:
     """Lowercase and slugify: `"Men Tshirts"` -> `"men-tshirts"`.
 
-    Runs of non-alphanumeric characters (spaces, underscores, punctuation)
-    become a single hyphen, and leading/trailing hyphens are stripped — a
-    category that's blank after normalizing becomes `None`.
+    Delegates to `normalize_facet` rather than reimplementing the rule. The two
+    were separate implementations of the same idea, and the query path had a
+    third (none at all) — which is precisely how filtered search came to return
+    nothing. There is now one definition, and this is a caller of it.
     """
-    if category is None:
-        return None
-    lowered = category.strip().lower()
-    slug = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
-    return slug or None
+    return normalize_facet(category)
 
 
 def _normalize_price(price: float | None) -> float | None:

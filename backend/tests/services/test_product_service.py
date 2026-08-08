@@ -512,6 +512,8 @@ class TestProcessUploadVectorStoreUpsert:
             "style": None,
             "tags": [],
             "quality_score": 0.0,
+            # Carried so a product's image can be located from its id alone.
+            "image_filename": "generated.jpg",
         }
 
     async def test_upserts_a_text_record_matching_the_built_product(self, tmp_path: Path) -> None:
@@ -542,6 +544,8 @@ class TestProcessUploadVectorStoreUpsert:
             "style": None,
             "tags": [],
             "quality_score": 0.0,
+            # Carried so a product's image can be located from its id alone.
+            "image_filename": "generated.jpg",
         }
 
     async def test_propagates_vector_store_exception(self, tmp_path: Path) -> None:

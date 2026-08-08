@@ -39,6 +39,18 @@ export function uploadProduct(
 }
 
 /** Poll a product's background processing job. */
+/**
+ * URL of a product's stored image.
+ *
+ * A plain URL rather than a fetch, because it is consumed by `<img>`/`next/image`
+ * — the browser requests it directly. Same-origin, through this app's proxy, so
+ * it needs no CORS and no absolute backend host.
+ */
+export function productImageUrl(productId: string, options?: { thumbnail?: boolean }): string {
+  const path = `${API_PREFIX}/products/${productId}/image`;
+  return options?.thumbnail ? `${path}?thumbnail=true` : path;
+}
+
 /** Resolve one product id to its stored catalog metadata. Throws 404 if unknown. */
 export function getProduct(productId: string): Promise<ProductSummary> {
   return apiGet<ProductSummary>(`${API_PREFIX}/products/${productId}`);

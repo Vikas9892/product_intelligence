@@ -351,6 +351,13 @@ class ProductService:
             "style": catalog_result.attributes.style,
             "tags": [tag.tag for tag in catalog_result.tags],
             "quality_score": catalog_result.quality_score,
+            # The server-generated name of the stored upload. Carried so a
+            # product's image can be located from its id alone -- without it
+            # the payload described a product the API could not show. Never
+            # client-supplied (see `UploadService`), and never a path: the
+            # filesystem location is derived server-side, so this cannot be
+            # used to traverse out of the storage root.
+            "image_filename": image.stored_filename,
         }
         await self._vector_store.upsert_image(
             [

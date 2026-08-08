@@ -120,16 +120,36 @@ class TestAck:
 
 
 class TestRetry:
-    async def test_retry_reschedules_within_max_retries(self) -> None:
-        queue = _queue(retry_delay_seconds=0.01)
+    async def test_retry_holds_the_job_until_the_backoff_elapses(self) -> None:
+        """A retried job is not immediately re-dequeued.
+
+        Asserted against a 60-second backoff, so no amount of scheduling
+        jitter can span it. The previous form slept 0.05s against a 0.01s
+        delay and raced the scheduler -- correct almost always, and the
+        "almost" is exactly what made it flaky.
+        """
+        queue = _queue(retry_delay_seconds=60)
         await queue.enqueue(_job(max_retries=3))
         job = await queue.dequeue()
         assert job is not None
 
         await queue.retry(job, error="transient failure")
 
-        assert await queue.dequeue() is None  # still waiting out the backoff delay
-        await asyncio.sleep(0.05)
+        assert await queue.dequeue() is None
+
+    async def test_retry_reschedules_within_max_retries(self) -> None:
+        """Once due, the job comes back carrying its retry state.
+
+        Zero backoff, so the job is due the instant it is scheduled and no
+        sleep is involved at all.
+        """
+        queue = _queue(retry_delay_seconds=0)
+        await queue.enqueue(_job(max_retries=3))
+        job = await queue.dequeue()
+        assert job is not None
+
+        await queue.retry(job, error="transient failure")
+
         retried = await queue.dequeue()
         assert retried is not None
         assert retried.retry_count == 1

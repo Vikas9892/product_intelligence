@@ -15,6 +15,7 @@ independently of `_ensure_collection`'s (an unreachable client fails at
 `_ensure_collection` before ever reaching the operation itself).
 """
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
@@ -54,6 +55,10 @@ class _SlowCollectionExistsClient:
     Widens the race window `_ensure_collection`'s double-checked locking
     closes — without the delay, concurrent callers would very likely
     never actually overlap inside the lock on a fast local test run.
+
+    Used only where the assertion is a *count* (how many creates happened),
+    which no amount of machine load can perturb. The one test that asserted
+    elapsed time uses `_RendezvousClient` instead.
     """
 
     def __init__(self, real_client: QdrantClient, *, delay_seconds: float) -> None:
@@ -63,6 +68,46 @@ class _SlowCollectionExistsClient:
 
     def collection_exists(self, *args: Any, **kwargs: Any) -> bool:
         time.sleep(self._delay_seconds)
+        return bool(self._real.collection_exists(*args, **kwargs))
+
+    def create_collection(self, *args: Any, **kwargs: Any) -> Any:
+        self.create_collection_calls += 1
+        return self._real.create_collection(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+class _RendezvousClient:
+    """Delegates to a real in-memory client, but `collection_exists` rendezvouses.
+
+    Each call waits at a two-party barrier before proceeding. That turns "do
+    the two collections lock independently?" into a question with a
+    deterministic answer instead of a timing measurement:
+
+    * independent locks -> both callers reach the barrier, it releases, both
+      proceed;
+    * one shared lock -> the second caller never reaches it, and the first
+      times out with `BrokenBarrierError`.
+
+    This replaces a wall-clock assertion (`elapsed < 0.09` against a 0.05s
+    sleep) that failed intermittently under load. The property under test was
+    never really "it finished quickly" -- it was "these two ran concurrently",
+    and a barrier states that directly.
+    """
+
+    def __init__(self, real_client: QdrantClient, *, timeout_seconds: float = 5.0) -> None:
+        self._real = real_client
+        self._barrier = threading.Barrier(2, timeout=timeout_seconds)
+        self.create_collection_calls = 0
+        self.rendezvous_failed = False
+
+    def collection_exists(self, *args: Any, **kwargs: Any) -> bool:
+        try:
+            self._barrier.wait()
+        except threading.BrokenBarrierError:
+            # Serialized: the other caller never arrived.
+            self.rendezvous_failed = True
         return self._real.collection_exists(*args, **kwargs)
 
     def create_collection(self, *args: Any, **kwargs: Any) -> bool:
@@ -586,12 +631,19 @@ class TestThreadSafety:
         assert slow_client.create_collection_calls == 1
 
     async def test_the_two_collections_lock_independently(self) -> None:
-        """Loading the image collection must not block a concurrent text-collection load."""
-        real_client = QdrantClient(location=":memory:")
-        slow_client = _SlowCollectionExistsClient(real_client, delay_seconds=0.05)
-        store = _store(client=cast(QdrantClient, slow_client))
+        """Loading the image collection must not block a concurrent text-collection load.
 
-        start = time.time()
+        Asserted by rendezvous, not by elapsed time. Both callers must meet at
+        a two-party barrier: with independent locks they do, with one shared
+        lock the second never arrives and the barrier breaks. The previous
+        wall-clock form (`elapsed < 0.09` against a 0.05s sleep) tested the
+        same property but failed intermittently on a loaded machine, because
+        thread scheduling — not the lock design — decided the outcome.
+        """
+        real_client = QdrantClient(location=":memory:")
+        client = _RendezvousClient(real_client)
+        store = _store(client=cast(QdrantClient, client))
+
         with ThreadPoolExecutor(max_workers=2) as pool:
             list(
                 pool.map(
@@ -599,10 +651,8 @@ class TestThreadSafety:
                     [VectorCollection.IMAGE, VectorCollection.TEXT],
                 )
             )
-        elapsed = time.time() - start
 
-        # If the two collections shared one lock, this would take roughly
-        # 2 * delay_seconds (serialized); independent locks mean they run
-        # concurrently, so this should take roughly 1 * delay_seconds.
-        assert elapsed < 0.09
-        assert slow_client.create_collection_calls == 2
+        assert (
+            not client.rendezvous_failed
+        ), "the two collections did not load concurrently, so they share a lock"
+        assert client.create_collection_calls == 2

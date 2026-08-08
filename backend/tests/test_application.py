@@ -32,6 +32,8 @@ _BUSINESS_ROUTE_PATHS = {
     f"{settings.application.api_prefix}/products/upload",
     f"{settings.application.api_prefix}/products/search",
     f"{settings.application.api_prefix}/products/check-duplicate",
+    f"{settings.application.api_prefix}/products/batch",
+    f"{settings.application.api_prefix}/products/{{product_id}}",
     f"{settings.application.api_prefix}/products/{{product_id}}/recommendations",
     f"{settings.application.api_prefix}/products/{{product_id}}/status",
     f"{settings.application.api_prefix}/evaluation/run",

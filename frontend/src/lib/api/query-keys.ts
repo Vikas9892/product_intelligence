@@ -16,7 +16,11 @@ export const queryKeys = {
     status: (id: string) => ["products", "status", id] as const,
     recommendations: (id: string) => ["products", "recommendations", id] as const,
     explanations: (id: string) => ["products", "explanations", id] as const,
-    // Metadata carried from a search result (no get-one endpoint exists).
+    detail: (id: string) => ["products", "detail", id] as const,
+    // A resolved set of ids. Sorted by the caller so two views asking for the
+    // same products share one cache entry regardless of ordering.
+    batch: (ids: string[]) => ["products", "batch", ids] as const,
+    // Metadata carried from a search result, when one is already in hand.
     meta: (id: string) => ["products", "meta", id] as const,
   },
   search: (params: Record<string, unknown>) => ["search", params] as const,

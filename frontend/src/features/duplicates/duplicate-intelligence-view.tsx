@@ -31,27 +31,24 @@ function submittedAsMeta(values: UploadMetadata): ProductMeta {
   };
 }
 
-/** The text the backend itself would embed, reused to resolve candidate metadata. */
-function productText(values: UploadMetadata): string {
-  return [values.name, values.brand, values.category, values.description]
-    .map((v) => v.trim())
-    .filter(Boolean)
-    .join(" ");
-}
-
 /**
  * Duplicate intelligence: the full decision behind a duplicate verdict.
  *
  * Everything shown comes from one `POST /products/check-duplicate` response —
  * the verdict and confidence, the four independent similarity signals, the
  * cross-encoder fields (or an explicit "disabled" when the backend returns
- * null), and every candidate that was ranked. The only supplementary call is a
- * best-effort search used to resolve candidate names, because the backend has
- * no get-product endpoint.
+ * null), and every candidate that was ranked. Candidate names come from one
+ * supplementary `POST /products/batch` call, which resolves the ids the
+ * decision returns.
  */
 export function DuplicateIntelligenceView() {
   const check = useCheckDuplicate();
-  const candidateMeta = useCandidateMetadata();
+  // Candidate ids resolve through the batch product endpoint. This previously
+  // ran a text search and kept whichever ids happened to come back.
+  const candidateIds = (check.data?.data.top_candidates ?? []).map(
+    (candidate) => candidate.product_id,
+  );
+  const candidateMeta = useCandidateMetadata(candidateIds);
   const [submitted, setSubmitted] = useState<{ values: UploadMetadata; file: File } | null>(null);
 
   function handleSubmit({
@@ -64,22 +61,11 @@ export function DuplicateIntelligenceView() {
     file: File;
   }) {
     setSubmitted({ values, file });
-    check.mutate(
-      { formData },
-      {
-        onSuccess: (response) => {
-          const ids = (response.data.top_candidates ?? []).map((c) => c.product_id);
-          if (ids.length > 0) {
-            // Enrichment only — a failure here leaves ids visible without names.
-            candidateMeta.mutate({ text: productText(values), productIds: ids });
-          }
-        },
-      },
-    );
+    check.mutate({ formData });
   }
 
   const result = check.data?.data;
-  const metadata = candidateMeta.data ?? {};
+  const metadata = candidateMeta.data?.meta ?? {};
   const matchedId = result?.matched_product ?? null;
   // `top_candidates` has a server-side default, so it is optional in the
   // generated schema; treat a missing list as an empty one.

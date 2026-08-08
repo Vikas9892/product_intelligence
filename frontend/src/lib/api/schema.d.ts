@@ -144,6 +144,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/products/{product_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an indexed product's catalog metadata
+         * @description Resolves a product ID to the metadata stored alongside its vectors — name, brand, category, price, extracted attributes, tags and quality score. Recommendations, duplicate decisions and explanations all return bare product IDs; this is how a client turns one back into a product.
+         */
+        get: operations["get_product_api_v1_products__product_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/products/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve several product IDs at once
+         * @description Resolves up to 100 product IDs in one round trip, for views that render many products at once (a recommendation list, a set of duplicate candidates). Unknown IDs are returned in `missing` rather than failing the request, so a partially-stale list still renders what exists.
+         */
+        post: operations["get_products_batch_api_v1_products_batch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/products/search": {
         parameters: {
             query?: never;
@@ -1415,6 +1455,38 @@ export interface components {
             color_mode: string;
         };
         /**
+         * ProductBatchRequest
+         * @description A request to resolve several product IDs at once.
+         */
+        ProductBatchRequest: {
+            /**
+             * Product Ids
+             * @description Product IDs to resolve. At most 100.
+             */
+            product_ids: string[];
+        };
+        /**
+         * ProductBatchResponse
+         * @description The products that resolved, and the IDs that did not.
+         *
+         *     Unknown IDs are reported rather than silently omitted, and the endpoint
+         *     does not 404 for them: a partially-stale recommendation list is a normal
+         *     state, and a client resolving ten cards should still render the nine that
+         *     exist. `missing` lets it show a real "product not found" state for the
+         *     tenth instead of an ambiguous placeholder.
+         */
+        ProductBatchResponse: {
+            /** Products */
+            products?: components["schemas"]["ProductSummary"][];
+            /** Missing */
+            missing?: string[];
+            /**
+             * Resolved At
+             * Format: date-time
+             */
+            resolved_at: string;
+        };
+        /**
          * ProductCreate
          * @description Product metadata submitted alongside an image upload.
          *
@@ -1515,6 +1587,46 @@ export interface components {
             metadata: {
                 [key: string]: unknown;
             };
+        };
+        /**
+         * ProductSummary
+         * @description An indexed product's catalog metadata, as stored alongside its vectors.
+         *
+         *     Deliberately a *summary*: it carries what a client needs to render and
+         *     reason about a product, not the internals. Filesystem paths and raw
+         *     embeddings are never exposed here -- the same rule
+         *     `ProcessedImageInfo` already documents for image paths.
+         */
+        ProductSummary: {
+            /**
+             * Product Id
+             * Format: uuid
+             */
+            product_id: string;
+            /** Name */
+            name?: string | null;
+            /** Brand */
+            brand?: string | null;
+            /** Category */
+            category?: string | null;
+            /** Price */
+            price?: number | null;
+            /** Description */
+            description?: string | null;
+            /** Color */
+            color?: string | null;
+            /** Material */
+            material?: string | null;
+            /** Gender */
+            gender?: string | null;
+            /** Season */
+            season?: string | null;
+            /** Style */
+            style?: string | null;
+            /** Tags */
+            tags?: string[];
+            /** Quality Score */
+            quality_score?: number | null;
         };
         /**
          * ReadinessResponse
@@ -2026,6 +2138,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RecommendationsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_product_api_v1_products__product_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                product_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_products_batch_api_v1_products_batch_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProductBatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductBatchResponse"];
                 };
             };
             /** @description Validation Error */

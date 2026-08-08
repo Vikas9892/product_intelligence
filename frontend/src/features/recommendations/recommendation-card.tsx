@@ -27,15 +27,20 @@ const VISIBLE_TAGS = 6;
  * `meta` is optional enrichment: the recommendations payload carries ids only,
  * so a resolved name is shown when available and the id alone when not.
  */
+/** Whether this card's product has been looked up yet, and whether it exists. */
+export type ResolutionState = "loading" | "resolved" | "missing";
+
 export function RecommendationCard({
   recommendation,
   rank,
   meta,
+  resolutionState = "resolved",
   className,
 }: {
   recommendation: RecommendationInfo;
   rank: number;
   meta?: ProductMeta;
+  resolutionState?: ResolutionState;
   className?: string;
 }) {
   const { reason } = recommendation;
@@ -44,7 +49,16 @@ export function RecommendationCard({
   const visibleTags = tags.slice(0, VISIBLE_TAGS);
   const hiddenTagCount = tags.length - visibleTags.length;
 
-  const title = meta?.name ?? "Unresolved product";
+  // Three genuinely different states, which previously all rendered as
+  // "Unresolved product": still looking it up, looked it up and it is not
+  // indexed, and looked it up but it carries no name.
+  const title =
+    meta?.name ??
+    (resolutionState === "loading"
+      ? "Loading product…"
+      : resolutionState === "missing"
+        ? "Product not found"
+        : "Unnamed product");
 
   return (
     <Card className={className}>

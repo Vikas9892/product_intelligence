@@ -1,50 +1,76 @@
 "use client";
 
-import { useMutation } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
-import { searchProducts } from "@/lib/api/endpoints/products";
-import { readProductMeta, type ProductMeta } from "@/lib/api/product-metadata";
+import { queryKeys } from "@/lib/api";
+import { getProductsBatch } from "@/lib/api/endpoints/products";
+import type { ProductMeta } from "@/lib/api/product-metadata";
 
 /** Resolved descriptive fields, keyed by product id. */
 export type ProductMetaMap = Record<string, ProductMeta>;
 
+/** Ids that were asked for but are not indexed. Distinct from "not yet loaded". */
+export type ProductResolution = {
+  meta: ProductMetaMap;
+  missing: Set<string>;
+};
+
 /**
- * Best-effort resolution of products' descriptive fields by id.
+ * Resolve products by id, in one request.
  *
- * Several responses identify products by id alone — duplicate candidates and
- * recommendations both do — and the backend has no get-product endpoint. The
- * only route to a product's stored fields is the search endpoint, whose results
- * carry the Qdrant metadata payload. So this runs a text search and keeps the
- * metadata of any returned product whose id was asked for.
+ * Several responses identify products by id alone — recommendations and
+ * duplicate candidates both do. This resolves those ids through
+ * `POST /products/batch`.
  *
- * Strictly an enrichment. It never invents values: ids the search does not
- * surface simply have no entry, and callers are expected to say so rather than
- * render a blank that could read as real data.
+ * It previously could not. With no get-product endpoint, the only route to a
+ * product's stored fields was the *search* endpoint, so this ran a text search
+ * and kept whichever requested ids happened to appear in the results. Ids the
+ * search did not surface had no entry, and the UI rendered them as "Unresolved
+ * product" — which was every card, because a recommendation set is precisely
+ * the products a text query does not necessarily return.
+ *
+ * Now a `useQuery` rather than a `useMutation`: resolution is a read, so it
+ * caches. Two views asking for the same products share one cache entry, and a
+ * re-render does not refetch.
+ *
+ * `missing` carries ids the backend confirmed are not indexed, so a caller can
+ * render a real "product not found" state — distinguishable from "still
+ * loading" and from "resolved but unnamed".
  */
-export function useResolveProductMetadata() {
-  return useMutation({
-    mutationFn: async ({
-      text,
-      productIds,
-    }: {
-      text: string;
-      productIds: string[];
-    }): Promise<ProductMetaMap> => {
-      if (!text.trim() || productIds.length === 0) return {};
+export function useResolveProducts(productIds: string[], options?: { enabled?: boolean }) {
+  // Sorted and de-duplicated so the cache key depends on the *set* of ids, not
+  // the order a particular view happened to render them in.
+  const ids = Array.from(new Set(productIds)).sort();
 
-      const response = await searchProducts({
-        query: text.trim(),
-        topK: Math.max(20, productIds.length * 2),
-      });
+  return useQuery({
+    queryKey: queryKeys.products.batch(ids),
+    enabled: (options?.enabled ?? true) && ids.length > 0,
+    queryFn: async (): Promise<ProductResolution> => {
+      const response = await getProductsBatch(ids);
 
-      const wanted = new Set(productIds);
-      const resolved: ProductMetaMap = {};
-      for (const result of response.results) {
-        if (wanted.has(result.product_id)) {
-          resolved[result.product_id] = readProductMeta(result.metadata);
-        }
+      const meta: ProductMetaMap = {};
+      for (const product of response.products ?? []) {
+        // `?? undefined` rather than `?? null`: ProductMeta's fields are
+        // optional, and an absent value must read as absent everywhere.
+        meta[product.product_id] = {
+          name: product.name ?? undefined,
+          brand: product.brand ?? undefined,
+          category: product.category ?? undefined,
+          price: product.price ?? undefined,
+          description: product.description ?? undefined,
+          color: product.color ?? undefined,
+          material: product.material ?? undefined,
+          gender: product.gender ?? undefined,
+          season: product.season ?? undefined,
+          style: product.style ?? undefined,
+          tags: product.tags ?? [],
+          qualityScore: product.quality_score ?? undefined,
+        };
       }
-      return resolved;
+      return { meta, missing: new Set(response.missing ?? []) };
     },
+    // Product metadata changes only when a product is re-ingested, so a short
+    // stale window avoids refetching while a user moves between views.
+    staleTime: 60_000,
   });
 }

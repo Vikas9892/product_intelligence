@@ -1,7 +1,7 @@
 "use client";
 
 import { Info, Sparkles, TriangleAlert } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 import { PageHeader } from "@/components/common/page-header";
 import { EmptyState } from "@/components/feedback/empty-state";
@@ -15,7 +15,7 @@ import { Input } from "@/components/ui/input";
 import { readProductMeta } from "@/lib/api/product-metadata";
 import type { ProductSearchResult } from "@/lib/api/types";
 import { useSearchProducts } from "@/features/search/queries";
-import { useResolveProductMetadata } from "@/features/products/use-resolve-metadata";
+import { useResolveProducts } from "@/features/products/use-resolve-metadata";
 
 import {
   DEFAULT_RECOMMENDATION_FILTERS,
@@ -115,21 +115,16 @@ export function RecommendationExplorer() {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
   const recommendations = useProductRecommendations(selected?.product_id ?? null);
-  const resolveMeta = useResolveProductMetadata();
 
   const items = useMemo(() => recommendations.data?.recommendations ?? [], [recommendations.data]);
 
-  // Resolve the recommended products' names once a set arrives.
-  const resolve = resolveMeta.mutate;
-  useEffect(() => {
-    if (!selected || items.length === 0) return;
-    const meta = readProductMeta(selected.metadata);
-    const text = [meta.name, meta.brand, meta.category, meta.description].filter(Boolean).join(" ");
-    if (!text.trim()) return;
-    resolve({ text, productIds: items.map((r) => r.product_id) });
-  }, [selected, items, resolve]);
+  // Resolve the recommended ids to real products, in one request. This used to
+  // run a text search and keep whichever ids happened to come back, which is
+  // why every card rendered as "Unresolved product".
+  const resolved = useResolveProducts(items.map((recommendation) => recommendation.product_id));
 
-  const metaMap = resolveMeta.data ?? {};
+  const metaMap = resolved.data?.meta ?? {};
+  const missingIds = resolved.data?.missing;
   const counts = useMemo(() => overlapSummary(items), [items]);
   const visible = useMemo(
     () => sortRecommendations(filterRecommendations(items, filters), sortKey, sortDir),
@@ -234,6 +229,13 @@ export function RecommendationExplorer() {
                       recommendation={recommendation}
                       rank={index + 1}
                       meta={metaMap[recommendation.product_id]}
+                      resolutionState={
+                        resolved.isPending
+                          ? "loading"
+                          : missingIds?.has(recommendation.product_id)
+                            ? "missing"
+                            : "resolved"
+                      }
                     />
                   </li>
                 ))}

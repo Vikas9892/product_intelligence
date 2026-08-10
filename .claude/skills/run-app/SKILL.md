@@ -5,14 +5,19 @@ description: Launch and drive the Product Intelligence stack — Next.js fronten
 
 # Running the Product Intelligence stack
 
-Three layers, each independently useful. Start only as deep as the
+Four processes, each independently useful. Start only as deep as the
 change you are verifying needs.
 
 | Layer | Needed for | Cost |
 |---|---|---|
 | Frontend only | UI shell, routing, layout, empty/error states | seconds |
 | \+ Backend | search, products, system health | seconds |
-| \+ Redis/Qdrant | dashboard metrics, pipeline activity, ingest | needs Docker |
+| \+ Redis/Qdrant | dashboard metrics, pipeline activity | needs Docker |
+| \+ Worker pool | **upload / ingest** — nothing else | seconds |
+
+**The worker is a separate OS process and is easy to forget.** See
+[§4](#4-worker-pool); it is the single most common cause of a
+"broken" app here.
 
 ## 1. Frontend
 
@@ -80,6 +85,45 @@ legible rather than fatal:
 So: seeing exactly those two cards fail means the backing services are
 down, not that the frontend or backend is broken.
 
+## 4. Worker pool
+
+```bash
+uv run --directory backend python scripts/run_workers.py   # = make worker
+```
+
+**`uvicorn app.main:app` never runs `WorkerManager`** — `run_workers.py`
+says so in its own docstring, and the architecture diagram draws the
+worker as a box separate from the Upload API. Starting the backend does
+*not* start the worker. Nothing in the UI tells you it is missing.
+
+Without it, the upload endpoint still accepts the file and enqueues the
+job — it returns `202 Accepted`, so the frontend has no error to show.
+The job then sits in Redis with nothing to consume it, and the UI parks
+on **step 1 Queued at 0%** forever.
+
+That symptom is worth recognizing precisely, because it looks like a
+frontend bug and is not:
+
+| Observation | Meaning |
+|---|---|
+| Stuck at Queued, 0%, no error, no failed request | worker not running |
+| `queue_depth` climbing in `/api/v1/system/health` | worker not running |
+| `/api/v1/jobs/dead-letter` empty while stuck | job was never picked up, not failed |
+| Stuck at Processing, then dead-letter grows | worker *is* running; a pipeline stage is failing |
+
+Confirm with:
+
+```bash
+curl -s --max-time 20 http://127.0.0.1:8000/api/v1/system/health
+```
+
+`workers: 4` there is configured concurrency, **not** proof a worker
+process exists — that field reads the same whether or not the pool is
+running. `queue_depth` is the field that actually tells you.
+
+Starting the worker drains whatever has piled up, so a queue that was
+stuck clears on its own without re-uploading.
+
 ## Driving it in a browser
 
 `chromium-cli` is not installed here, and the Claude-in-Chrome extension
@@ -94,6 +138,11 @@ cd frontend && node .claude/skills/run-app/scripts/drive.js
 It navigates the Dashboard and AI Search, submits a real query,
 screenshots each step, and prints every response with status >= 400.
 Point it at another port with `BASE_URL=http://localhost:3000`.
+
+Add `--upload` to also exercise the worker pipeline end to end — it
+uploads a sample image, waits for the redirect to `/products/<id>`, and
+fails loudly if the job never completes. That flag writes a real product
+to the catalog, which is why it is opt-in.
 
 Two gotchas baked into that script, worth knowing if you write your own:
 

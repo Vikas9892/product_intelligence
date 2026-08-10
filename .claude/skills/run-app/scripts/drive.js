@@ -74,6 +74,39 @@ const OUT_DIR =
   await settle();
   console.log(`search submitted -> ${await shoot('search-result')}`);
 
+  // Opt-in: exercises the worker pipeline and adds a real row to the catalog.
+  if (process.argv.includes('--upload')) {
+    const sampleDir = path.join(REPO_ROOT, 'backend/storage/processed');
+    const sample = fs
+      .readdirSync(sampleDir)
+      .find((f) => /\.(jpe?g|png|webp)$/i.test(f));
+    if (!sample) throw new Error(`no sample image in ${sampleDir}`);
+
+    await page.goto(BASE_URL + '/upload', { waitUntil: 'domcontentloaded', timeout: 120000 });
+    await page.setInputFiles('input[type="file"]', path.join(sampleDir, sample));
+    await page.locator('input[name="name"]').fill('Smoke Test Sneaker');
+    await page.locator('input[name="brand"]').fill('Nike');
+    await page.locator('input[name="category"]').fill('men-shoes');
+    await page.locator('input[name="price"]').fill('2499');
+    // NOT [name="description"] -- that also matches <meta name="description">.
+    await page.locator('textarea').first().fill('Smoke test upload.');
+    await page.getByRole('button', { name: /upload|submit|process/i }).last().click();
+
+    // Do NOT stop at 100%: the redirect to /products/<id> lands after it.
+    // Parking on step 1 "Queued" at 0% means the worker pool is not running.
+    let landed = false;
+    for (let i = 0; i < 40; i++) {
+      await page.waitForTimeout(3000);
+      if (/\/products\//.test(page.url())) { landed = true; break; }
+      if (/failed/i.test(await page.locator('body').innerText())) break;
+    }
+    await settle();
+    console.log(
+      `upload -> ${landed ? 'completed, redirected to ' + page.url() : 'DID NOT COMPLETE (worker running?)'} | ${await shoot('upload-result')}`
+    );
+    if (!landed) failures.push('upload never reached the product page');
+  }
+
   const unique = [...new Set(failures)];
   console.log(`\n--- failed requests (${unique.length}) ---`);
   for (const f of unique.slice(0, 20)) console.log(f);

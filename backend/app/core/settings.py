@@ -125,6 +125,11 @@ class VectorStoreSettings(BaseModel):
     """
 
     url: str = "http://localhost:6333"
+    #: API key for a managed Qdrant (Qdrant Cloud rejects unauthenticated
+    #: requests). `None` — the default — sends no key at all, which is what
+    #: a local/compose Qdrant expects, so this stays absent rather than
+    #: empty-string: `QdrantClient(api_key="")` is not the same as omitting it.
+    api_key: SecretStr | None = None
     image_collection_name: str = constants.DEFAULT_IMAGE_COLLECTION_NAME
     image_vector_size: int = Field(default=constants.DEFAULT_IMAGE_VECTOR_SIZE, gt=0)
     text_collection_name: str = constants.DEFAULT_TEXT_COLLECTION_NAME

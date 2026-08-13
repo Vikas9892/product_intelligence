@@ -72,11 +72,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
 
-# `tini` is the only added package. Python is already present in the base.
-# It exists to make signal handling correct -- see ENTRYPOINT below.
-# The apt lists are removed in the same layer so they are not committed.
+# Two added packages. Python is already present in the base, and the apt lists
+# are removed in the same layer so they are not committed.
+#
+# `tini` makes signal handling correct -- see ENTRYPOINT below.
+#
+# `redis-server` is present but NOT started by default. It is used only where
+# the platform offers no managed Redis and no persistent disk -- Hugging Face
+# Spaces -- and is opted into at runtime with START_EMBEDDED_REDIS=1
+# (scripts/start_all.py). Installing it unconditionally costs a few MB and
+# keeps one image valid on every target, rather than forking the Dockerfile per
+# platform; leaving it *stopped* by default is what prevents a local Redis from
+# silently shadowing a real managed one.
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y tini \
+    && apt-get install --no-install-recommends -y tini redis-server \
     && rm -rf /var/lib/apt/lists/*
 
 # Unprivileged runtime user. A fixed UID/GID (not an auto-assigned one) keeps

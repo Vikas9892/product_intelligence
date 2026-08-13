@@ -1,3 +1,21 @@
+---
+title: Product Intelligence
+emoji: 🛍️
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
+<!--
+The YAML block above configures this directory when it is published as a
+Hugging Face Space (see docs/DEPLOY.md). Hugging Face reads only the
+front matter and renders everything below it as the Space description, so
+this stays a normal backend README everywhere else. `app_port` must match
+the port scripts/start_all.py binds uvicorn to.
+-->
+
 # Product Intelligence Platform
 
 > A multi-modal product intelligence engine that turns a product image and its metadata into search, recommendations, duplicate detection, and price estimates — built as a fully-typed, test-driven FastAPI backend.

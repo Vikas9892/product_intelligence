@@ -25,6 +25,11 @@ cross-encoder, so the instance must be sized for two model sets, not one.
 Moving uploads to object storage is what removes this constraint; until then
 this is the honest trade.
 
+Hugging Face Spaces needs the same shape for a different reason: a Space is a
+single container, so there is nowhere else for a worker to run. It also has no
+managed Redis, which `START_EMBEDDED_REDIS` addresses by adding a third child
+— see that constant below.
+
 Two child processes rather than one process running both: `WorkerManager`
 does CPU-bound model inference on its event loop, and sharing a loop with
 uvicorn would let a single embedding batch stall every in-flight HTTP request.
@@ -58,6 +63,22 @@ GRACEFUL_SHUTDOWN_SECONDS = 25
 #: app's own default keeps this script runnable outside Render unchanged.
 PORT = os.environ.get("PORT", "8000")
 
+#: Run a Redis server inside this container as a third child.
+#:
+#: Off by default: anywhere there is a managed Redis (Render Key Value, Redis
+#: Cloud, a compose service) that one is the right one, and a second local
+#: instance would silently shadow it — the app would connect to an empty queue
+#: and look idle while jobs piled up somewhere else.
+#:
+#: It exists for Hugging Face Spaces, which offers no managed Redis and no
+#: persistent disk. There, an in-container Redis costs ~10 MB of a 16 GB
+#: allowance and removes an external dependency whose free tiers meter
+#: commands — this queue polls with a non-blocking LPOP once a second per
+#: worker loop, which bankrupts a per-command quota while doing nothing.
+#: Its data does not survive a restart, which on an ephemeral Space matches
+#: what happens to the uploaded images anyway.
+EMBEDDED_REDIS = os.environ.get("START_EMBEDDED_REDIS", "").lower() in {"1", "true", "yes"}
+
 
 def _spawn(name: str, argv: list[str]) -> subprocess.Popen[bytes]:
     print(f"[start_all] starting {name}: {' '.join(argv)}", flush=True)
@@ -65,15 +86,38 @@ def _spawn(name: str, argv: list[str]) -> subprocess.Popen[bytes]:
 
 
 def main() -> int:
-    children: dict[str, subprocess.Popen[bytes]] = {
-        # No --workers: a second uvicorn worker would be a third and fourth
-        # copy of the models in the same container.
-        "api": _spawn(
-            "api",
-            [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", PORT],
-        ),
-        "worker": _spawn("worker", [sys.executable, "scripts/run_workers.py"]),
-    }
+    children: dict[str, subprocess.Popen[bytes]] = {}
+
+    if EMBEDDED_REDIS:
+        # Persistence off in both forms: there is no durable disk to write to,
+        # and leaving RDB snapshots on means Redis refuses writes after a failed
+        # background save (stop-writes-on-bgsave-error), turning a disk quirk
+        # into a queue outage.
+        children["redis"] = _spawn(
+            "redis",
+            ["redis-server", "--save", "", "--appendonly", "no", "--port", "6379"],
+        )
+
+    children.update(
+        {
+            # No --workers: a second uvicorn worker would be a third and fourth
+            # copy of the models in the same container.
+            "api": _spawn(
+                "api",
+                [
+                    sys.executable,
+                    "-m",
+                    "uvicorn",
+                    "app.main:app",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    PORT,
+                ],
+            ),
+            "worker": _spawn("worker", [sys.executable, "scripts/run_workers.py"]),
+        }
+    )
 
     shutting_down = False
 

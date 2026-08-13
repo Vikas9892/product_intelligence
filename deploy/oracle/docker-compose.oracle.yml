@@ -1,0 +1,71 @@
+# Public-VM overlay: adds TLS termination and closes the direct ports.
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.prod.yml \
+#     -f deploy/oracle/docker-compose.oracle.yml \
+#     up -d --build
+#
+# Layered on top of docker-compose.prod.yml (immutable images, no source
+# mounts, production commands), which this does not repeat. What it adds is
+# the one thing a public host needs and a local one does not: a single
+# TLS-terminating entry point, with everything else unreachable from outside.
+#
+# Sized for an Oracle Cloud Always Free Ampere A1 instance (ARM64, up to 4
+# OCPU / 24 GB, free indefinitely), but nothing here is Oracle-specific — any
+# VM with Docker works.
+#
+# Requires Docker Compose v2.24+ for the `!reset` tag used below. Check with
+# `docker compose version`. On an older version, delete the two `ports:
+# !reset []` blocks — the VCN firewall still keeps those ports unreachable
+# from the internet, you simply lose the second layer of defence.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: pi-caddy
+    restart: unless-stopped
+    networks: [app]
+    ports:
+      # The only ports open to the world. 80 is not merely a redirect: the
+      # ACME HTTP-01 challenge is served on it, so closing it breaks
+      # certificate issuance and every later renewal.
+      - "80:80"
+      - "443:443"
+    environment:
+      # Your hostname, or :80 for plain HTTP against a bare IP. Read from the
+      # host environment or the .env file beside docker-compose.yml.
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS to your hostname, or to :80 for HTTP-only}
+    volumes:
+      - ./deploy/oracle/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. A named volume, because losing
+      # this means re-issuing on every restart and Let's Encrypt rate-limits
+      # that (5 duplicate certificates per week).
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      frontend:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Stop publishing these to the host. Reachability is now Caddy's job, and
+  # the API in particular should not be answering directly from the internet:
+  # it has no authentication in the default single-tenant configuration
+  # (ENTERPRISE__ENABLED is off), so an open port is an open catalog and an
+  # open upload endpoint.
+  #
+  # Redis and Qdrant need no entry here — docker-compose.yml already declines
+  # to publish them.
+  frontend:
+    ports: !reset []
+
+  api:
+    ports: !reset []
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,32 @@
+# Caddy config for the single-VM deployment (see docs/DEPLOY.md).
+#
+# SITE_ADDRESS is supplied by docker-compose.oracle.yml from the host
+# environment. Set it to your hostname (e.g. product-intel.duckdns.org) and
+# Caddy obtains and renews a Let's Encrypt certificate automatically, with no
+# certbot step and no cron job.
+#
+# Set it to :80 instead to serve plain HTTP against a bare IP. That works for
+# a quick check but should not be the end state: the browser sends every
+# upload and every search over the open internet in the clear.
+
+{$SITE_ADDRESS} {
+	# Everything goes to the Next.js frontend, which is the only service that
+	# should be reachable from outside. The browser talks to this origin
+	# alone; the frontend re-proxies /api/v1/* to the API server-side over the
+	# private `app` network (BACKEND_ORIGIN=http://api:8000, set in
+	# docker-compose.yml). The API, Redis and Qdrant are never exposed.
+	reverse_proxy frontend:3000
+
+	# Uploads are multipart images and the API caps them at
+	# STORAGE__MAX_UPLOAD_SIZE_MB (10 by default). Caddy streams request
+	# bodies rather than buffering them, so no size directive is needed here —
+	# the app's own limit stays the single source of truth, and raising it
+	# there does not require also remembering to raise it here.
+
+	encode gzip
+
+	log {
+		output stdout
+		format console
+	}
+}

@@ -39,6 +39,20 @@ from app.utils.facets import normalize_facet
 logger = get_logger(__name__)
 
 
+def _build_client() -> QdrantClient:
+    """Construct the default Qdrant client from settings.
+
+    `api_key` is passed only when one is configured. Qdrant Cloud requires
+    it; a local/compose Qdrant runs unauthenticated and is happiest being
+    sent no key at all, so this omits the kwarg rather than passing `None`
+    unconditionally.
+    """
+    api_key = settings.vector_store.api_key
+    if api_key is None:
+        return QdrantClient(url=settings.vector_store.url)
+    return QdrantClient(url=settings.vector_store.url, api_key=api_key.get_secret_value())
+
+
 class QdrantVectorStore(BaseVectorStore):
     """Stores and searches product embedding vectors across two Qdrant collections."""
 
@@ -51,7 +65,7 @@ class QdrantVectorStore(BaseVectorStore):
         text_collection_name: str | None = None,
         text_vector_size: int | None = None,
     ) -> None:
-        self._client = client if client is not None else QdrantClient(url=settings.vector_store.url)
+        self._client = client if client is not None else _build_client()
         self._collection_names: dict[VectorCollection, str] = {
             VectorCollection.IMAGE: (
                 image_collection_name

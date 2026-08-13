@@ -18,7 +18,16 @@ const BACKEND_ORIGIN = process.env.BACKEND_ORIGIN ?? "http://localhost:8000";
  * - `rewrites()` proxies the API — see below.
  */
 const nextConfig: NextConfig = {
-  output: "standalone",
+  /**
+   * `standalone` everywhere except Vercel.
+   *
+   * The Docker image needs it — `frontend/Dockerfile` copies
+   * `.next/standalone` and runs that server directly. Vercel does not: it
+   * detects Next.js and builds with its own pipeline, where `standalone` is
+   * redundant and its output file tracing is a known source of missing-file
+   * failures. `VERCEL` is set by Vercel during the build.
+   */
+  output: process.env.VERCEL ? undefined : "standalone",
   reactStrictMode: true,
   images: {
     remotePatterns: [],

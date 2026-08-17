@@ -9,9 +9,10 @@ repos:
         # value inherited from a base file. It is valid Compose YAML — and
         # `docker compose config` parses it — but it is a custom tag, and this
         # hook's generic parser fails with "could not determine a constructor
-        # for the tag". Excluding the one file that needs it keeps the check on
-        # for every other YAML in the repo, including the other compose files.
-        exclude: ^deploy/oracle/docker-compose\.oracle\.yml$
+        # for the tag". Excluding only the files that need it keeps the check
+        # on for every other YAML in the repo, including the base compose files
+        # and both GitHub Actions workflows.
+        exclude: ^deploy/(vm/docker-compose\.vm|aws/docker-compose\.hub)\.yml$
       - id: check-toml
       - id: check-added-large-files
       - id: check-merge-conflict

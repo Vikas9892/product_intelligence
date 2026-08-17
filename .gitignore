@@ -31,6 +31,19 @@ coverage.xml
 .env.*
 !.env.example
 
+# SSH material for the EC2 deployment (docs/aws/EC2.md). The .pem downloaded
+# from the AWS console and the CI deploy keypair both tend to get left in the
+# working directory, where a single `git add -A` publishes them to a public
+# repository. pre-commit's detect-private-key hook catches this too, but only
+# for someone who has run `make install` -- this covers everyone else.
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+pi-deploy*
+pi-cicd*
+!*.pub
+
 # --- IDE / editor ---
 .vscode/
 .idea/

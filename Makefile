@@ -4,10 +4,17 @@ BACKEND := backend
 BACKING := redis qdrant
 DEV     := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 PROD    := docker compose -f docker-compose.yml -f docker-compose.prod.yml
+# The deployed configuration (docs/aws/EC2.md), runnable from a laptop for
+# parity checks. The four files layer: stack, production profile, TLS entry
+# point, Docker Hub images.
+VM      := docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+             -f deploy/vm/docker-compose.vm.yml \
+             -f deploy/aws/docker-compose.hub.yml
 
 .PHONY: help install run worker lint format typecheck test clean \
 	services-up services-down services-status services-logs services-reset \
-	up-dev up-prod down logs ps reset demo smoke catalog
+	up-dev up-prod down logs ps reset demo smoke catalog \
+	deploy-config deploy-pull deploy-up
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -47,6 +54,21 @@ up-dev: ## Start the whole stack in development mode (source mounted, hot reload
 
 up-prod: ## Start the whole stack production-like (immutable images, no mounts)
 	$(PROD) up -d --build --wait
+
+# --- Deployed configuration (docs/aws/EC2.md) -------------------------------
+# Normally CI runs these on the instance; they are here so the exact command
+# can be checked, and run by hand during an incident, without retyping four -f
+# flags. All three need DOCKERHUB_USER and SITE_ADDRESS set (the instance keeps
+# them in .env beside this file).
+
+deploy-config: ## Render the deployed compose configuration without starting anything
+	$(VM) config
+
+deploy-pull: ## Pull the Docker Hub images the deployment runs
+	$(VM) pull api worker frontend
+
+deploy-up: ## Start the deployed configuration from pulled images (never builds)
+	$(VM) up -d --no-build --remove-orphans
 
 down: ## Stop the whole stack (named volumes, and therefore data, are kept)
 	docker compose down

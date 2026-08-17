@@ -138,13 +138,25 @@ without it that prefix grows forever.
 | Drop CloudFront, ALB only | ~$115 | Edge caching and the free egress tier; ALB becomes the public entrance |
 | **Replace NAT with interface endpoints** (ECR ×2, Logs, SSM, Secrets) | ~$115 | ~5 × $7 ≈ $36 vs NAT's $33 — **not actually cheaper**, but strictly more private. Considered and rejected on cost parity. |
 | **ECS on EC2** (one `t4g.medium`, all tasks) | ~$60–70 | AMI patching, capacity providers, bin-packing |
-| **Single EC2 running Docker Compose** | ~$12–15 | Everything this stage exists to demonstrate: service isolation, independent scaling, rolling deploys, task IAM |
+| **Single EC2 running Docker Compose** | **~$30** — see [EC2.md](./EC2.md) | Everything this stage exists to demonstrate: service isolation, independent scaling, rolling deploys, task IAM |
 | **Qdrant Cloud free tier** instead of self-hosted | −$18 | Violates the "not publicly exposed" constraint — see [ADR-004](./ADR-004-qdrant.md) |
 
 The single-EC2 option deserves respect rather than dismissal: for a portfolio that must
 simply *be reachable* at low cost, it is the rational choice, and it runs the exact Compose
-stack Stage 8 already produces. The ECS design is worth its premium only while the point is
-demonstrating production engineering — which is precisely the point here.
+stack Stage 8 already produces.
+
+**It is the option that was taken.** [EC2.md](./EC2.md) is the deployed route —
+a `t4g.medium` at ~$30/month against a ~$120 ECS bill, for a workload that is
+idle most of the time. The ~$30 is honest: $24.53 compute, $1.60 for a 20 GB
+`gp3` root volume, and $3.65 for the public IPv4 address, which bills hourly
+even while the instance is stopped. On Spot it is closer to **$13**.
+
+The structural reason it wins is the row three lines up: **there is no NAT
+Gateway.** A single VM lives in a public subnet behind the internet gateway and
+routes its own egress, which deletes the $32.85/month line that no amount of
+scaling down can reach in the ECS design. What it gives up is exactly the column
+to the right of it, and the ECS design stays documented as the path when the
+load justifies the premium.
 
 ---
 

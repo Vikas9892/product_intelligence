@@ -1,0 +1,58 @@
+# Docker Hub overlay: run pre-built images instead of building on the host.
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.prod.yml \
+#     -f deploy/vm/docker-compose.vm.yml \
+#     -f deploy/aws/docker-compose.hub.yml \
+#     pull
+#   ... then `up -d --no-build`
+#
+# This is the last overlay in the chain and the only one that is specific to
+# how the images arrive. Everything before it — the stack itself, the
+# production profile, the TLS entry point — is unchanged and unaware.
+#
+# Why this file exists at all: docker-compose.yml carries `build:` sections, so
+# on a bare VM `up` would compile the backend image in place. That means
+# installing torch on the instance, which on a 4 GB t4g.medium is 15+ minutes
+# of the same two cores that are supposed to be serving the demo, and it needs
+# the source tree, the build cache and enough free disk for both. Building in
+# CI and pulling the result moves all of that off the box.
+#
+# Requires Docker Compose v2.24+ for `!reset`. Check with
+# `docker compose version`.
+
+services:
+  # `build: !reset null` removes the section inherited from docker-compose.yml
+  # rather than overriding it. Merely setting `image:` is not enough: with a
+  # `build:` still present, `docker compose up` rebuilds from source whenever
+  # the named tag is missing locally, which is exactly the 15-minute on-host
+  # compile this file exists to avoid. Deploys also pass --no-build as a
+  # belt-and-braces second guard.
+  api:
+    build: !reset null
+    image: ${DOCKERHUB_USER:?set DOCKERHUB_USER to your Docker Hub account name}/product-intelligence-backend:${IMAGE_TAG:-latest}
+
+  # The same image as `api`, deliberately — one build, two runtime roles, the
+  # arrangement docker-compose.yml's x-backend anchor already establishes.
+  # Pinning both to the identical tag is what keeps that true across a deploy:
+  # the API writes an upload to the shared volume and the worker reads that
+  # exact path, so a version skew between them is a class of bug worth making
+  # structurally impossible.
+  worker:
+    build: !reset null
+    image: ${DOCKERHUB_USER:?set DOCKERHUB_USER to your Docker Hub account name}/product-intelligence-backend:${IMAGE_TAG:-latest}
+
+  frontend:
+    build: !reset null
+    image: ${DOCKERHUB_USER:?set DOCKERHUB_USER to your Docker Hub account name}/product-intelligence-frontend:${IMAGE_TAG:-latest}
+
+# IMAGE_TAG defaults to `latest` so a hand-run `docker compose up` on the host
+# still works. CI overrides it with the commit SHA (see
+# .github/workflows/deploy.yml), because `latest` cannot answer "which commit
+# is actually running right now" — and that is the question you ask first when
+# a deploy misbehaves. `docker compose ps --format '{{.Image}}'` answers it
+# when the tag is a SHA and shrugs when it is `latest`.
+#
+# Both tags are pushed for every build, so the two are the same bits; the SHA
+# is simply the one that stays meaningful.

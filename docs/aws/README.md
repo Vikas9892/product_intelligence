@@ -1,15 +1,30 @@
-# AWS architecture (design)
+# AWS
 
-> **Nothing here is deployed.** No AWS resources exist, no Terraform is written, and no
-> application code was changed to produce these documents. This is the design Stage 11 will
-> implement.
+Two documents describe two different things, and the distinction is the point.
+
+**[EC2.md](./EC2.md) is what is deployed** — one `t4g.medium` running the
+Compose stack, ~$30/month, images from Docker Hub, rolled by GitHub Actions.
+
+**Everything else on this page is the ECS/Fargate design, which is not
+deployed.** No ECS resources exist and no Terraform is written. It was designed
+in full, costed at ~$115–125/month, and then declined for this deployment — the
+reason is in [COST.md](./COST.md): ALB + NAT Gateway + ElastiCache is ~$61/month
+that bills whether or not anyone visits, and a portfolio that is idle most of
+the time should not be paying a load balancer to front traffic that is not
+arriving.
+
+Both are kept because the *comparison* is the engineering content. Designing
+the production-scale architecture and then choosing the $30 one for a workload
+that does not need it is the decision; deploying ECS to be able to say "ECS"
+would be the opposite of it.
 
 ## Start here
 
 | Document | What it answers |
 |---|---|
-| **[ARCHITECTURE.md](./ARCHITECTURE.md)** | The whole design: diagrams, scaling, observability, failure modes, environments, rejected alternatives |
-| [SECURITY.md](./SECURITY.md) | What is internet-facing, security groups, IAM, secrets, TLS — and what this design deliberately does not do |
+| **[EC2.md](./EC2.md)** | **The deployed route.** Provisioning, cost guardrails, CI/CD, operating it, tearing it down |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | The ECS design in full: diagrams, scaling, observability, failure modes, environments, rejected alternatives |
+| [SECURITY.md](./SECURITY.md) | What is internet-facing, security groups, IAM, secrets, TLS — and what the ECS design deliberately does not do |
 | [COST.md](./COST.md) | Verified unit prices, derived monthly totals, and how to make it cheap when idle |
 
 ## Decisions

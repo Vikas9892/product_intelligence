@@ -1,6 +1,6 @@
-# Caddy config for the single-VM deployment (see docs/DEPLOY.md).
+# Caddy config for the single-VM deployment (docs/aws/EC2.md, docs/DEPLOY.md).
 #
-# SITE_ADDRESS is supplied by docker-compose.oracle.yml from the host
+# SITE_ADDRESS is supplied by docker-compose.vm.yml from the host
 # environment. Set it to your hostname (e.g. product-intel.duckdns.org) and
 # Caddy obtains and renews a Let's Encrypt certificate automatically, with no
 # certbot step and no cron job.

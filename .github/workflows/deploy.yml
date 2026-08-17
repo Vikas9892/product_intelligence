@@ -1,0 +1,214 @@
+# Build ARM64 images, push them to Docker Hub, and roll the EC2 instance.
+#
+#   push to main -> CI (ci.yml) -> this workflow -> Docker Hub -> EC2
+#
+# Deliberately gated on CI rather than triggered by the same push: `on:
+# workflow_run` fires only after ci.yml has *finished*, and the `if` below
+# drops the run unless it finished green. A plain `on: push` here would race
+# CI and could deploy a commit whose tests are still running -- or that failed
+# them outright.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # Manual re-deploy: re-pushes the current main and rolls the instance without
+  # needing an empty commit. Useful after changing a host-side value.
+  workflow_dispatch:
+
+# Never let two deploys overlap. The second would `docker compose up` against
+# a host mid-roll from the first, and the resulting container set is whichever
+# one happened to finish last. `cancel-in-progress: false` because a deploy
+# that is already restarting containers should be allowed to finish rather
+# than be killed halfway.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BACKEND_IMAGE: product-intelligence-backend
+  FRONTEND_IMAGE: product-intelligence-frontend
+
+jobs:
+  build:
+    name: Build and push (${{ matrix.image }}, arm64)
+    # Skip the whole workflow when CI failed. On workflow_dispatch there is no
+    # workflow_run payload, so `conclusion` is empty and the second clause
+    # carries it.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    # A GitHub-hosted ARM runner, free on public repositories. This is a
+    # *native* arm64 build, not QEMU emulation: emulating an arm64 torch +
+    # transformers install on an x86 runner takes well over half an hour and
+    # regularly times out. Matching the runner to the target architecture
+    # removes the problem instead of working around it.
+    runs-on: ubuntu-24.04-arm
+
+    strategy:
+      # Independent images; a frontend failure should not hide whether the
+      # backend built.
+      fail-fast: false
+      matrix:
+        include:
+          - image: product-intelligence-backend
+            context: ./backend
+          - image: product-intelligence-frontend
+            context: ./frontend
+
+    steps:
+      - name: Resolve the commit to build
+        id: rev
+        # workflow_run reports `github.sha` as the tip of the default branch at
+        # dispatch time, which is not necessarily the commit CI actually
+        # tested. head_sha is. Getting this wrong ships a different commit than
+        # the one that went green.
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.rev.outputs.sha }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          # A Docker Hub *access token*, not the account password: it is
+          # scoped, individually revocable, and does not unlock the account
+          # itself if this repository's secrets are ever exposed.
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/arm64
+          push: true
+          # Two tags for one build. The SHA tag is the real identity -- it is
+          # what the deploy pins and what makes "which commit is running?"
+          # answerable on the box. `latest` exists so a hand-run `docker
+          # compose up` on the host still resolves to something current.
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ steps.rev.outputs.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest
+          # Layer cache in GitHub's own storage. The backend's dependency layer
+          # (torch, ~200 MB CPU-only) is the expensive one and changes only
+          # when uv.lock does, so this turns most builds into a source-layer
+          # rebuild. `mode=max` caches intermediate stages too, which matters
+          # for a multi-stage build where the costly work happens in `builder`
+          # and would otherwise not be cached at all.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          provenance: false
+
+  deploy:
+    name: Roll the EC2 instance
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve the commit to deploy
+        id: rev
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # A pinned host key from a secret, not `ssh-keyscan` at run time.
+          # Scanning trusts whatever answers on the first connection of every
+          # run, which is trust-on-first-use repeated forever -- it would
+          # accept an impostor silently. Generate the value once from the
+          # instance (see docs/aws/EC2.md) and store it.
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Pull images and restart the stack
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          IMAGE_TAG: ${{ steps.rev.outputs.sha }}
+        run: |
+          # -o SendEnv is not used: sshd's default AcceptEnv does not include
+          # these, so the values are interpolated into the remote script
+          # instead. They are not secret -- a Docker Hub account name and a
+          # commit SHA -- and both images are public, so the instance itself
+          # never holds Docker Hub credentials.
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes \
+            "${EC2_USER}@${EC2_HOST}" \
+            "DOCKERHUB_USER='${DOCKERHUB_USER}' IMAGE_TAG='${IMAGE_TAG}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/product_intelligence
+
+          # The compose files and the Caddyfile are read from the checkout on
+          # the host, so it must match the commit the images were built from --
+          # pinned to that exact SHA, not to origin/main. They differ whenever
+          # someone pushes again while a deploy is in flight, and the result
+          # would be new compose files driving old images.
+          #
+          # --hard, not merge: this working tree is a deployment artifact, not
+          # a place to edit. Local changes here are drift and should be lost.
+          git fetch --quiet origin main
+          git reset --quiet --hard "${IMAGE_TAG}"
+
+          COMPOSE="docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.prod.yml \
+            -f deploy/vm/docker-compose.vm.yml \
+            -f deploy/aws/docker-compose.hub.yml"
+
+          $COMPOSE pull --quiet api worker frontend
+          # --no-build guards against a future edit reintroducing a build
+          # section; --remove-orphans clears containers from a previous
+          # topology so a renamed service does not linger and hold its ports.
+          $COMPOSE up -d --no-build --remove-orphans
+
+          # The root volume is 30 GB and each backend tag is ~3.3 GB, so
+          # without this a few deploys fill the disk -- which surfaces as
+          # Qdrant refusing writes, not as an obvious disk error.
+          docker image prune --force
+          REMOTE
+
+      - name: Verify the deployment answers
+        env:
+          SITE_URL: ${{ secrets.SITE_URL }}
+        run: |
+          # Containers being "up" is not the same as the stack working: the API
+          # imports torch at startup and takes tens of seconds before it serves
+          # anything. Poll rather than sleep-and-hope.
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 10 "${SITE_URL}/api/v1/system/health" > /tmp/health.json; then
+              echo "Healthy after ${attempt} attempt(s):"
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "attempt ${attempt}: not ready yet"
+            sleep 10
+          done
+          echo "::error::Stack did not report healthy within 5 minutes"
+          exit 1

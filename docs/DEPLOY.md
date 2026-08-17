@@ -1,14 +1,24 @@
 # Deploying
 
-Two supported routes.
+Three supported routes.
 
-| | Single VM (free) | Managed (paid) |
-|---|---|---|
-| Everything | one Oracle Always Free VM — **$0** | Render + Vercel — **~$38/mo** |
-| Persistence | full: named volumes on the VM | full: Render disk + Qdrant Cloud |
-| Effort | you administer one box | click-to-deploy |
+| | AWS EC2 (credits) | Single VM (free) | Managed (paid) |
+|---|---|---|---|
+| Everything | one `t4g.medium` — **~$30/mo** | one Oracle Always Free VM — **$0** | Render + Vercel — **~$38/mo** |
+| Persistence | full: named volumes on the VM | full: named volumes on the VM | full: Render disk + Qdrant Cloud |
+| Images | built in CI, pulled from Docker Hub | built on the VM | built by the platform |
+| Effort | you administer one box | you administer one box | click-to-deploy |
 
-The free route is described first and is the default.
+**AWS EC2 is the deployed route** and has its own document:
+**[docs/aws/EC2.md](./aws/EC2.md)** — provisioning, cost guardrails, and the
+GitHub Actions pipeline. It runs the same Compose stack described below with
+two additions: `deploy/aws/docker-compose.hub.yml` swaps the local builds for
+Docker Hub images, and `.github/workflows/deploy.yml` rolls the instance on
+every green build.
+
+The Oracle route below is the same architecture at $0, and is the better choice
+if you have no credits to spend. Everything in it applies to any VM — the
+overlay in `deploy/vm/` names no cloud.
 
 > **Why not Hugging Face Spaces?** As of mid-2026 the **Docker SDK is a paid
 > feature**, requiring PRO ($9/mo) on personal accounts. Only Static Spaces
@@ -105,7 +115,7 @@ sudo usermod -aG docker $USER && newgrp docker
 
 Verify `docker compose version` is **v2.24 or newer** — the overlay uses the
 `!reset` tag. If it is older, see the note at the top of
-`deploy/oracle/docker-compose.oracle.yml`.
+`deploy/vm/docker-compose.vm.yml`.
 
 ## 4. Get a hostname
 
@@ -134,7 +144,7 @@ echo "SITE_ADDRESS=product-intel.duckdns.org" > .env
 docker compose \
   -f docker-compose.yml \
   -f docker-compose.prod.yml \
-  -f deploy/oracle/docker-compose.oracle.yml \
+  -f deploy/vm/docker-compose.vm.yml \
   up -d --build
 ```
 

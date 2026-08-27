@@ -7,7 +7,7 @@ helpers are no-ops with zero runtime cost.
 
 import contextlib
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -73,7 +73,7 @@ def observe(*args: Any, **kwargs: Any) -> Callable[[F], F]:
         try:
             from langfuse import observe as _langfuse_observe
 
-            return _langfuse_observe(*args, **kwargs)
+            return cast(Callable[[F], F], _langfuse_observe(*args, **kwargs))
         except Exception as exc:
             logger.warning("Failed to invoke langfuse.observe: %s", exc)
 
@@ -81,7 +81,7 @@ def observe(*args: Any, **kwargs: Any) -> Callable[[F], F]:
         return func
 
     if len(args) == 1 and callable(args[0]) and not kwargs:
-        return args[0]
+        return cast(Callable[[F], F], args[0])
     return decorator
 
 

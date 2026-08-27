@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-from app.core.config import Settings
 from app.core.langfuse import (
     flush_langfuse,
     get_langfuse_client,
@@ -11,7 +10,7 @@ from app.core.langfuse import (
     update_active_span,
     update_trace_attributes,
 )
-from app.core.settings import LangfuseSettings
+from app.core.settings import LangfuseSettings, Settings
 
 
 class TestLangfuseSettings:
@@ -42,6 +41,8 @@ class TestLangfuseSettings:
             debug=True,
         )
         assert settings.enabled is True
+        assert settings.public_key is not None
+        assert settings.secret_key is not None
         assert settings.public_key.get_secret_value() == "pk-lf-test"
         assert settings.secret_key.get_secret_value() == "sk-lf-test"
         assert settings.host == "http://localhost:3000"

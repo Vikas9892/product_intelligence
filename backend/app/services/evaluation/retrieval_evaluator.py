@@ -145,13 +145,20 @@ class RetrievalEvaluator:
         )
 
         if overall_metrics:
-            if 10 in overall_metrics.ndcg:
-                record_trace_score(name="ndcg@10", value=overall_metrics.ndcg[10])
-            record_trace_score(name="mrr", value=overall_metrics.mrr)
-            if 5 in overall_metrics.hit_rate:
-                record_trace_score(name="hit_rate@5", value=overall_metrics.hit_rate[5])
-            if 5 in overall_metrics.precision:
-                record_trace_score(name="precision@5", value=overall_metrics.precision[5])
+            for task_name, task_metrics in overall_metrics.items():
+                if 10 in task_metrics.ndcg_at_k:
+                    record_trace_score(
+                        name=f"{task_name}_ndcg@10", value=task_metrics.ndcg_at_k[10]
+                    )
+                record_trace_score(name=f"{task_name}_mrr", value=task_metrics.mrr)
+                if 5 in task_metrics.hit_rate_at_k:
+                    record_trace_score(
+                        name=f"{task_name}_hit_rate@5", value=task_metrics.hit_rate_at_k[5]
+                    )
+                if 5 in task_metrics.precision_at_k:
+                    record_trace_score(
+                        name=f"{task_name}_precision@5", value=task_metrics.precision_at_k[5]
+                    )
 
         logger.info(
             "Evaluation run complete: queries=%d, failures=%d, duration=%.4fs",

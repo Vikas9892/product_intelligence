@@ -540,6 +540,22 @@ class LoggingSettings(BaseModel):
     json_logs: bool = False
 
 
+class LangfuseSettings(BaseModel):
+    """Langfuse LLM and retrieval observability configuration.
+
+    When `enabled` is False (the default), tracing is disabled with zero
+    overhead. When set to True, traces and spans are recorded and
+    asynchronously flushed to `host` (defaults to Langfuse Cloud).
+    """
+
+    enabled: bool = False
+    public_key: SecretStr | None = None
+    secret_key: SecretStr | None = None
+    host: str = "https://cloud.langfuse.com"
+    sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+    debug: bool = False
+
+
 class Settings(BaseSettings):
     """Root settings object composed of the grouped settings above.
 
@@ -580,6 +596,7 @@ class Settings(BaseSettings):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    langfuse: LangfuseSettings = Field(default_factory=LangfuseSettings)
 
     @model_validator(mode="after")
     def _validate_production_safety(self) -> "Settings":

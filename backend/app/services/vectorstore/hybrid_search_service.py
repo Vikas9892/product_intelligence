@@ -38,6 +38,7 @@ from typing import Any
 from uuid import UUID
 
 from app.core.config import settings
+from app.core.langfuse import observe, update_active_span
 from app.core.logging import get_logger
 from app.exceptions.errors import (
     HybridSearchException,
@@ -89,6 +90,7 @@ class HybridSearchService:
             reranking_enabled if reranking_enabled is not None else settings.reranker.enabled
         )
 
+    @observe(name="hybrid_product_search")
     async def search(
         self,
         *,
@@ -127,6 +129,18 @@ class HybridSearchService:
         ) and has_text
         retrieval_top_k = (
             max(settings.reranker.top_n, resolved_top_k) if rerank_active else resolved_top_k
+        )
+
+        update_active_span(
+            metadata={
+                "has_image": image is not None,
+                "has_text": has_text,
+                "query_text": text,
+                "resolved_top_k": resolved_top_k,
+                "rerank_active": rerank_active,
+                "image_weight": self._image_weight,
+                "text_weight": self._text_weight,
+            }
         )
 
         if image is not None and not has_text:

@@ -39,6 +39,7 @@ from typing import Any
 from uuid import UUID
 
 from app.core.config import settings
+from app.core.langfuse import observe, record_trace_score, update_active_span
 from app.core.logging import get_logger
 from app.exceptions.errors import DuplicateDetectionException, ResourceNotFoundException
 from app.metrics.metrics_registry import MetricsRegistry
@@ -98,6 +99,7 @@ class DuplicateDetectionService:
         )
         self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
+    @observe(name="duplicate_detection")
     async def detect(
         self,
         *,
@@ -140,6 +142,17 @@ class DuplicateDetectionService:
             max(settings.reranker.top_n, resolved_top_k) if rerank_active else resolved_top_k
         )
 
+        update_active_span(
+            metadata={
+                "product_name": name,
+                "brand": brand,
+                "category": category,
+                "resolved_top_k": resolved_top_k,
+                "resolved_threshold": resolved_threshold,
+                "rerank_active": rerank_active,
+            }
+        )
+
         text = build_text_representation(name, brand, category, description)
         # `reranking_enabled=False`: this class applies its own rerank
         # pass below (substituting into `text_score`, not `score`) — if
@@ -172,6 +185,12 @@ class DuplicateDetectionService:
             raise DuplicateDetectionException(
                 "Failed to score candidates for duplicate detection."
             ) from exc
+
+        record_trace_score(
+            name="duplicate_confidence",
+            value=decision.confidence,
+            comment=f"is_duplicate={decision.is_duplicate}, matched_product={decision.matched_product}",
+        )
 
         self._metrics.record_duplicate_detection(
             similarity_scores=[result.overall_similarity for result in results]

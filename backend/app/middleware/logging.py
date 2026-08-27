@@ -24,6 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
+from app.core.langfuse import update_trace_attributes
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -42,7 +43,16 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             request_id,
         )
 
-        response = await call_next(request)
+        tenant_id = getattr(request.state, "tenant_id", None)
+        client_host = request.client.host if request.client else "unknown"
+
+        with update_trace_attributes(
+            session_id=str(tenant_id) if tenant_id else None,
+            trace_name=f"{request.method} {request.url.path}",
+            metadata={"request_id": str(request_id), "client_host": client_host},
+            tags=[request.method],
+        ):
+            response = await call_next(request)
 
         duration_ms = getattr(request.state, "duration_ms", None)
         duration_display = f"{duration_ms:.2f}ms" if duration_ms is not None else "?ms"

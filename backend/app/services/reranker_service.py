@@ -44,6 +44,7 @@ import math
 import time
 
 from app.core.config import settings
+from app.core.langfuse import observe, update_active_span
 from app.core.logging import get_logger
 from app.exceptions.errors import RerankException
 from app.metrics.metrics_registry import MetricsRegistry
@@ -74,6 +75,7 @@ class RerankerService(BaseReranker):
         self._top_n = top_n if top_n is not None else settings.reranker.top_n
         self._metrics = metrics_registry if metrics_registry is not None else MetricsRegistry()
 
+    @observe(name="cross_encoder_rerank")
     async def rerank(
         self,
         query: str,
@@ -88,6 +90,16 @@ class RerankerService(BaseReranker):
         """
         start = time.monotonic()
         pool = candidates[: self._top_n]
+
+        update_active_span(
+            metadata={
+                "query": query,
+                "input_candidates_count": len(candidates),
+                "pooled_candidates_count": len(pool),
+                "top_k": top_k,
+                "top_n_cap": self._top_n,
+            }
+        )
 
         if not pool:
             return RerankResult(

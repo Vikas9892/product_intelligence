@@ -47,6 +47,7 @@ pi-cicd*
 # --- IDE / editor ---
 .vscode/
 .idea/
+.claude/
 *.swp
 
 # --- OS ---

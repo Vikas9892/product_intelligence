@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from app.core.config import settings
+from app.core.langfuse import observe, record_trace_score, update_active_span
 from app.core.logging import get_logger
 from app.exceptions.errors import EvaluationException, ResourceNotFoundException
 from app.models.benchmark_report import BenchmarkReport
@@ -97,6 +98,7 @@ class RetrievalEvaluator:
         )
         self._model_registry = model_registry if model_registry is not None else ModelRegistry()
 
+    @observe(name="retrieval_benchmark_run")
     async def evaluate(
         self,
         queries: list[EvaluationQuery] | None = None,
@@ -132,6 +134,25 @@ class RetrievalEvaluator:
 
         total_duration = time.monotonic() - start
         failure_count = sum(1 for result in query_results if result.error is not None)
+
+        update_active_span(
+            metadata={
+                "queries_count": len(resolved_queries),
+                "reranking_enabled": reranking_enabled,
+                "failure_count": failure_count,
+                "duration_seconds": total_duration,
+            }
+        )
+
+        if overall_metrics:
+            if 10 in overall_metrics.ndcg:
+                record_trace_score(name="ndcg@10", value=overall_metrics.ndcg[10])
+            record_trace_score(name="mrr", value=overall_metrics.mrr)
+            if 5 in overall_metrics.hit_rate:
+                record_trace_score(name="hit_rate@5", value=overall_metrics.hit_rate[5])
+            if 5 in overall_metrics.precision:
+                record_trace_score(name="precision@5", value=overall_metrics.precision[5])
+
         logger.info(
             "Evaluation run complete: queries=%d, failures=%d, duration=%.4fs",
             len(query_results),

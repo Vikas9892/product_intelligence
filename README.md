@@ -235,25 +235,77 @@ try/except and `asyncio` never surfaces an unretrieved task exception.
 
 ## Architecture
 
-Five services, one private Docker network. Redis and Qdrant are never published to the
-host in the production-like profile.
+The platform is designed around a decoupled, microservice-inspired architecture built on top of five containerized services inside a private Docker bridge network.
 
-```mermaid
-flowchart TB
-    B["Browser"] --> FE["Next.js frontend<br/>same-origin API proxy"]
-    FE --> API["FastAPI<br/>uvicorn"]
-    W["Worker pool<br/>4 concurrent"] --> R
-    API --> R[("Redis<br/>queue · state · analytics")]
-    API --> Q[("Qdrant<br/>512-d + 384-d collections")]
-    W --> Q
-    API -.->|enqueue| R
-    R -.->|dequeue| W
+---
+
+### Overall System Architecture
+
+<p align="center">
+  <img src="docs/images/overall-system-architecture.jpg" alt="Overall System Architecture" width="850"/>
+</p>
+
+The system organizes into five distinct architectural tiers:
+
+1. **Frontend Tier (`Next.js 15` on port `3100`):**
+   Interactive operator console providing dedicated search workspaces, duplicate inspectors, recommendation explorers, pricing estimators, and real-time job status polling. Built with Server Components and a same-origin reverse proxy (`next.config.ts`) that exposes server-measured latency headers (`X-Response-Time-Ms`) and eliminates CORS.
+2. **API Gateway & Router Tier (`FastAPI` on port `8000`):**
+   Exposes 29 typed REST endpoints across nine modular domain routers (`/products`, `/search`, `/recommendations`, `/pricing`, `/duplicates`, `/analytics`, `/enterprise`, `/models`, `/jobs`). Protected by a reverse-ordered middleware stack (TrustedHost → CORS → GZip → SecurityHeaders → RequestID → RequestLogging → Timing).
+3. **Shared Intelligence & Model Layer:**
+   100% local, CPU-optimized ML inference running `CLIP ViT-B/32` (512-d visual embeddings), `BAAI/bge-small-en-v1.5` (384-d semantic text embeddings), and `cross-encoder/ms-marco-MiniLM-L-6-v2` (Stage-2 cross-attention reranking).
+4. **Data & State Tier:**
+   - **Qdrant Vector Database (port `6333`):** Dual cosine collections (`product_images` and `product_text`) with keyword payload indexes (`brand_key`, `category_key`) evaluated directly during HNSW graph traversal.
+   - **Redis Datastore (port `6379`):** The primary **System of Record** holding the FIFO job queue (`RPUSH`/`LPOP`), in-flight tracking (`HASH`), exponential retry delays (`ZSET`), dead-letter storage, daily analytics buckets, sliding-window quotas, and recommendation caches (persisted with AOF `--appendfsync everysec`).
+   - **Persistent File Storage:** Local filesystem (`storage/uploads/` and `storage/processed/`) designed for drop-in S3 + CloudFront migration.
+5. **Mathematical Explainability Layer:**
+   Every intelligence output provides a structured, auditable decision trace with per-component weights and contributions that mathematically close to the final score ($100\%$ arithmetic closure).
+
+---
+
+### Modular Workflow Architectures
+
+<p align="center">
+  <img src="docs/images/modular-workflow-architecture.jpg" alt="Modular Workflow Architecture" width="950"/>
+</p>
+
 ```
-
-**Redis is the system of record, not a cache.** It holds products, job state, the
-dead-letter queue, analytics buckets and tenant data — there is no relational database.
-That inverts the usual "losing a cache is cheap" assumption and is why persistence is
-enabled and backups matter.
+┌───────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   THE 9 CORE SYSTEM WORKFLOWS                                     │
+├──────────────────────────┬────────────────────────────────────────────────────────────────────────┤
+│ Workflow                 │ Architectural Mechanics & Pipeline Steps                               │
+├──────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+│ 1. Upload Ingestion      │ Multi-part upload → SHA-256 checksum → EXIF/sRGB standardization       │
+│                          │ → CLIP (512-d) & BGE (384-d) → Catalog intelligence → Pre-indexing     │
+│                          │ duplicate gate (BLOCK raises 409) → Dual Qdrant upsert → Cache warmup. │
+├──────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+│ 2. Text Search           │ Query text → BGE Small (384-d) → Qdrant `product_text` cosine search   │
+│                          │ → Top-K candidate retrieval → Optional Cross-Encoder reranker.        │
+├──────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+│ 3. Image Search          │ Query image → EXIF/sRGB processing → CLIP ViT-B/32 (512-d)             │
+│                          │ → Qdrant `product_images` cosine search → Ranked visual candidates.    │
+├──────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+│ 4. Hybrid Search         │ Parallel dual retrieval (Image 512-d + Text 384-d) → Late score fusion │
+│                          │ (0.70 Image + 0.30 Text) → Optional Stage-2 Cross-Encoder reranking.   │
+├──────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+│ 5. Recommendations       │ Hybrid retrieval (3× overfetch) → 4-signal scoring (55% Similarity     │
+│                          │ + 20% Attribute + 15% Tag + 10% Quality) → Brand Diversity Round-Robin │
+│                          │ → Background cache warming with 1-hour TTL in Redis.                   │
+├──────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+│ 6. Pricing Intelligence  │ Category-first comparable filter → Similarity floor (≥ 0.50)           │
+│                          │ → Tukey IQR outlier removal ([Q1 - 1.5·IQR, Q3 + 1.5·IQR])             │
+│                          │ → Deterministic Trimmed Mean aggregation → Honest refusal on thin data.│
+├──────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+│ 7. Duplicate Detection   │ 4-signal weighted fusion (35% Image + 25% Text + 20% Metadata          │
+│                          │ + 20% Attributes) → Configurable modes (OFF / WARN / BLOCK at ≥ 0.90). │
+├──────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+│ 8. Catalog Enrichment    │ Border-subtracted subject isolation → HLS color space clustering       │
+│                          │ → Regex taxonomy extraction → Quality score (Completeness + Confidence │
+│                          │ + Consistency) → Canonical facet slugification (`brand_key`, etc.).    │
+├──────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+│ 9. Async Job Lifecycle   │ Enqueue (`HTTP 202`) → Worker dequeue (`BRPOPLPUSH`) → Stage progress  │
+│                          │ checkpoints (Validating → Processing → Completed/Failed) → DLQ retry.  │
+└──────────────────────────┴────────────────────────────────────────────────────────────────────────┘
+```
 
 A full AWS production design — ECS Fargate, S3, ElastiCache, ALB, VPC — is written up as
 five ADRs with a costed analysis in [docs/aws/](docs/aws/). **Design only; nothing is

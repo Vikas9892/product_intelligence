@@ -20,11 +20,28 @@
 
 ---
 
-## 📹 Video walkthrough
+## 📹 Demos & Video Overviews
 
-**▶ [Watch the demo](https://youtu.be/VIphj8Worjw)** — a walkthrough of the running system.
-
-[![Demo walkthrough](https://img.youtube.com/vi/VIphj8Worjw/maxresdefault.jpg)](https://youtu.be/VIphj8Worjw)
+<table>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <h3>⚡ 20-Second Quick Intro</h3>
+      <p align="left">High-speed tour: local CLIP + BGE vector ingestion, hybrid search slider, duplicate block verdicts, and arithmetic decision traces.</p>
+      <a href="docs/images/launch-intro.mp4">
+        <img alt="20-Second Quick Intro" src="docs/images/launch-poster.jpg" width="100%">
+      </a>
+      <p><b>▶ <a href="docs/images/launch-intro.mp4">Watch 20s Intro Video (MP4)</a></b></p>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <h3>🎙️ Full Demo Walkthrough</h3>
+      <p align="left">In-depth video tour of the running system, live frontend console, background worker pool, and architectural verification.</p>
+      <a href="https://youtu.be/VIphj8Worjw">
+        <img alt="Full Demo Walkthrough" src="https://img.youtube.com/vi/VIphj8Worjw/maxresdefault.jpg" width="100%">
+      </a>
+      <p><b>▶ <a href="https://youtu.be/VIphj8Worjw">Watch Full Demo (YouTube)</a></b></p>
+    </td>
+  </tr>
+</table>
 
 If you would rather run it yourself, it is one command — see
 [Try it in one command](#try-it-in-one-command).

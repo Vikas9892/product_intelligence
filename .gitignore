@@ -71,3 +71,6 @@ logs/
 node_modules/
 dist/
 .next/
+
+# --- Launch video generation artifacts ---
+brag-output/

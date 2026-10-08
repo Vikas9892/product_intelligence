@@ -27,10 +27,10 @@
     <td width="50%" align="center" valign="top">
       <h3>⚡ 20-Second Quick Intro</h3>
       <p align="left">High-speed tour: local CLIP + BGE vector ingestion, hybrid search slider, duplicate block verdicts, and arithmetic decision traces.</p>
-      <a href="docs/images/launch-intro.mp4">
+      <a href="https://youtu.be/rDspHznjWDg">
         <img alt="20-Second Quick Intro" src="docs/images/launch-poster.jpg" width="100%">
       </a>
-      <p><b>▶ <a href="docs/images/launch-intro.mp4">Watch 20s Intro Video (MP4)</a></b></p>
+      <p><b>▶ <a href="https://youtu.be/rDspHznjWDg">Watch 20s Intro (YouTube)</a></b></p>
     </td>
     <td width="50%" align="center" valign="top">
       <h3>🎙️ Full Demo Walkthrough</h3>
